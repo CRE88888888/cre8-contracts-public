@@ -20,3 +20,8 @@ tab_width = 4
 bracket_spacing = true
 int_types = "long"
 quote_style = "double"
+
+# Fork endpoints. Values come from the environment only: never put a credential-bearing RPC URL in this file.
+[rpc_endpoints]
+bsc = "${BSC_RPC_URL}"
+bsc_testnet = "${BSC_TESTNET_RPC_URL}"

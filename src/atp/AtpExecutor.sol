@@ -8,6 +8,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 import { UniversalRouterCommands as Cmd } from "./interfaces/IUniversalRouter.sol";
 import { IUniversalRouter } from "./interfaces/IUniversalRouter.sol";
 import { IOracleFloor } from "./interfaces/IOracleFloor.sol";
+import { IPermit2 } from "./interfaces/IPermit2.sol";
 import { AtpRegistry } from "./AtpRegistry.sol";
 
 /// @title AtpExecutor
@@ -31,6 +32,11 @@ contract AtpExecutor is ReentrancyGuard {
     IUniversalRouter public immutable universalRouter;
     /// @notice Oracle floor adapter; see IOracleFloor for the previewSwap/_saleFloor semantics.
     IOracleFloor public immutable oracle;
+    /// @notice Canonical Permit2, pinned per chain. The Universal Router pays every ERC20 leg through it,
+    /// so the input token has to be approved to Permit2 (and Permit2 told which spender may use it) before
+    /// the router runs. Same address on BSC mainnet and testnet, but passed in by the deployer, never
+    /// hard-coded here.
+    IPermit2 public immutable permit2;
     /// @notice Receives the swap fee (admin-settable, registry owner only).
     address public feeRecipient;
 
@@ -84,15 +90,18 @@ contract AtpExecutor is ReentrancyGuard {
         AtpRegistry registry_,
         IUniversalRouter universalRouter_,
         IOracleFloor oracle_,
+        address permit2_,
         address feeRecipient_
     ) {
         if (
             address(registry_).code.length == 0 || address(universalRouter_).code.length == 0
-                || address(oracle_).code.length == 0 || feeRecipient_ == address(0)
+                || address(oracle_).code.length == 0 || permit2_.code.length == 0
+                || feeRecipient_ == address(0)
         ) revert InvalidConfig();
         registry = registry_;
         universalRouter = universalRouter_;
         oracle = oracle_;
+        permit2 = IPermit2(permit2_);
         feeRecipient = feeRecipient_;
     }
 
@@ -214,16 +223,23 @@ contract AtpExecutor is ReentrancyGuard {
         IERC20 tokenOut = IERC20(step.tokenOut);
 
         uint256 inBaseline = tokenIn.balanceOf(address(this));
-        // TODO(permit2): first version uses a plain ERC20 approve from the account to this executor. Move
-        // the account -> executor leg to Permit2 (and drop the router approval below) once accounts sign
-        // Permit2 transfers; until then the account must approve this executor per token.
+        // TODO(permit2): the account -> executor leg is still a plain ERC20 `safeTransferFrom`, so the
+        // account must approve this executor per token. Move that leg to Permit2 (accounts signing a
+        // Permit2 transfer) once the account layer supports it; the router leg below is already Permit2.
         tokenIn.safeTransferFrom(account, address(this), step.amountIn);
 
-        tokenIn.forceApprove(address(universalRouter), step.amountIn);
+        // The Universal Router does not `transferFrom` the caller: its V3 path asks Permit2 to move the
+        // input token, and Permit2 only does so against an allowance granted inside Permit2. Both legs are
+        // needed: ERC20 approve to Permit2, then Permit2 approve for the router with the batch deadline.
+        tokenIn.forceApprove(address(permit2), step.amountIn);
+        permit2.approve(step.tokenIn, address(universalRouter), uint160(step.amountIn), uint48(deadline));
+
         uint256 before = tokenOut.balanceOf(address(this));
         universalRouter.execute(step.commands, step.inputs, deadline);
         gross = tokenOut.balanceOf(address(this)) - before;
-        tokenIn.forceApprove(address(universalRouter), 0);
+        // Permit2's own allowance expires at `deadline`, but the ERC20 allowance to Permit2 does not: it is
+        // an unbounded-lifetime approval, so it is reset to zero here.
+        tokenIn.forceApprove(address(permit2), 0);
 
         // Router may consume less than the pulled amount; never strand it here.
         uint256 residual = tokenIn.balanceOf(address(this)) - inBaseline;

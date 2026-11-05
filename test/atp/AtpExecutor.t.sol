@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import { Test } from "forge-std/Test.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { AtpExecutor } from "../../src/atp/AtpExecutor.sol";
 import { AtpRegistry } from "../../src/atp/AtpRegistry.sol";
 import { IOracleFloor } from "../../src/atp/interfaces/IOracleFloor.sol";
@@ -19,12 +20,110 @@ contract MockOracleFloor is IOracleFloor {
     }
 }
 
-/// @dev Exposes the executor's internal decoders and floor arithmetic so the byte layout can be pinned
-/// directly, without changing the production contract.
+/// @dev Permit2 stub that records every `approve` so the swap path's Permit2 leg can be asserted on the
+/// exact arguments, not just "no revert". Same signature as the real contract; nothing else is needed.
+contract MockPermit2 {
+    struct Approval {
+        address token;
+        address spender;
+        uint160 amount;
+        uint48 expiration;
+    }
+
+    Approval[] internal approvals;
+
+    function approve(address token, address spender, uint160 amount, uint48 expiration) external {
+        approvals.push(Approval({ token: token, spender: spender, amount: amount, expiration: expiration }));
+    }
+
+    function approvalCount() external view returns (uint256) {
+        return approvals.length;
+    }
+
+    function approvalAt(uint256 index) external view returns (Approval memory) {
+        return approvals[index];
+    }
+}
+
+/// @dev Minimal ERC20 with mint, enough for `SafeERC20` (which reads the boolean return value).
+contract MockERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function _transfer(address from, address to, uint256 amount) internal {
+        require(balanceOf[from] >= amount, "balance");
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+
+/// @dev Router stub that records the allowances the executor set up *before* it is called, and mints the
+/// output token back to the executor, so one `_swap` round trip is observable without a fork. It consumes
+/// nothing on purpose: `_swap` must return the untouched `amountIn` residual to the account.
+contract SwapRouterStub is IUniversalRouter {
+    address public executor;
+    address public tokenIn;
+    address public tokenOut;
+    address public permit2;
+    uint256 public amountOut;
+
+    uint256 public calls;
+    uint256 public permit2AllowanceSeen;
+    uint256 public routerAllowanceSeen;
+
+    function configure(
+        address executor_,
+        address tokenIn_,
+        address tokenOut_,
+        address permit2_,
+        uint256 amountOut_
+    ) external {
+        executor = executor_;
+        tokenIn = tokenIn_;
+        tokenOut = tokenOut_;
+        permit2 = permit2_;
+        amountOut = amountOut_;
+    }
+
+    function execute(bytes calldata, bytes[] calldata, uint256) external payable {
+        ++calls;
+        permit2AllowanceSeen = IERC20(tokenIn).allowance(executor, permit2);
+        routerAllowanceSeen = IERC20(tokenIn).allowance(executor, address(this));
+        MockERC20(tokenOut).mint(executor, amountOut);
+    }
+}
+
+/// @dev Exposes the executor's internal decoders, floor arithmetic and the swap path so the byte layout and
+/// the Permit2 leg can be pinned directly, without changing the production contract.
 contract AtpExecutorHarness is AtpExecutor {
-    constructor(AtpRegistry registry_, IUniversalRouter router_, IOracleFloor oracle_, address feeRecipient_)
-        AtpExecutor(registry_, router_, oracle_, feeRecipient_)
-    { }
+    constructor(
+        AtpRegistry registry_,
+        IUniversalRouter router_,
+        IOracleFloor oracle_,
+        address permit2_,
+        address feeRecipient_
+    ) AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_) { }
 
     function checkCommands(bytes calldata commands, bytes[] calldata inputs) external view {
         _checkCommands(commands, inputs);
@@ -36,6 +135,13 @@ contract AtpExecutorHarness is AtpExecutor {
 
     function minGross(uint256 oracleFloor, uint16 feeBps) external pure returns (uint256) {
         return _minGross(oracleFloor, feeBps);
+    }
+
+    function swap(address account, SwapStep calldata step, uint256 deadline)
+        external
+        returns (uint256 gross)
+    {
+        return _swap(account, step, deadline);
     }
 }
 
@@ -58,11 +164,15 @@ contract AtpExecutorTest is Test {
 
     AtpRegistry internal registry;
     AtpExecutorHarness internal executor;
+    MockPermit2 internal permit2;
+    SwapRouterStub internal routerStub;
 
     function setUp() public {
         registry = new AtpRegistry();
+        permit2 = new MockPermit2();
+        routerStub = new SwapRouterStub();
         executor = new AtpExecutorHarness(
-            registry, new MockUniversalRouter(), new MockOracleFloor(), FEE_RECIPIENT
+            registry, routerStub, new MockOracleFloor(), address(permit2), FEE_RECIPIENT
         );
     }
 
@@ -264,13 +374,108 @@ contract AtpExecutorTest is Test {
         MockOracleFloor oracleStub = new MockOracleFloor();
         // Build every stub first: `vm.expectRevert` binds to the very next external call.
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(freshRegistry, IUniversalRouter(address(0)), oracleStub, FEE_RECIPIENT);
+        new AtpExecutorHarness(
+            freshRegistry, IUniversalRouter(address(0)), oracleStub, address(permit2), FEE_RECIPIENT
+        );
+    }
+
+    function test_constructor_rejectsPermit2WithoutCode() public {
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
+        MockOracleFloor oracleStub = new MockOracleFloor();
+        vm.expectRevert(AtpExecutor.InvalidConfig.selector);
+        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(0), FEE_RECIPIENT);
     }
 
     function test_constructor_rejectsZeroFeeRecipient() public {
-        MockUniversalRouter routerStub = new MockUniversalRouter();
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
         MockOracleFloor oracleStub = new MockOracleFloor();
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(registry, routerStub, oracleStub, address(0));
+        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), address(0));
+    }
+
+    // ---- _swap: the Permit2 payment leg ----
+
+    /// @dev The router pays through Permit2, never with a direct `transferFrom` on the executor, so the
+    /// executor must (1) approve the token to Permit2, (2) tell Permit2 the router may spend it for exactly
+    /// `amountIn` until `deadline`, and (3) zero the ERC20 leg afterwards. Permit2's own allowance expires on
+    /// its own, the ERC20 approval does not.
+    function test_swap_paysTheRouterThroughPermit2AndResetsItsAllowance() public {
+        MockERC20 tokenIn = new MockERC20();
+        MockERC20 tokenOut = new MockERC20();
+        uint256 amountIn = 1e18;
+        uint256 amountOut = 0.5e18;
+        uint256 deadline = block.timestamp + 300;
+
+        tokenIn.mint(address(this), amountIn);
+        tokenIn.approve(address(executor), amountIn);
+        routerStub.configure(
+            address(executor), address(tokenIn), address(tokenOut), address(permit2), amountOut
+        );
+
+        uint256 gross =
+            executor.swap(address(this), _step(address(tokenIn), address(tokenOut), amountIn), deadline);
+
+        // The swap itself: output measured as a delta, input untouched by the stub and so fully returned.
+        assertEq(gross, amountOut, "gross is the output delta");
+        assertEq(routerStub.calls(), 1, "router called once");
+        assertEq(tokenOut.balanceOf(address(executor)), amountOut, "output held for the fee split");
+        assertEq(tokenIn.balanceOf(address(this)), amountIn, "residual returned to the account");
+        assertEq(tokenIn.balanceOf(address(executor)), 0, "nothing stranded in the executor");
+
+        // 1) Permit2 was told the router may pull exactly `amountIn` until the batch deadline.
+        assertEq(permit2.approvalCount(), 1, "exactly one Permit2 approval");
+        MockPermit2.Approval memory approval = permit2.approvalAt(0);
+        assertEq(approval.token, address(tokenIn), "Permit2 approval is for the input token");
+        assertEq(approval.spender, address(routerStub), "Permit2 approval names the router");
+        assertEq(uint256(approval.amount), amountIn, "Permit2 allowance equals amountIn");
+        assertEq(uint256(approval.expiration), deadline, "Permit2 allowance expires with the batch");
+
+        // 2) At router time the token -> Permit2 leg was in place and the router itself was never approved.
+        assertEq(routerStub.permit2AllowanceSeen(), amountIn, "token -> Permit2 approved before the swap");
+        assertEq(routerStub.routerAllowanceSeen(), 0, "executor never approves the router directly");
+
+        // 3) The ERC20 leg to Permit2 is back to zero once the swap returns.
+        assertEq(tokenIn.allowance(address(executor), address(permit2)), 0, "token -> Permit2 reset to zero");
+    }
+
+    function testFuzz_swap_grantsPermit2ExactlyAmountIn(uint256 amountIn, uint48 expiration) public {
+        // Permit2 amounts are uint160; anything above that is not representable in its allowance model.
+        amountIn = bound(amountIn, 1, type(uint160).max);
+        uint256 deadline = uint256(expiration);
+
+        MockERC20 tokenIn = new MockERC20();
+        MockERC20 tokenOut = new MockERC20();
+        tokenIn.mint(address(this), amountIn);
+        tokenIn.approve(address(executor), amountIn);
+        routerStub.configure(address(executor), address(tokenIn), address(tokenOut), address(permit2), 1);
+
+        executor.swap(address(this), _step(address(tokenIn), address(tokenOut), amountIn), deadline);
+
+        MockPermit2.Approval memory approval = permit2.approvalAt(0);
+        assertEq(uint256(approval.amount), amountIn, "Permit2 allowance equals amountIn");
+        assertEq(uint256(approval.expiration), deadline, "Permit2 expiration equals deadline");
+        assertEq(tokenIn.allowance(address(executor), address(permit2)), 0, "token -> Permit2 reset to zero");
+    }
+
+    /// @dev Swap payload the executor's own allowlist would accept for this pair (the stub ignores it).
+    function _step(address tokenIn, address tokenOut, uint256 amountIn)
+        internal
+        view
+        returns (AtpExecutor.SwapStep memory step)
+    {
+        step.tokenIn = tokenIn;
+        step.tokenOut = tokenOut;
+        step.amountIn = amountIn;
+        step.amountOutMin = 0;
+        step.commands = hex"00";
+        step.inputs = _one(
+            abi.encode(
+                address(executor),
+                amountIn,
+                uint256(0),
+                abi.encodePacked(tokenIn, uint24(500), tokenOut),
+                true
+            )
+        );
     }
 }
