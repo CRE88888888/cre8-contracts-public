@@ -8,11 +8,15 @@ import { IPancakeV3Pool } from "./interfaces/IPancakeV3Pool.sol";
 
 /// @title PancakeV3TwapOracle
 /// @notice `IOracleFloor` adapter that prices an exact-input swap from one PancakeSwap V3 pool's
-/// time-weighted average tick over a fixed 30-90 minute window.
-/// @dev Price source: `pool.observe([twapWindow, 0])` only. Spot is never quoted; the current `slot0`
-/// price is read for two sanity gates (pool unlocked, spot inside the valid sqrt-price range) and then
-/// discarded, so a single swapped tick cannot move the quote. `minimum` discounts `quoted` by
-/// `maxSlippageBps` and is rounded up, so the executor's floor can never sit below the oracle value.
+/// time-weighted average tick over a fixed 30-90 minute window, floored additionally by the pool's
+/// recent mean so a sale cannot be sandwiched below it.
+/// @dev Price source: `pool.observe([window, 0])` only. Spot is never quoted; the current `slot0` price is
+/// read for sanity gates (pool unlocked, spot inside the valid sqrt-price range) and then discarded, so a
+/// single swapped tick cannot move the quote. `quoted` is the TWAP quote; `minimum` is the max of two
+/// floors, each discounting its own quote by `maxSlippageBps` and rounding up: the TWAP floor over
+/// `twapWindow` and the recent-mean floor over `RECENT_WINDOW` (5 minutes). The executor's floor therefore
+/// sits below neither mean, so a sandwich that only moves the last few minutes still cannot drag `minimum`
+/// under the recent price.
 ///
 /// Decimals: a V3 pool price is raw `token1` per raw `token0`, so `10^(decimalsOut - decimalsIn)` is
 /// already inside the ratio and must NOT be applied again. The quote is computed in raw units with full
@@ -23,14 +27,18 @@ import { IPancakeV3Pool } from "./interfaces/IPancakeV3Pool.sol";
 /// pair. The adapter is stateless per caller (the executor calls it from its own address) and never
 /// reads `msg.sender`.
 ///
-/// TODO(v1.1) sandwich floor for pool-priced sales: this v1 floor is TWAP + `maxSlippageBps` only. When
-/// the route itself is priced by the same pool, a 30-90 minute mean trails spot in a fast market, so a
-/// sale floored only by it can still be sandwiched for the gap. The reference semantics are
-/// `MandateEntryPrice.recentValue` / `MandateScopeSwapAdapter._saleFloor`: floor the sale additionally at
-/// the pool's recent (about 5 minute) mean, discounted by `maxSlippageBps`, and take the max of the two
-/// floors. That needs a second `observe([RECENT_WINDOW, 0])` call with a window much shorter than
-/// `twapWindow`, which the observation cardinality must be able to serve; deferred so v1 keeps one
-/// observation read per step.
+/// Sandwich floor (v1.1): when the route itself is priced by this pool, a 30-90 minute mean trails spot in a
+/// fast market, so a sale floored only by it could be sandwiched for the gap. The reference semantics are
+/// `MandateEntryPrice.recentValue` / `MandateScopeSwapAdapter._saleFloor`: floor the sale additionally at the
+/// pool's recent (5 minute) mean, discounted by `maxSlippageBps`, and take the max of the two floors:
+/// `minimum = max(TWAP floor, recent-mean floor)`. That costs a second `observe([RECENT_WINDOW, 0])` read per
+/// quote, and the pool's observation cardinality must be able to serve both lookbacks; if it cannot, the
+/// second read fails closed with `TwapUnavailable` rather than silently dropping to the TWAP floor alone.
+///
+/// TODO(v1.2) gas/size: `previewSwap` now does two `slot0` + two `observe` reads. Hoist the shared `slot0`
+/// sanity gate out of `_meanSqrtPrice` (one read for both windows) and consider caching the pool's
+/// cardinality per bucket, but only after measuring the real keeper path; the duplication is deliberate for
+/// v1.1 so each window keeps its own fail-closed check.
 contract PancakeV3TwapOracle is IOracleFloor {
     // ---- constants ----
 
@@ -40,6 +48,13 @@ contract PancakeV3TwapOracle is IOracleFloor {
     uint32 public constant MIN_TWAP_WINDOW = 30 minutes;
     /// @notice Longest admitted TWAP window.
     uint32 public constant MAX_TWAP_WINDOW = 90 minutes;
+    /// @notice Lookback of the second, recent-mean window: "the pool's mean over the last 5 minutes".
+    /// @dev This is the sandwich floor. `twapWindow` is 30-90 minutes, so in a fast market its mean trails spot
+    /// and a sale floored only by it can still be sandwiched for the gap; flooring the sale additionally at
+    /// the 5 minute mean (discounted by `maxSlippageBps`) and taking the max of the two closes that gap. The
+    /// window must stay strictly shorter than `twapWindow` (enforced in the constructor) so the two means stay
+    /// distinguishable, and the pool's observation cardinality must be able to serve `observe([300, 0])` too.
+    uint32 public constant RECENT_WINDOW = 5 minutes;
     /// @notice Smallest tick the pool can hold (also the smallest tick this adapter will quote).
     int24 public constant MIN_TICK = -887_272;
     /// @notice Largest tick the pool can hold (also the largest tick this adapter will quote).
@@ -99,6 +114,11 @@ contract PancakeV3TwapOracle is IOracleFloor {
         if (pool_ == address(0) || pool_.code.length == 0) revert InvalidConfig();
         if (tokenA_ == address(0) || tokenB_ == address(0) || tokenA_ == tokenB_) revert InvalidConfig();
         if (twapWindow_ < MIN_TWAP_WINDOW || twapWindow_ > MAX_TWAP_WINDOW) revert InvalidConfig();
+        // The recent-mean window is the sandwich floor, so it must be strictly shorter than the TWAP window:
+        // at equal length the second floor would be a duplicate read, and at a longer one `RECENT_WINDOW`
+        // would stop meaning "recent". Unreachable while `MIN_TWAP_WINDOW` is 30 minutes, kept as a guard on
+        // the relationship itself so a future widening of the TWAP range cannot silently break the floor.
+        if (RECENT_WINDOW >= twapWindow_) revert InvalidConfig();
         // A 0 floor is no floor, and a 10000 bps discount would make `minimum` zero on every swap.
         if (maxSlippageBps_ == 0 || maxSlippageBps_ >= BPS_DENOMINATOR) revert InvalidConfig();
         if (maxOracleAge_ < twapWindow_) revert InvalidConfig();
@@ -126,9 +146,14 @@ contract PancakeV3TwapOracle is IOracleFloor {
     // ---- IOracleFloor ----
 
     /// @inheritdoc IOracleFloor
-    /// @dev Fails closed: zero input, an unsupported pair, an immature pool oracle, a pool outside the
-    /// valid price range, a mean tick outside the valid tick range, or a quote that rounds to zero all
-    /// revert instead of returning a floor of zero.
+    /// @dev Fails closed: zero input, an unsupported pair, an immature pool oracle (either window), a pool
+    /// outside the valid price range, a mean tick outside the valid tick range, or a quote that rounds to zero
+    /// all revert instead of returning a floor of zero.
+    ///
+    /// `quoted` is the TWAP quote. `minimum` is the max of two independently discounted floors, matching
+    /// `MandateScopeSwapAdapter._saleFloor`: the TWAP floor over `twapWindow` and the recent-mean floor over
+    /// `RECENT_WINDOW`. The recent read fails closed exactly like the TWAP read, so a pool whose
+    /// cardinality cannot serve 5 minutes reverts instead of degrading to the TWAP floor alone.
     function previewSwap(address tokenIn, address tokenOut, uint256 amountIn)
         external
         view
@@ -141,22 +166,32 @@ contract PancakeV3TwapOracle is IOracleFloor {
         bool inIsToken0 = tokenIn == token0;
         if (inIsToken0 ? tokenOut != token1 : tokenOut != token0) revert UnsupportedPair();
 
-        uint160 sqrtPriceX96 = _twapSqrtPrice(inIsToken0);
+        // TWAP floor over the configured 30-90 minute window.
+        uint160 sqrtPriceX96 = _meanSqrtPrice(inIsToken0, twapWindow);
         quoted = _quote(amountIn, sqrtPriceX96, inIsToken0);
         if (quoted == 0) revert ZeroQuote();
 
         minimum = Math.mulDiv(quoted, BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR, Math.Rounding.Ceil);
+
+        // Recent-mean floor over the last 5 minutes, discounted by the same slippage budget. Taking the max
+        // means a sale can never be floored below either mean: a sandwich that only moves the last few
+        // minutes lifts the recent floor, and a crash that only moves them leaves the TWAP floor in force.
+        uint160 recentSqrtPrice = _meanSqrtPrice(inIsToken0, RECENT_WINDOW);
+        uint256 recentQuoted = _quote(amountIn, recentSqrtPrice, inIsToken0);
+        uint256 recentFloor =
+            Math.mulDiv(recentQuoted, BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR, Math.Rounding.Ceil);
+        if (recentFloor > minimum) minimum = recentFloor;
+
         if (minimum == 0) revert ZeroQuote();
     }
 
     // ---- price ----
 
-    /// @dev Mean tick over `[twapWindow, 0]` converted to a Q64.96 sqrt price.
+    /// @dev Mean tick over `[window, 0]` converted to a Q64.96 sqrt price.
     /// @param inIsToken0 True when the sold token is `token0`; sets the direction the mean tick is rounded
     /// in, so the rounded mean never lowers the price of `tokenIn` in `tokenOut`.
-    function _twapSqrtPrice(bool inIsToken0) private view returns (uint160 sqrtPriceX96) {
-        uint32 window = twapWindow;
-
+    /// @param window Lookback in seconds, either `twapWindow` or `RECENT_WINDOW`.
+    function _meanSqrtPrice(bool inIsToken0, uint32 window) private view returns (uint160 sqrtPriceX96) {
         // `observe` reverts when the pool cannot look back `window` seconds (immature ring buffer), but
         // check cardinality first so the failure reads as an oracle problem rather than a raw pool revert.
         (uint160 spotSqrtPrice,,, uint16 observationCardinality,,, bool unlocked) = pool.slot0();
