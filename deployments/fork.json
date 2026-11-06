@@ -1,0 +1,10 @@
+{
+  "chainId": 56,
+  "registry": "0x7816e706e97ce0e48d764cbfad8b46d4f1b2fa05",
+  "executor": "0xcb7f52ea865cd6da0f525901a77fca0b33fd7cc5",
+  "oracle": "0x10194fb061e132dad97f4c93a31ec6f46872241e",
+  "pool": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
+  "poolFee": 500,
+  "router": "0x1A0A18AC4BECDDbd6389559687d1A73d8927E416",
+  "permit2": "0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768"
+}
