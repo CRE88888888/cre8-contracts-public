@@ -161,6 +161,8 @@ contract AtpExecutorTest is Test {
     address internal constant PATH_TOKEN_OUT = address(0xB0B);
     address internal constant FEE_RECIPIENT = address(0xFEE);
     address internal constant OTHER = address(0xCAFE);
+    /// @dev Canonical Uniswap Permit2, the address the executor's constructor pins on chain ids 56 and 97.
+    address internal constant CANONICAL_PERMIT2 = 0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768;
 
     AtpRegistry internal registry;
     AtpExecutorHarness internal executor;
@@ -393,6 +395,54 @@ contract AtpExecutorTest is Test {
         new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), address(0));
     }
 
+    // ---- constructor: Permit2 is pinned on the BSC chain ids ----
+
+    /// @dev `permit2` is a real MockPermit2 with code, so the code-length check passes and only the chain-id
+    /// pin can reject it. This is the mis-wiring the pin exists for: a deployed Permit2 that is not the one
+    /// the router pays through.
+    function test_constructor_rejectsNonCanonicalPermit2OnBscMainnet() public {
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
+        MockOracleFloor oracleStub = new MockOracleFloor();
+        vm.chainId(56);
+
+        vm.expectRevert(AtpExecutor.InvalidConfig.selector);
+        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+    }
+
+    function test_constructor_rejectsNonCanonicalPermit2OnBscTestnet() public {
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
+        MockOracleFloor oracleStub = new MockOracleFloor();
+        vm.chainId(97);
+
+        vm.expectRevert(AtpExecutor.InvalidConfig.selector);
+        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+    }
+
+    /// @dev A bare EVM has nothing at the canonical address, so the mock's runtime code is etched there:
+    /// the code-length check then passes and the accepted path is the one the pin is meant to allow.
+    function test_constructor_acceptsCanonicalPermit2OnBsc() public {
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
+        MockOracleFloor oracleStub = new MockOracleFloor();
+        vm.etch(CANONICAL_PERMIT2, address(permit2).code);
+        vm.chainId(56);
+
+        AtpExecutorHarness pinned =
+            new AtpExecutorHarness(registry, routerStub_, oracleStub, CANONICAL_PERMIT2, FEE_RECIPIENT);
+        assertEq(address(pinned.permit2()), CANONICAL_PERMIT2, "canonical Permit2 accepted on BSC");
+    }
+
+    /// @dev Off BSC the pin must not apply: any *contract* passes, which is the pre-existing rule that the
+    /// other chains keep.
+    function test_constructor_acceptsNonCanonicalPermit2OffBsc() public {
+        MockUniversalRouter routerStub_ = new MockUniversalRouter();
+        MockOracleFloor oracleStub = new MockOracleFloor();
+        vm.chainId(1);
+
+        AtpExecutorHarness offBsc =
+            new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+        assertEq(address(offBsc.permit2()), address(permit2), "off BSC only code length is checked");
+    }
+
     // ---- _swap: the Permit2 payment leg ----
 
     /// @dev The router pays through Permit2, never with a direct `transferFrom` on the executor, so the
@@ -455,6 +505,46 @@ contract AtpExecutorTest is Test {
         assertEq(uint256(approval.amount), amountIn, "Permit2 allowance equals amountIn");
         assertEq(uint256(approval.expiration), deadline, "Permit2 expiration equals deadline");
         assertEq(tokenIn.allowance(address(executor), address(permit2)), 0, "token -> Permit2 reset to zero");
+    }
+
+    /// @dev `permit2.approve` takes a uint160, so anything above it would be truncated on the Permit2 leg
+    /// while the ERC20 leg stays the full uint256. The guard must reject the step, and it must be the guard
+    /// that reverts: the token balance and the ERC20 allowance are made large enough for the full amount.
+    function test_swap_revertsWhenAmountInExceedsUint160() public {
+        MockERC20 tokenIn = new MockERC20();
+        MockERC20 tokenOut = new MockERC20();
+        uint256 amountIn = uint256(type(uint160).max) + 1;
+        uint256 deadline = block.timestamp + 300;
+
+        tokenIn.mint(address(this), amountIn);
+        tokenIn.approve(address(executor), amountIn);
+        routerStub.configure(address(executor), address(tokenIn), address(tokenOut), address(permit2), 1);
+
+        vm.expectRevert(AtpExecutor.AmountTooLarge.selector);
+        executor.swap(address(this), _step(address(tokenIn), address(tokenOut), amountIn), deadline);
+
+        assertEq(permit2.approvalCount(), 0, "no Permit2 allowance for an unrepresentable amount");
+        assertEq(routerStub.calls(), 0, "the router was never called");
+    }
+
+    /// @dev The guard is `>`, not `>=`: `type(uint160).max` is the largest amount Permit2 can represent and
+    /// must still swap.
+    function test_swap_acceptsAmountInAtTheUint160Ceiling() public {
+        MockERC20 tokenIn = new MockERC20();
+        MockERC20 tokenOut = new MockERC20();
+        uint256 amountIn = uint256(type(uint160).max);
+        uint256 deadline = block.timestamp + 300;
+
+        tokenIn.mint(address(this), amountIn);
+        tokenIn.approve(address(executor), amountIn);
+        routerStub.configure(address(executor), address(tokenIn), address(tokenOut), address(permit2), 1);
+
+        uint256 gross =
+            executor.swap(address(this), _step(address(tokenIn), address(tokenOut), amountIn), deadline);
+
+        assertEq(gross, 1, "swap at the ceiling goes through");
+        MockPermit2.Approval memory approval = permit2.approvalAt(0);
+        assertEq(uint256(approval.amount), amountIn, "Permit2 allowance equals the uint160 ceiling");
     }
 
     /// @dev Swap payload the executor's own allowlist would accept for this pair (the stub ignores it).

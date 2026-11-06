@@ -25,6 +25,9 @@ contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    /// @dev Canonical Uniswap Permit2, the same address on every chain it is deployed to, BSC mainnet (56)
+    /// and testnet (97) included. Read only by the constructor; see the pin there for why it exists.
+    address internal constant CANONICAL_PERMIT2 = 0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768;
 
     /// @notice Strategy/enrollment/fee record. Also the admin for `feeRecipient`.
     AtpRegistry public immutable registry;
@@ -34,8 +37,8 @@ contract AtpExecutor is ReentrancyGuard {
     IOracleFloor public immutable oracle;
     /// @notice Canonical Permit2, pinned per chain. The Universal Router pays every ERC20 leg through it,
     /// so the input token has to be approved to Permit2 (and Permit2 told which spender may use it) before
-    /// the router runs. Same address on BSC mainnet and testnet, but passed in by the deployer, never
-    /// hard-coded here.
+    /// the router runs. Supplied by the deployer; on BSC mainnet (56) and testnet (97) the constructor
+    /// additionally requires it to equal `CANONICAL_PERMIT2`.
     IPermit2 public immutable permit2;
     /// @notice Receives the swap fee (admin-settable, registry owner only).
     address public feeRecipient;
@@ -77,6 +80,8 @@ contract AtpExecutor is ReentrancyGuard {
     error Paused();
     error DeadlineExpired();
     error ZeroAmount();
+    /// @dev `amountIn` does not fit Permit2's uint160 allowance model, so the Permit2 leg would truncate it.
+    error AmountTooLarge();
     error SameToken();
     error AssetNotAllowed();
     error BadCommands();
@@ -98,6 +103,20 @@ contract AtpExecutor is ReentrancyGuard {
                 || address(oracle_).code.length == 0 || permit2_.code.length == 0
                 || feeRecipient_ == address(0)
         ) revert InvalidConfig();
+
+        // v1 hardening: on the chains this protocol actually serves, pin Permit2 to the canonical Uniswap
+        // deployment. The code-length check above accepts any contract, so a mis-wired `permit2_` on BSC
+        // would pass it while every input token got approved to an address the router never pays through -
+        // or to a contract an attacker controls, which could pull the approved amount once the ERC20 leg is
+        // granted. Pinning makes that deployment impossible instead of merely detectable after the fact.
+        // The other chains keep the code-length check alone, because the canonical deployment is a per-chain
+        // fact this contract should not have to know. This is a v1 guard: once more chains are supported,
+        // move the per-chain pin into the deploy script so this constructor stays chain-agnostic.
+        uint256 chainId = uint256(block.chainid);
+        if (chainId == 56 || chainId == 97) {
+            if (permit2_ != CANONICAL_PERMIT2) revert InvalidConfig();
+        }
+
         registry = registry_;
         universalRouter = universalRouter_;
         oracle = oracle_;
@@ -228,6 +247,14 @@ contract AtpExecutor is ReentrancyGuard {
         // Permit2 transfer) once the account layer supports it; the router leg below is already Permit2.
         tokenIn.safeTransferFrom(account, address(this), step.amountIn);
 
+        // Permit2's allowance model is uint160: `permit2.approve` takes a uint160 amount, so the explicit
+        // `uint160(step.amountIn)` cast below would silently keep only the low 160 bits of a larger value.
+        // The router would then be allowed to pull far less than the executor approved to Permit2 (the
+        // ERC20 leg is the full uint256), and the swap would fail inside Permit2 with an opaque allowance
+        // error instead of failing here. Every real token supply is orders of magnitude below 2**160 units,
+        // so this only rejects unrepresentable input: reject it, never truncate it.
+        if (step.amountIn > type(uint160).max) revert AmountTooLarge();
+
         // The Universal Router does not `transferFrom` the caller: its V3 path asks Permit2 to move the
         // input token, and Permit2 only does so against an allowance granted inside Permit2. Both legs are
         // needed: ERC20 approve to Permit2, then Permit2 approve for the router with the batch deadline.
@@ -239,6 +266,13 @@ contract AtpExecutor is ReentrancyGuard {
         gross = tokenOut.balanceOf(address(this)) - before;
         // Permit2's own allowance expires at `deadline`, but the ERC20 allowance to Permit2 does not: it is
         // an unbounded-lifetime approval, so it is reset to zero here.
+        //
+        // Deliberate approve churn: a batch that swaps the same input token twice pays
+        // approve -> swap -> approve(0) twice, i.e. two extra ERC20 approvals and the gas of two extra
+        // non-zero allowance writes. Batching the approvals and zeroing each token once after the whole
+        // batch would be cheaper, but that keeps every input token approved to Permit2 for the entire
+        // batch. The cost is deliberately paid to keep the authorization window as short as possible:
+        // security first, gas second. The call sequence is intentionally unchanged.
         tokenIn.forceApprove(address(permit2), 0);
 
         // Router may consume less than the pulled amount; never strand it here.
