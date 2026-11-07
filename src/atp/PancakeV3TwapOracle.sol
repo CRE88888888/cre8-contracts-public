@@ -162,8 +162,12 @@ contract PancakeV3TwapOracle is IOracleFloor {
         if (amountIn == 0) revert ZeroAmount();
         if (tokenIn == tokenOut) revert UnsupportedPair();
 
-        // `tokenIn` must be one of the two pool tokens, and `tokenOut` must be the other.
+        // `tokenIn` must be one of the two pool tokens, and `tokenOut` must be the other. Both sides are
+        // checked: a `tokenIn` outside the pair leaves `inIsToken0` false, which on its own would accept any
+        // `tokenOut == token0` and quote that unrelated asset off the token1 leg.
         bool inIsToken0 = tokenIn == token0;
+        bool inIsToken1 = tokenIn == token1;
+        if (!inIsToken0 && !inIsToken1) revert UnsupportedPair();
         if (inIsToken0 ? tokenOut != token1 : tokenOut != token0) revert UnsupportedPair();
 
         // TWAP floor over the configured 30-90 minute window.

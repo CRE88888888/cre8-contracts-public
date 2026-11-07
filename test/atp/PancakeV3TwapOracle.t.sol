@@ -343,6 +343,30 @@ contract PancakeV3TwapOracleTest is Test {
         oracle.previewSwap(address(token0), address(stray), 1e18);
     }
 
+    /// @dev The regression this check exists for. A `tokenIn` outside the pinned pair used to be accepted
+    /// whenever `tokenOut == token0`: the direction flag simply stayed false and nothing verified that
+    /// `tokenIn` was on the other side. `previewSwap(stray, token0)` then quoted the stray asset off the
+    /// pool's `token1` leg - a confidently wrong price rather than a revert. All four stray combinations are
+    /// closed, in both the sold and the received position.
+    function test_revertsWhenTokenInIsOutsideThePinnedPair() public {
+        pool.setMeanTick(0, WINDOW);
+        MockToken stray = new MockToken(18);
+
+        // Sold leg outside the pair: the case the single-sided check let through.
+        vm.expectRevert(PancakeV3TwapOracle.UnsupportedPair.selector);
+        oracle.previewSwap(address(stray), address(token0), 1e18);
+
+        vm.expectRevert(PancakeV3TwapOracle.UnsupportedPair.selector);
+        oracle.previewSwap(address(stray), address(token1), 1e18);
+
+        // Received leg outside the pair: unchanged, kept here so all four combinations are pinned together.
+        vm.expectRevert(PancakeV3TwapOracle.UnsupportedPair.selector);
+        oracle.previewSwap(address(token0), address(stray), 1e18);
+
+        vm.expectRevert(PancakeV3TwapOracle.UnsupportedPair.selector);
+        oracle.previewSwap(address(token1), address(stray), 1e18);
+    }
+
     function test_revertsWhenObserveReverts() public {
         pool.setMeanTick(0, WINDOW);
         pool.setObserveReverts(true);

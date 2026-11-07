@@ -15,6 +15,6 @@ interface IPermit2 {
     /// @param token ERC20 the owner (the caller, here: the executor) has approved to Permit2.
     /// @param spender Address allowed to pull `token` through Permit2 (here: the Universal Router).
     /// @param amount Maximum amount Permit2 may move; `type(uint160).max` is unbounded in Permit2's model.
-    /// @param expiration Unix timestamp after which the allowance is dead; Permit2 caps it at 30 days.
+    /// @param expiration Unix timestamp after which the allowance is dead; the caller chooses the horizon (this repo caps it at 30 days in the backend's MAX_DEADLINE_SECONDS).
     function approve(address token, address spender, uint160 amount, uint48 expiration) external;
 }
