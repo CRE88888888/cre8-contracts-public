@@ -1,0 +1,42 @@
+name: CI
+
+# 只在「會改變產物」的事件上跑：
+#   pull_request        → 別人的 PR 也要驗
+#   push to main        → 部署前的最後一道
+#   workflow_dispatch   → 手動重跑
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新 push 會取消舊的執行 —— private repo 每月只有 2000 分鐘，不排隊。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: forge build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # lib/（OpenZeppelin、forge-std）是直接 commit 進來的，不是 submodule，
+      # 所以不需要 `submodules: recursive`。
+      - uses: actions/checkout@v5
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.3   # 與本機驗證的 forge 一致；升版先在本機跑過再改這裡
+
+      - name: Build
+        run: forge build
+
+      # 用 foundry.toml 的 [profile.ci]（fuzz 2000 runs）。
+      # 不設 BSC_RPC_URL：fork 測試（test/atp/fork）會 vm.skip，回報 skipped 而不是 passed，
+      # CI 因此不需要任何 secret，也不會打外部 RPC。
+      - name: Test
+        env:
+          FOUNDRY_PROFILE: ci
+        run: forge test
