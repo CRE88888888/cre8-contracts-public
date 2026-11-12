@@ -5,12 +5,14 @@
 合約上線後，平台有兩種「鑰匙」：
 
 - **Safe**（多簽錢包，至少 2 個人一起簽才能動）：最高權限。可以換 operator、暫停任何帳戶、一次暫停全部交易、改手續費、換價格來源、把整個管理權交給另一個 Safe。
-- **operator**（後端伺服器上的一把私鑰）：只能做日常的兩件事：幫使用者「加入策略」(enroll) 和「暫停／恢復」某個帳戶。動不到錢、手續費和管理權。
+- **operator**（後端伺服器上的一把私鑰）：只能做日常的兩件事：幫新帳戶「第一次加入策略」(enroll)，以及「暫停／恢復」某個帳戶（只能恢復它自己暫停的）。動不到錢、手續費、管理權，也不能把已經加入的帳戶換到別的策略或版本。
+
+使用者的帳戶本人（用自己錢包簽的交易）也能暫停、恢復自己，換策略或換版本只能由帳戶本人做。
 
 出事時要記住三件事：
 
-1. **要暫停某個帳戶，先撤掉 operator，再暫停。** operator 可以解除暫停，也可以用「重新加入策略」把暫停清掉。如果懷疑 operator 的私鑰外洩，先暫停的話，對方可以馬上解除。
-2. **使用者自己重新加入策略，也會清掉暫停。** Safe 的暫停只能擋住平台這一側，擋不住帳戶本人。
+1. **Safe 暫停的帳戶，operator 解除不了。** 暫停會記下是誰暫停的（Safe、operator、帳戶本人）。operator 只能解除自己暫停的；Safe 可以解除自己和 operator 的；帳戶本人可以解除全部。懷疑 operator 私鑰外洩時，仍然建議先撤掉 operator（它還能幫新帳戶第一次加入策略）。
+2. **使用者自己恢復或重新加入策略，會清掉所有暫停。** 帳戶是使用者自己的，Safe 的暫停只能擋住平台這一側，擋不住帳戶本人；反過來，使用者自己暫停的，Safe 也解除不了。
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 
 以下四個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
@@ -37,6 +39,20 @@ scripts/drill-ops-fork.sh
 | 部署者 | anvil #5 | 部署者，交接後沒有任何權限 |
 | 帳戶 | `0x…A77ACC01`（fork 上放一段 code） | 使用者的 smart account |
 
+## 暫停的三個來源（A10-2）
+
+registry 用 `pauseFlags(帳戶)` 記下是誰暫停的，三個 bit 可以同時存在。只要有任何一個 bit，帳戶就是暫停（`enrollments(帳戶).paused` = true，`executeRebalance` revert `Paused()`）。
+
+| 誰呼叫 `setPaused(帳戶, …)` | `true`（暫停） | `false`（恢復） |
+| --- | --- | --- |
+| 帳戶本人 | 設 4 | **清掉全部** |
+| Safe（owner） | 設 1 | 清掉 1 和 2，不動 4 |
+| operator | 設 2 | 只清 2 |
+
+- 帳戶本人重新 `enroll`（換策略或換版本）也會清掉全部。
+- operator 只能幫**還沒加入**的帳戶做第一次 `enroll`；對已加入的帳戶 revert `AlreadyEnrolled(address)`。它不能換別人的策略，也不能用重新 enroll 清掉暫停。
+- 恢復時如果還剩別人的 bit，交易照樣成功，但帳戶仍然是暫停。結果看 `pauseFlags` 或 `PauseFlagsSet` event。
+
 ## 情境 1：緊急暫停單一帳戶
 
 **什麼時候用：** 某個帳戶的再平衡行為異常，或懷疑 operator 私鑰外洩。
@@ -48,12 +64,18 @@ scripts/drill-ops-fork.sh
 | 1-3 | （舊 operator 嘗試） | `setPaused(帳戶, false)` | revert `Unauthorized()` |
 | 1-4 | （舊 operator 嘗試） | `enroll(帳戶, id)` | revert `Unauthorized()` |
 | 1-5 | （帳戶嘗試） | executor `executeRebalance(帳戶, …)` | revert `Paused()` |
+| 1-6 | 帳戶本人 | `enroll(帳戶, id)` | 清掉所有暫停，`paused` = false |
+| 1-7 | 帳戶本人 | `setPaused(帳戶, true)` | `pauseFlags` = 4 |
+| 1-8 | Safe | `setPaused(帳戶, true)` | `pauseFlags` = 5 |
+| 1-9 | Safe | `setPaused(帳戶, false)` | `pauseFlags` = 4，**仍然暫停**（Safe 解除不了帳戶本人的） |
+| 1-10 | 帳戶本人 | `setPaused(帳戶, false)` | `pauseFlags` = 0 |
+| 1-11 | Safe | `setPaused(帳戶, true)` | `pauseFlags` = 1（接著演情境 2） |
 
-**順序不能反：** operator 可以 `setPaused(帳戶, false)` 解除暫停，`enroll` 也會把 `paused` 重設成 false。若先暫停、後撤 operator，兩筆 Safe 交易之間外洩的 operator 可以立刻解除暫停。先撤 operator 的代價是：在換上新 operator（情境 2）之前，後端無法幫任何人 enroll。
+**順序：** A10-2 之後，operator 已經解除不了 Safe 設的暫停，也不能重新 enroll 已加入的帳戶，所以「先撤 operator 再暫停」不再是擋住暫停被解除的必要條件。但懷疑 operator 外洩時仍然建議先撤：它還能幫新帳戶第一次 enroll，也還能暫停帳戶（擾亂服務）。先撤 operator 的代價是：在換上新 operator（情境 2）之前，後端無法幫任何人 enroll。
 
-**注意：帳戶本人重新 `enroll` 會清掉暫停**（1-6）。`enroll` 允許 `msg.sender == account`，每次都寫入 `paused: false`。所以 Safe 的暫停只能擋住平台這一側（operator、後端），擋不住使用者自己從 smart account 重新加入策略。演練在 1-6 驗證了這個行為，1-7 由 Safe 再暫停一次。
+**注意：帳戶本人可以解除任何暫停**（1-6 重新 enroll、1-10 恢復）。帳戶是使用者自己的，Safe 的暫停只擋得住平台這一側（operator、後端），擋不住使用者自己從 smart account 恢復。反過來，使用者自己暫停的，Safe 也解除不了（1-9）。
 
-**恢復：** 換上新 operator 後由 operator 或 Safe `setPaused(帳戶, false)`（見 2-5、2-6）。
+**恢復：** Safe `setPaused(帳戶, false)`，會一起清掉 operator 設的暫停（見 2-9、2-10）。
 
 ## 情境 2：撤銷並更換 operator（relayer 私鑰外洩）
 
@@ -62,11 +84,15 @@ scripts/drill-ops-fork.sh
 | 2-1 | Safe | registry `setOperator(新 operator)` | `operator()` = 新 operator |
 | 2-2 | （舊 operator 嘗試） | `enroll(其他帳戶, id)` | revert `Unauthorized()` |
 | 2-3 | （舊 operator 嘗試） | `setPaused(帳戶, false)` | revert `Unauthorized()` |
-| 2-4 | 新 operator | `enroll(其他帳戶, id)` | `isEnrolled` = true |
-| 2-5 | 新 operator | `setPaused(帳戶, false)` | `paused` = false |
-| 2-6 | 帳戶 | `executeRebalance(帳戶, [], …)` | 不再 revert |
+| 2-4 | 新 operator | `enroll(其他帳戶, id)`（第一次加入） | `isEnrolled` = true |
+| 2-5 | 新 operator | `setPaused(帳戶, false)` | `pauseFlags` 仍是 1：**解除不了 Safe 的暫停** |
+| 2-6 | （新 operator 嘗試） | `enroll(帳戶, id)`（帳戶已加入） | revert `AlreadyEnrolled(address)` |
+| 2-7 | 新 operator | `setPaused(帳戶, true)` | `pauseFlags` = 3 |
+| 2-8 | 新 operator | `setPaused(帳戶, false)` | `pauseFlags` = 1（只清自己的） |
+| 2-9 | Safe | `setPaused(帳戶, false)` | `paused` = false |
+| 2-10 | 帳戶 | `executeRebalance(帳戶, [], …)` | 不再 revert |
 
-`setOperator` 是直接替換，不需要新 operator 接受。合約裡同時只有一個 operator，換上新的那一刻舊的就失效。後端要同時換成新私鑰（backend 的 `OPERATOR_PRIVATE_KEY`），否則 enroll 會一直失敗。
+`setOperator` 是直接替換，不需要新 operator 接受。合約裡同時只有一個 operator，換上新的那一刻舊的就失效。後端要同時換成新私鑰（backend 的 `OPERATOR_PRIVATE_KEY`），否則 enroll 會一直失敗。舊 operator 生前設的暫停（bit 2）會留著，只有 Safe 或帳戶本人能清掉。
 
 ## 情境 3：Safe 交接（換 Safe，或換簽署人）
 
@@ -119,11 +145,11 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 
 **注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
 
-## 演練輸出（2026-11-13，fork block 133197019，28 秒）
+## 演練輸出（2026-11-13，fork block 133201204，32 秒）
 
 ```
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0xA5b01c26BaB3c4194d45C3cd6Aa8fB23f3B7Fef5（2-of-3：#1 #2 #3）
+  ✓ Safe A 0xa287eaC801D8Af86c610Bc99552E255C6A1cbd47（2-of-3：#1 #2 #3）
   ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xcd8a3ae15dff0fc218473ca58d00f4b49b6414a9
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
@@ -131,26 +157,36 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 帳戶已 enroll、未暫停
   ✓ 帳戶可以呼叫 executeRebalance（空步驟）
 
-== 情境 1：緊急暫停單一帳戶（順序：先撤 operator，再暫停）
+== 情境 1：緊急暫停單一帳戶（建議順序：先撤 operator，再暫停）
   ✓ 1-1 Safe A setOperator(0) → operator = 0
   ✓ 1-2 Safe A setPaused(帳戶, true) → paused = true
   ✓ 1-3 舊 operator 解除暫停 → revert Unauthorized()
-  ✓ 1-4 舊 operator 重新 enroll（會清掉暫停） → revert Unauthorized()
+  ✓ 1-4 舊 operator 重新 enroll → revert Unauthorized()
   ✓ 1-5 帳戶 executeRebalance → revert Paused()
   -- 注意：帳戶本人重新 enroll 會清掉暫停
   ✓ 1-6 帳戶自己 enroll → paused = false（Safe 的暫停被帳戶本人解除）
-  ✓ 1-7 Safe A 再暫停一次 → paused = true
+  -- 帳戶本人的暫停：Safe 解除不了，只有帳戶本人能解除
+  ✓ 1-7 帳戶自己暫停 → pauseFlags = 4
+  ✓ 1-8 Safe A 也暫停 → pauseFlags = 5
+  ✓ 1-9 Safe A 解除 → 只清自己的，仍被帳戶本人暫停（pauseFlags = 4）
+  ✓     paused = true
+  ✓ 1-10 帳戶自己解除 → pauseFlags = 0
+  ✓ 1-11 Safe A 再暫停一次 → pauseFlags = 1
 
 == 情境 2：撤銷並更換 operator（OP1 私鑰外洩）
   ✓ 2-1 Safe A setOperator(OP2) → operator = OP2
   ✓ 2-2 舊 operator enroll → revert Unauthorized()
   ✓ 2-3 舊 operator setPaused → revert Unauthorized()
   ✓ 2-4 新 operator enroll 另一個帳戶
-  ✓ 2-5 新 operator 解除帳戶暫停 → paused = false
-  ✓ 2-6 帳戶恢復，executeRebalance 不再 revert
+  ✓ 2-5 新 operator 解除 → 解除不了 Safe 的暫停（pauseFlags = 1）
+  ✓ 2-6 新 operator 重新 enroll 已 enroll 的帳戶 → revert AlreadyEnrolled(address)
+  ✓ 2-7 新 operator 自己暫停 → pauseFlags = 3
+  ✓ 2-8 新 operator 解除自己的 → pauseFlags = 1
+  ✓ 2-9 Safe A 解除 → paused = false
+  ✓ 2-10 帳戶恢復，executeRebalance 不再 revert
 
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0x11574a86dfE775B6921d86b855c65103E3fEb3D8（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x16EEF144c5A83f35E57A7e1aFEE8245C38f41771（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -182,7 +218,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 == 情境 4 備案：逐資產拔價格來源（只停單一資產）
   ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
   ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152360556379834836
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152421509744629611
 
 演練全部通過。
 ```

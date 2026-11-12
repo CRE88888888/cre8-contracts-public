@@ -116,6 +116,15 @@ cast send -q $REG "setPaused(address,bool)" $U true --unlocked --from "$OPERATOR
 expect_revert "部署者 enroll"            $REG "enroll(address,uint256)" $S3 1 --unlocked --from "$DEPLOYER"
 expect_revert "部署者 setPaused（解除）" $REG "setPaused(address,bool)" $U false --unlocked --from "$DEPLOYER"
 expect_revert "Safe（owner）enroll" $REG "enroll(address,uint256)" $S2 1 --unlocked --from "$SAFE"
+# A10-2：operator 只能做第一次 enroll，也只能解除自己設的暫停
+expect_revert "operator 重新 enroll 已 enroll 的帳戶" $REG "enroll(address,uint256)" $U 1 --unlocked --from "$OPERATOR"
+flags() { cast call $REG 'pauseFlags(address)(uint8)' "$1"; }
+[ "$(flags $U)" = "2" ] && ok "pauseFlags = 2（operator 設的）" || fail "pauseFlags $(flags $U)"
+cast send -q $REG "setPaused(address,bool)" $U true --unlocked --from "$SAFE" >/dev/null
+cast send -q $REG "setPaused(address,bool)" $U false --unlocked --from "$OPERATOR" >/dev/null
+[ "$(flags $U)" = "1" ] && ok "Safe 也暫停後，operator 解除 → 只清自己的，仍被 Safe 暫停（pauseFlags = 1）" || fail "pauseFlags $(flags $U)"
+cast send -q $REG "setPaused(address,bool)" $U false --unlocked --from "$SAFE" >/dev/null
+[ "$(flags $U)" = "0" ] && ok "Safe 解除 → pauseFlags = 0" || fail "pauseFlags $(flags $U)"
 
 echo "== Safe 的 admin 權限"
 cast send -q $EX "setFeeRecipient(address)" "$SAFE" --unlocked --from "$SAFE" >/dev/null && ok "Safe setFeeRecipient"

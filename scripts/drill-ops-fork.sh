@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 在 BSC 主網 fork 上演一次合約側的營運動作（ROADMAP A6）：
-#   1. 緊急暫停單一帳戶（先撤 operator，再暫停）
+#   1. 緊急暫停單一帳戶，與三種暫停來源（Safe、operator、帳戶本人）
 #   2. 撤銷並更換 operator（relayer 私鑰外洩）
 #   3. Safe 交接（換 Safe／換簽署人）
 #   4. 全域暫停（Safe 一筆停全部、一筆恢復）；備案：逐資產 clearOracle
@@ -56,6 +56,7 @@ expect_err() {
   if grep -qiE "${sel#0x}|${err%%(*}" <<<"$out"; then ok "$label → revert $err"; else fail "$label revert 原因不是 $err：$out"; fi
 }
 eq() { [ "$(tr '[:upper:]' '[:lower:]' <<<"$2")" = "$(tr '[:upper:]' '[:lower:]' <<<"$3")" ] && ok "$1" || fail "$1：得到 $2，預期 $3"; }
+flags_of() { cast call $REG 'pauseFlags(address)(uint8)' "$1"; }   # 1 = Safe、2 = operator、4 = 帳戶本人
 paused_of() { cast call $REG "enrollments(address)((uint256,uint16,bool))" "$1" | tr -d '()' | awk -F', ' '{print $3}'; }
 rebalance_noop() { cast call $EX "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" \
   "$ACCOUNT" "[]" 99999999999 --from "$ACCOUNT" >/dev/null 2>&1; }
@@ -100,20 +101,30 @@ eq "帳戶已 enroll、未暫停" "$(paused_of $ACCOUNT)" "false"
 rebalance_noop && ok "帳戶可以呼叫 executeRebalance（空步驟）" || fail "未暫停時 executeRebalance 不該 revert"
 
 echo
-echo "== 情境 1：緊急暫停單一帳戶（順序：先撤 operator，再暫停）"
+echo "== 情境 1：緊急暫停單一帳戶（建議順序：先撤 operator，再暫停）"
 send "$SAFE_A" $REG "setOperator(address)" $ZERO
 eq "1-1 Safe A setOperator(0) → operator = 0" "$(cast call $REG 'operator()(address)')" "$ZERO"
 send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT true
 eq "1-2 Safe A setPaused(帳戶, true) → paused = true" "$(paused_of $ACCOUNT)" "true"
 expect_err "1-3 舊 operator 解除暫停" "Unauthorized()" $OP1 $REG "setPaused(address,bool)" $ACCOUNT false
-expect_err "1-4 舊 operator 重新 enroll（會清掉暫停）" "Unauthorized()" $OP1 $REG "enroll(address,uint256)" $ACCOUNT 1
+expect_err "1-4 舊 operator 重新 enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256)" $ACCOUNT 1
 expect_err "1-5 帳戶 executeRebalance" "Paused()" $ACCOUNT $EX \
   "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" $ACCOUNT "[]" 99999999999
 echo "  -- 注意：帳戶本人重新 enroll 會清掉暫停"
 send $ACCOUNT $REG "enroll(address,uint256)" $ACCOUNT 1
 eq "1-6 帳戶自己 enroll → paused = false（Safe 的暫停被帳戶本人解除）" "$(paused_of $ACCOUNT)" "false"
+echo "  -- 帳戶本人的暫停：Safe 解除不了，只有帳戶本人能解除"
+send $ACCOUNT $REG "setPaused(address,bool)" $ACCOUNT true
+eq "1-7 帳戶自己暫停 → pauseFlags = 4" "$(flags_of $ACCOUNT)" "4"
 send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT true
-eq "1-7 Safe A 再暫停一次 → paused = true" "$(paused_of $ACCOUNT)" "true"
+eq "1-8 Safe A 也暫停 → pauseFlags = 5" "$(flags_of $ACCOUNT)" "5"
+send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT false
+eq "1-9 Safe A 解除 → 只清自己的，仍被帳戶本人暫停（pauseFlags = 4）" "$(flags_of $ACCOUNT)" "4"
+eq "    paused = true" "$(paused_of $ACCOUNT)" "true"
+send $ACCOUNT $REG "setPaused(address,bool)" $ACCOUNT false
+eq "1-10 帳戶自己解除 → pauseFlags = 0" "$(flags_of $ACCOUNT)" "0"
+send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT true
+eq "1-11 Safe A 再暫停一次 → pauseFlags = 1" "$(flags_of $ACCOUNT)" "1"
 
 echo
 echo "== 情境 2：撤銷並更換 operator（OP1 私鑰外洩）"
@@ -124,8 +135,15 @@ expect_err "2-3 舊 operator setPaused" "Unauthorized()" $OP1 $REG "setPaused(ad
 send $OP2 $REG "enroll(address,uint256)" $USER2 1
 eq "2-4 新 operator enroll 另一個帳戶" "$(cast call $REG 'isEnrolled(address)(bool)' $USER2)" "true"
 send $OP2 $REG "setPaused(address,bool)" $ACCOUNT false
-eq "2-5 新 operator 解除帳戶暫停 → paused = false" "$(paused_of $ACCOUNT)" "false"
-rebalance_noop && ok "2-6 帳戶恢復，executeRebalance 不再 revert" || fail "解除暫停後 executeRebalance 仍 revert"
+eq "2-5 新 operator 解除 → 解除不了 Safe 的暫停（pauseFlags = 1）" "$(flags_of $ACCOUNT)" "1"
+expect_err "2-6 新 operator 重新 enroll 已 enroll 的帳戶" "AlreadyEnrolled(address)" $OP2 $REG "enroll(address,uint256)" $ACCOUNT 1
+send $OP2 $REG "setPaused(address,bool)" $ACCOUNT true
+eq "2-7 新 operator 自己暫停 → pauseFlags = 3" "$(flags_of $ACCOUNT)" "3"
+send $OP2 $REG "setPaused(address,bool)" $ACCOUNT false
+eq "2-8 新 operator 解除自己的 → pauseFlags = 1" "$(flags_of $ACCOUNT)" "1"
+send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT false
+eq "2-9 Safe A 解除 → paused = false" "$(paused_of $ACCOUNT)" "false"
+rebalance_noop && ok "2-10 帳戶恢復，executeRebalance 不再 revert" || fail "解除暫停後 executeRebalance 仍 revert"
 
 echo
 echo "== 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）"

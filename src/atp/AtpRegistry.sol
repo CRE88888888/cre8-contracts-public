@@ -9,8 +9,10 @@ pragma solidity ^0.8.26;
 /// publishing the next version, and existing enrollments keep the version they pinned until they re-enroll.
 /// @dev Roles: `owner` (a Safe on mainnet) holds every admin power and hands it over in two steps
 /// (`transferOwnership` → `acceptOwnership`). `operator` is the backend relayer key, set and revoked by the
-/// owner: it may only `enroll` accounts and pause/resume them, so a leaked relayer key cannot touch fees,
-/// strategies' versions or ownership. `enroll` still has no two-phase user signature - see
+/// owner: it may only make an account's first enrollment and pause/resume what it paused itself, so a leaked
+/// relayer key cannot touch fees, ownership, an enrolled account's strategy or version, or a pause set by the
+/// owner or the account (A10-2). Changing an enrolled account's strategy or version is the account's own call
+/// (its owner's sudo UserOp). The first enrollment still has no two-phase user signature - see
 /// docs/atp-pivot-executor-spec.zh-TW.md §6.
 contract AtpRegistry {
     // ---- types ----
@@ -47,6 +49,11 @@ contract AtpRegistry {
     /// @notice Upper bound on a version's asset list. `isAssetAllowed` is read twice per swap step on-chain,
     /// so the list is kept short enough that the linear scan stays cheap.
     uint256 public constant MAX_VERSION_ASSETS = 16;
+    /// @notice `pauseFlags` bits: who holds an account paused. Each source clears only what it may (see
+    /// `setPaused`); the account is paused while any bit is set.
+    uint8 public constant PAUSED_BY_OWNER = 1;
+    uint8 public constant PAUSED_BY_OPERATOR = 2;
+    uint8 public constant PAUSED_BY_ACCOUNT = 4;
 
     // ---- admin / fee ----
     /// @notice Admin (a Safe on mainnet). Also the only address that may move `feeRecipient`.
@@ -72,6 +79,10 @@ contract AtpRegistry {
     // ---- enrollment ----
     mapping(address => Enrollment) internal _enrollments;
     mapping(address => bool) public isEnrolled;
+    /// @notice OR of the `PAUSED_BY_*` bits holding `account` paused. `enrollments(account).paused` always
+    /// equals `pauseFlags[account] != 0`; it is kept as a separate field so the executor and the backend read
+    /// the same `Enrollment` layout as before.
+    mapping(address => uint8) public pauseFlags;
 
     // ---- events ----
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -83,6 +94,7 @@ contract AtpRegistry {
     event VersionPublished(uint256 indexed id, uint16 version, bytes32 scheduleHash);
     event Enrolled(address indexed account, uint256 id, uint16 version);
     event EnrollmentPausedSet(address indexed account, bool paused);
+    event PauseFlagsSet(address indexed account, uint8 flags);
 
     // ---- errors ----
     error NotOwner();
@@ -99,6 +111,9 @@ contract AtpRegistry {
     error WeightsMismatch(uint256 sum);
     error Unauthorized();
     error VersionNotPublished(uint256 id);
+    /// @dev The operator may only make an account's first enrollment; changing an enrolled account's
+    /// strategy or version is the account's own call.
+    error AlreadyEnrolled(address account);
 
     constructor() {
         owner = msg.sender;
@@ -107,11 +122,6 @@ contract AtpRegistry {
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
-        _;
-    }
-
-    modifier onlyOwnerOrOperator() {
-        if (msg.sender != owner && msg.sender != operator) revert Unauthorized();
         _;
     }
 
@@ -198,12 +208,18 @@ contract AtpRegistry {
 
     // ---- enrollment ----
 
-    /// @notice Enroll `account` into `id`, pinning the currently active version (and clearing any pause).
-    /// @dev Callable by the account itself, or by the operator (backend relayer). The owner cannot enroll:
-    /// it is a Safe and has no reason to. Re-enrolling is also how a follower moves to a newer version.
-    /// TODO: replace the operator branch with the two-phase signed intent.
+    /// @notice Enroll `account` into `id`, pinning the currently active version.
+    /// @dev The account itself may always (re-)enroll: that is how its owner moves to another strategy or a
+    /// newer version, and it clears every pause, since the account is the owner's own. The operator (backend
+    /// relayer) may only make the first enrollment of an account that is not enrolled yet, so it can neither
+    /// move a funded account onto a strategy or version its owner never chose, nor clear a pause by
+    /// re-enrolling. The owner cannot enroll: it is a Safe and has no reason to.
+    /// TODO: the operator's first enrollment still carries no two-phase user signature.
     function enroll(address account, uint256 id) external {
-        if (msg.sender != account && msg.sender != operator) revert Unauthorized();
+        if (msg.sender != account) {
+            if (msg.sender != operator) revert Unauthorized();
+            if (isEnrolled[account]) revert AlreadyEnrolled(account);
+        }
         if (account == address(0)) revert ZeroAddress();
         if (strategies[id].provider == address(0)) revert UnknownStrategy(id);
         uint16 version = activeVersion[id];
@@ -211,14 +227,38 @@ contract AtpRegistry {
 
         _enrollments[account] = Enrollment({ strategyId: id, version: version, paused: false });
         isEnrolled[account] = true;
+        if (pauseFlags[account] != 0) {
+            pauseFlags[account] = 0;
+            emit PauseFlagsSet(account, 0);
+        }
         emit Enrolled(account, id, version);
     }
 
     /// @notice Pause or resume an enrolled account. A paused account fails every `executeRebalance`.
-    function setPaused(address account, bool paused) external onlyOwnerOrOperator {
+    /// @dev Each caller sets its own `PAUSED_BY_*` bit and clears only what it outranks:
+    /// - the account itself: pause sets ACCOUNT; resume clears every bit (the account is the owner's own);
+    /// - the owner (Safe): pause sets OWNER; resume clears OWNER and OPERATOR, never the account's own;
+    /// - the operator: pause sets OPERATOR; resume clears OPERATOR only.
+    /// A resume that leaves another source's bit set succeeds but the account stays paused; read
+    /// `pauseFlags` (or the `PauseFlagsSet` event) for the result.
+    function setPaused(address account, bool paused) external {
+        uint8 flags = pauseFlags[account];
+        if (msg.sender == account) {
+            flags = paused ? flags | PAUSED_BY_ACCOUNT : 0;
+        } else if (msg.sender == owner) {
+            flags = paused ? flags | PAUSED_BY_OWNER : flags & ~(PAUSED_BY_OWNER | PAUSED_BY_OPERATOR);
+        } else if (msg.sender == operator) {
+            flags = paused ? flags | PAUSED_BY_OPERATOR : flags & ~PAUSED_BY_OPERATOR;
+        } else {
+            revert Unauthorized();
+        }
         if (!isEnrolled[account]) revert Unauthorized();
-        _enrollments[account].paused = paused;
-        emit EnrollmentPausedSet(account, paused);
+
+        bool nowPaused = flags != 0;
+        pauseFlags[account] = flags;
+        _enrollments[account].paused = nowPaused;
+        emit PauseFlagsSet(account, flags);
+        emit EnrollmentPausedSet(account, nowPaused);
     }
 
     // ---- views ----

@@ -140,6 +140,13 @@ contract DeployAtp is Script {
             registry.owner() == msg.sender,
             "recorded registry is not owned by the deployer: clear its address first"
         );
+        // A registry from before A10-2 (still alive on a long-running fork) lets the operator re-enroll and lift
+        // any pause; reusing it would silently drop those bounds.
+        (bool ok, bytes memory ret) =
+            recorded.staticcall(abi.encodeWithSignature("pauseFlags(address)", address(0)));
+        require(
+            ok && ret.length == 32, "recorded registry predates the operator bounds (A10-2): restart the fork"
+        );
         return (registry, false);
     }
 
