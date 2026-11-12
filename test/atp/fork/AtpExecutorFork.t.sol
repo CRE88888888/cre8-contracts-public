@@ -113,7 +113,7 @@ contract AtpExecutorForkTest is Test {
         registry.setDefaultFeeBps(FEE_BPS);
         oracle = new PancakeV3TwapOracle(pool, WBNB, USDT, 30 minutes, 100, 3600);
         executor = new AtpExecutor(
-            registry, IUniversalRouter(V3_UNIVERSAL_ROUTER), oracle, PERMIT2, FEE_RECIPIENT
+            registry, IUniversalRouter(V3_UNIVERSAL_ROUTER), oracle, PERMIT2, FEE_RECIPIENT, USDT, 10_000
         );
 
         account = new MockSmartAccount();

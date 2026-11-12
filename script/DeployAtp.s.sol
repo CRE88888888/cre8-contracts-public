@@ -68,6 +68,8 @@ contract DeployAtp is Script {
     uint32 internal constant TWAP_WINDOW = 30 minutes;
     uint16 internal constant MAX_SLIPPAGE_BPS = 100;
     uint32 internal constant MAX_ORACLE_AGE = 3600;
+    /// @dev A10-1 buy limit, same value as `DeployAtpMainnet`.
+    uint16 internal constant MAX_BUY_BPS = 10_000;
 
     struct Deployment {
         AtpRegistry registry;
@@ -160,9 +162,10 @@ contract DeployAtp is Script {
         return (multiPool, false);
     }
 
-    /// @dev An executor deployed before A10-3 (still alive on a long-running fork) has no `globalPaused`.
-    function _hasGlobalPause(address candidate) internal view returns (bool) {
-        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("globalPaused()"));
+    /// @dev An executor deployed before A10-1 (still alive on a long-running fork) has no buy limit (and, if
+    /// older still, no global pause either). A10-1 shipped after A10-3, so `maxBuyBps` vouches for both.
+    function _hasBuyLimit(address candidate) internal view returns (bool) {
+        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("maxBuyBps()"));
         return ok && ret.length == 32;
     }
 
@@ -177,11 +180,11 @@ contract DeployAtp is Script {
                 address(candidate.oracle()) == address(multiPool)
                     && address(candidate.registry()) == address(registry)
             ) {
-                // Reusing it would silently drop the kill switch, and deploying a replacement would leave the
-                // book pointing at the old one (a new executor on every run). Stop instead.
+                // Reusing it would silently drop the buy limit / kill switch, and deploying a replacement would
+                // leave the book pointing at the old one (a new executor on every run). Stop instead.
                 require(
-                    _hasGlobalPause(recorded),
-                    "recorded executor predates the global pause (A10-3): restart the fork"
+                    _hasBuyLimit(recorded),
+                    "recorded executor predates the buy limit (A10-1): restart the fork"
                 );
                 return (candidate, false);
             }
@@ -192,7 +195,9 @@ contract DeployAtp is Script {
                 IUniversalRouter(V3_UNIVERSAL_ROUTER),
                 IOracleFloor(address(multiPool)),
                 PERMIT2,
-                msg.sender
+                msg.sender,
+                USDT,
+                MAX_BUY_BPS
             ),
             true
         );

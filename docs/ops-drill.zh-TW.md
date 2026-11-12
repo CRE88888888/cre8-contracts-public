@@ -9,13 +9,14 @@
 
 使用者的帳戶本人（用自己錢包簽的交易）也能暫停、恢復自己，換策略或換版本只能由帳戶本人做。
 
-出事時要記住三件事：
+出事時要記住四件事：
 
 1. **Safe 暫停的帳戶，operator 解除不了。** 暫停會記下是誰暫停的（Safe、operator、帳戶本人）。operator 只能解除自己暫停的；Safe 可以解除自己和 operator 的；帳戶本人可以解除全部。懷疑 operator 私鑰外洩時，仍然建議先撤掉 operator（它還能幫新帳戶第一次加入策略）。
 2. **使用者自己恢復或重新加入策略，會清掉所有暫停。** 帳戶是使用者自己的，Safe 的暫停只能擋住平台這一側，擋不住帳戶本人；反過來，使用者自己暫停的，Safe 也解除不了。
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
+4. **每個帳戶每 24 小時最多買入「帳戶總值 × 100%」，賣成 USDT 不受限制。** 外洩的 session key 就算繞過後端，自己反覆來回換幣，每一輪都要買回，買到額度就停。Safe 可以把額度調成 0，變成「只准賣出」模式：所有人都只能賣、不能買。operator 碰不到這個設定。
 
-以下四個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
+以下五個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
 
 ## 怎麼重跑
 
@@ -145,11 +146,38 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 
 **注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
 
-## 演練輸出（2026-11-13，fork block 133201204，32 秒）
+## 情境 5：買入額度與「只准賣出」模式（A10-1）
+
+**規則：** 每個帳戶在固定 24 小時窗內，USDT→資產的累計買入金額不能超過「帳戶目前總值 × `maxBuyBps` / 10000」（部署時是 10000，也就是 100%）。窗口從第一筆買入開始算，24 小時後的第一筆買入重新開窗。資產→USDT 的賣出不擋，也不計入。帳戶總值 = USDT 餘額 + 策略版本內其他資產用 oracle 報價換算成 USDT；報不出價的資產算 0（額度只會變小）。超過時整批 revert `BuyLimitExceeded(買入後累計, 額度)`。
+
+**什麼時候調：**
+- `setMaxBuyBps(0)`：只准賣出。例如某個資產的買入方向有問題，或想讓使用者先退出再說。跟全域暫停（情境 4）不同，賣出仍然可以。
+- 調高（上限 20000，也就是 200%）：例如要讓大量帳戶在一天內換到新版本。只有 Safe 能改。
+
+演練用真的 swap（fork 上的 PancakeSwap WBNB/USDT 池），帳戶先包 0.01 BNB 成 WBNB：
+
+| 步驟 | 誰簽 | 呼叫 | 預期結果 |
+| --- | --- | --- | --- |
+| 5-1 | — | executor `maxBuyBps()`、`numeraire()` | 10000、USDT |
+| 5-2 | （operator 嘗試） | executor `setMaxBuyBps(20000)` | revert `NotOwner()` |
+| 5-3 | 帳戶 | WBNB `deposit()`、approve executor | 帳戶持有 0.01 WBNB |
+| 5-4 | Safe | executor `setMaxBuyBps(0)` | 只准賣出 |
+| 5-5 | （帳戶嘗試） | `executeRebalance`：USDT→WBNB | revert `BuyLimitExceeded` |
+| 5-6 | 帳戶 | `executeRebalance`：WBNB→USDT（全部） | 成交；買入窗沒有打開（賣出不計入） |
+| 5-7 | Safe | executor `setMaxBuyBps(10000)` | 恢復 |
+| 5-8 | 帳戶 | `executeRebalance`：USDT→WBNB（一半） | 成交；`buyAllowance(帳戶)` 的已用 = 買入金額，額度 = 帳戶總值 |
+| 5-9 | （帳戶嘗試） | `executeRebalance`：USDT→WBNB（一整個額度） | revert `BuyLimitExceeded` |
+
+**注意：**
+- 後端排程前要讀 `buyAllowance(帳戶)`（額度、已用、窗口結束時間），把這一批的買入縮到「額度 − 已用」以內，留 1–2% 餘裕（讀值和上鏈之間總值會小幅變動）。額度用完就等到窗口結束。
+- 使用者退出（redeem、close 都是賣成 USDT）和 owner 自己轉出不受額度影響。
+- 額度跟著「目前」總值算，所以同一天加碼存入後，額度也跟著變大。
+
+## 演練輸出（2026-11-13，fork block 133202784，40 秒）
 
 ```
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0xa287eaC801D8Af86c610Bc99552E255C6A1cbd47（2-of-3：#1 #2 #3）
+  ✓ Safe A 0x73d35883F3Ce673Af336C34b314D2c0119AF2921（2-of-3：#1 #2 #3）
   ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xcd8a3ae15dff0fc218473ca58d00f4b49b6414a9
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
@@ -186,7 +214,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 2-10 帳戶恢復，executeRebalance 不再 revert
 
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0x16EEF144c5A83f35E57A7e1aFEE8245C38f41771（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x1EdD6B66E068a150F23025Dc1B90136f8fF7f46c（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -218,7 +246,20 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 == 情境 4 備案：逐資產拔價格來源（只停單一資產）
   ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
   ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152421509744629611
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152406269117717839
+
+== 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）
+  ✓ 5-1 部署後 maxBuyBps = 10000、numeraire = USDT
+  ✓ 5-2 operator 改買入額度 → revert NotOwner()
+  ✓ 5-3 帳戶持有 0.01 WBNB
+  ✓ 5-4 Safe B setMaxBuyBps(0) → 只准賣出
+  ✓ 5-5 買入 USDT→WBNB → revert BuyLimitExceeded(uint256,uint256)
+  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.555140152971590208 USDT）
+  ✓     賣出不計入額度（買入窗沒有打開）
+  ✓ 5-7 Safe B setMaxBuyBps(10000) → 恢復
+  ✓ 5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額
+  ✓     額度 = 帳戶總值 6.555323016786556153 USDT，窗口到 1794592218
+  ✓ 5-9 再買入一整個額度（超過） → revert BuyLimitExceeded(uint256,uint256)
 
 演練全部通過。
 ```
@@ -226,5 +267,5 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 ## 這次沒演到
 
 - 真實的 Safe 多簽流程（在 Safe 介面湊簽名、送交易）：演練用 impersonate 代替，合約端看到的 `msg.sender` 相同。
-- 和 backend 一起演：operator 換鑰匙後後端是否正確切換、暫停後後端是否停止排程。A3 跑通後再和 backend 一起演一次。
+- 和 backend 一起演：operator 換鑰匙後後端是否正確切換、暫停後後端是否停止排程、排程是否照 `buyAllowance` 縮小買入。用真的 Kernel、session key、bundler 送 UserOp 的買入額度負面測試，由 X1 在 A3 做（#10 決定）。A3 跑通後再和 backend 一起演一次。
 - seed 輪替程序（ROADMAP A6 的文件部分）不在本文件範圍。

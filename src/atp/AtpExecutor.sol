@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { UniversalRouterCommands as Cmd } from "./interfaces/IUniversalRouter.sol";
 import { IUniversalRouter } from "./interfaces/IUniversalRouter.sol";
@@ -21,6 +22,10 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// strategy, version asset allowlist, command allowlist with the recipient pinned back here, deadline, and
 /// the oracle floor. The agent chooses routes and fills `amountOutMin`, but the oracle-derived `minGross`
 /// is the authority: the realised gross output must clear it, so `amountOutMin = 0` cannot weaken the floor.
+/// @dev Buy limit (A10-1, cre8-contracts#10): a leaked session key could grind an account down by trading
+/// back and forth, each step clearing the floor. Every round trip needs a buy, so buys (numeraire -> asset)
+/// are capped per account at `maxBuyBps` of the account's current value per fixed 24-hour window. Sales to the
+/// numeraire are never limited nor counted, so exits always go through.
 contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -28,6 +33,11 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev Canonical Uniswap Permit2, the same address on every chain it is deployed to, BSC mainnet (56)
     /// and testnet (97) included. Read only by the constructor; see the pin there for why it exists.
     address internal constant CANONICAL_PERMIT2 = 0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768;
+    /// @notice Length of the fixed buy-limit window. It opens with an account's first buy and resets with the
+    /// first buy at or after `start + BUY_WINDOW`.
+    uint256 public constant BUY_WINDOW = 1 days;
+    /// @notice Upper bound for `maxBuyBps` (2x the account value per window).
+    uint16 public constant MAX_BUY_BPS_CEILING = 20_000;
 
     /// @notice Strategy/enrollment/fee record. Also the admin for `feeRecipient`.
     AtpRegistry public immutable registry;
@@ -40,12 +50,27 @@ contract AtpExecutor is ReentrancyGuard {
     /// the router runs. Supplied by the deployer; on BSC mainnet (56) and testnet (97) the constructor
     /// additionally requires it to equal `CANONICAL_PERMIT2`.
     IPermit2 public immutable permit2;
+    /// @notice The token every step trades against (USDT on BSC): a step paying it out is a sale, a step paying
+    /// it in is a buy. Must equal the oracle router's numeraire; `DeployAtpMainnet` verifies it.
+    address public immutable numeraire;
     /// @notice Receives the swap fee (admin-settable, registry owner only).
     address public feeRecipient;
     /// @notice Kill switch (registry owner only): while set, every `executeRebalance` reverts, sales to the
     /// numeraire included. For an oracle or executor incident, where even a sale would trade against a wrong
     /// floor. Owners can still move funds out of their own accounts; that path never touches this contract.
     bool public globalPaused;
+    /// @notice Per-window buy cap in bps of the account's current value (registry owner only; 0 = sales only).
+    uint16 public maxBuyBps;
+
+    /// @dev One slot per account. `bought` is the numeraire spent on buys since `start`.
+    struct BuyWindow {
+        uint64 start;
+        uint192 bought;
+    }
+
+    /// @notice Buy-limit window per account; `start == 0` means never opened, and a window is stale (treated as
+    /// empty) once `start + BUY_WINDOW` has passed.
+    mapping(address => BuyWindow) public buyWindowOf;
 
     struct SwapStep {
         /// @notice Token sold, pulled from the account.
@@ -75,6 +100,7 @@ contract AtpExecutor is ReentrancyGuard {
     );
     event FeeRecipientUpdated(address indexed previousRecipient, address indexed newRecipient);
     event GlobalPausedSet(bool paused);
+    event MaxBuyBpsSet(uint16 bps);
 
     error InvalidConfig();
     error NotOwner();
@@ -98,19 +124,28 @@ contract AtpExecutor is ReentrancyGuard {
     error NoFloor();
     error FeeTooHigh(uint256 bps);
     error BelowFloor(uint256 realised, uint256 floor);
+    /// @dev This batch would take the window's buys to `bought`, above `cap` (value x `maxBuyBps`).
+    error BuyLimitExceeded(uint256 bought, uint256 cap);
+    error BuyBpsTooHigh(uint16 bps);
+    /// @dev Neither leg is the numeraire, so the step is neither a sale nor a countable buy. The oracle router
+    /// rejects such a pair as well; this keeps the buy limit fail-closed on its own.
+    error NotNumeraireRoute(address tokenIn, address tokenOut);
 
     constructor(
         AtpRegistry registry_,
         IUniversalRouter universalRouter_,
         IOracleFloor oracle_,
         address permit2_,
-        address feeRecipient_
+        address feeRecipient_,
+        address numeraire_,
+        uint16 maxBuyBps_
     ) {
         if (
             address(registry_).code.length == 0 || address(universalRouter_).code.length == 0
                 || address(oracle_).code.length == 0 || permit2_.code.length == 0
-                || feeRecipient_ == address(0)
+                || feeRecipient_ == address(0) || numeraire_.code.length == 0
         ) revert InvalidConfig();
+        if (maxBuyBps_ > MAX_BUY_BPS_CEILING) revert BuyBpsTooHigh(maxBuyBps_);
 
         // v1 hardening: on the chains this protocol actually serves, pin Permit2 to the canonical Uniswap
         // deployment. The code-length check above accepts any contract, so a mis-wired `permit2_` on BSC
@@ -130,6 +165,9 @@ contract AtpExecutor is ReentrancyGuard {
         oracle = oracle_;
         permit2 = IPermit2(permit2_);
         feeRecipient = feeRecipient_;
+        numeraire = numeraire_;
+        maxBuyBps = maxBuyBps_;
+        emit MaxBuyBpsSet(maxBuyBps_);
     }
 
     // ---- admin ----
@@ -148,6 +186,15 @@ contract AtpExecutor is ReentrancyGuard {
         if (msg.sender != registry.owner()) revert NotOwner();
         globalPaused = paused;
         emit GlobalPausedSet(paused);
+    }
+
+    /// @notice Set the per-window buy cap in bps of the account value, at most `MAX_BUY_BPS_CEILING`. `0` stops
+    /// every buy while sales go on ("sales only"). Registry owner only; the operator has no access.
+    function setMaxBuyBps(uint16 bps) external {
+        if (msg.sender != registry.owner()) revert NotOwner();
+        if (bps > MAX_BUY_BPS_CEILING) revert BuyBpsTooHigh(bps);
+        maxBuyBps = bps;
+        emit MaxBuyBpsSet(bps);
     }
 
     // ---- execution ----
@@ -169,17 +216,103 @@ contract AtpExecutor is ReentrancyGuard {
         if (!registry.isEnrolled(account)) revert NotEnrolled();
         if (enrollment.paused) revert Paused();
         uint16 feeBps = registry.effectiveFeeBps(enrollment.strategyId);
+        (bool hasBuy, uint256 cap, BuyWindow memory window) = _openBuyWindow(account, enrollment, steps);
 
         uint256 count = steps.length;
         for (uint256 i; i < count; ++i) {
             SwapStep calldata step = steps[i];
             uint256 floor = _checkStep(step, enrollment, feeBps);
+            if (step.tokenOut != numeraire) {
+                // A buy: counted against the window, before any token moves.
+                if (step.tokenIn != numeraire) revert NotNumeraireRoute(step.tokenIn, step.tokenOut);
+                uint256 bought = window.bought + step.amountIn;
+                if (bought > cap) revert BuyLimitExceeded(bought, cap);
+                window.bought = SafeCast.toUint192(bought);
+            }
             uint256 gross = _swap(account, step, deadline);
             if (gross < floor) revert BelowFloor(gross, floor);
             uint256 fee = _splitFee(step.tokenOut, gross, feeBps, account);
             emit SwapExecuted(
                 account, step.tokenIn, step.tokenOut, step.amountIn, gross, fee, gross - fee, floor
             );
+        }
+        if (hasBuy) buyWindowOf[account] = window;
+    }
+
+    // ---- buy limit ----
+
+    /// @notice What `account` may still buy: `cap` is the current account value x `maxBuyBps`, `bought` what the
+    /// open window already spent, `windowEndsAt` when it resets (0 = no open window: the next buy opens one).
+    /// Remaining = `cap - bought` when positive. All zero for an account that is not enrolled.
+    /// @dev Runs the same valuation as `executeRebalance`, so the value can move slightly between this read
+    /// and the transaction; leave a margin.
+    function buyAllowance(address account)
+        external
+        view
+        returns (uint256 cap, uint256 bought, uint64 windowEndsAt)
+    {
+        if (!registry.isEnrolled(account)) return (0, 0, 0);
+        BuyWindow memory window = buyWindowOf[account];
+        if (window.start != 0 && block.timestamp < uint256(window.start) + BUY_WINDOW) {
+            bought = window.bought;
+            windowEndsAt = SafeCast.toUint64(uint256(window.start) + BUY_WINDOW);
+        }
+        cap = _buyCap(account, registry.enrollments(account));
+    }
+
+    /// @dev Only a batch with a buy pays for the valuation; a sales-only batch (an exit) reads nothing extra.
+    /// An expired (or never opened) window starts afresh at this block.
+    function _openBuyWindow(
+        address account,
+        AtpRegistry.Enrollment memory enrollment,
+        SwapStep[] calldata steps
+    ) internal view returns (bool hasBuy, uint256 cap, BuyWindow memory window) {
+        uint256 count = steps.length;
+        for (uint256 i; i < count; ++i) {
+            if (steps[i].tokenOut != numeraire) {
+                hasBuy = true;
+                break;
+            }
+        }
+        if (!hasBuy) return (false, 0, window);
+
+        window = buyWindowOf[account];
+        if (window.start == 0 || block.timestamp >= uint256(window.start) + BUY_WINDOW) {
+            window.start = SafeCast.toUint64(block.timestamp);
+            window.bought = 0;
+        }
+        cap = _buyCap(account, enrollment);
+    }
+
+    function _buyCap(address account, AtpRegistry.Enrollment memory enrollment)
+        internal
+        view
+        returns (uint256)
+    {
+        uint16 bps = maxBuyBps;
+        if (bps == 0) return 0;
+        return Math.mulDiv(_accountValue(account, enrollment), bps, BPS_DENOMINATOR);
+    }
+
+    /// @dev Account value in numeraire units: its numeraire balance plus, for every other asset of its pinned
+    /// version it holds, the oracle quote (`quoted`, before slippage) for selling the whole balance. An asset
+    /// the oracle cannot price (stale, cleared) counts as zero: that only lowers the cap, i.e. fails closed,
+    /// instead of blocking the whole batch. Tokens outside the pinned version are not counted.
+    function _accountValue(address account, AtpRegistry.Enrollment memory enrollment)
+        internal
+        view
+        returns (uint256 value)
+    {
+        value = IERC20(numeraire).balanceOf(account);
+        address[] memory assets = registry.version(enrollment.strategyId, enrollment.version).assets;
+        for (uint256 i; i < assets.length; ++i) {
+            address asset = assets[i];
+            if (asset == numeraire) continue;
+            uint256 balance = IERC20(asset).balanceOf(account);
+            if (balance == 0) continue;
+            try oracle.previewSwap(asset, numeraire, balance) returns (uint256 quoted, uint256) {
+                value += quoted;
+            } catch { }
         }
     }
 

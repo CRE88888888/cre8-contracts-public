@@ -123,7 +123,11 @@ contract AtpExecutorHarness is AtpExecutor {
         IOracleFloor oracle_,
         address permit2_,
         address feeRecipient_
-    ) AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_) { }
+    )
+        // The numeraire only drives the buy limit (covered in AtpExecutorBuyLimit.t.sol); any contract will do
+        // for the decoder / swap-leg tests here.
+        AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_, address(registry_), 10_000)
+    { }
 
     function checkCommands(bytes calldata commands, bytes[] calldata inputs) external view {
         _checkCommands(commands, inputs);

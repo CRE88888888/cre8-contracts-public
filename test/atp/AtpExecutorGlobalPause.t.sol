@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import { Test } from "forge-std/Test.sol";
 import { AtpExecutor } from "../../src/atp/AtpExecutor.sol";
 import { AtpRegistry } from "../../src/atp/AtpRegistry.sol";
-import { MockUniversalRouter, MockOracleFloor, MockPermit2 } from "./AtpExecutor.t.sol";
+import { MockUniversalRouter, MockOracleFloor, MockPermit2, MockERC20 } from "./AtpExecutor.t.sol";
 
 /// @notice Pins the A10-3 kill switch: only the registry owner (the Safe) flips `globalPaused`, and while it is
 /// set every `executeRebalance` fails closed before any other check; resuming restores execution.
@@ -28,7 +28,9 @@ contract AtpExecutorGlobalPauseTest is Test {
             new MockUniversalRouter(),
             new MockOracleFloor(),
             address(new MockPermit2()),
-            FEE_RECIPIENT
+            FEE_RECIPIENT,
+            address(new MockERC20()),
+            10_000
         );
         registry.setOperator(OPERATOR);
 

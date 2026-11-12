@@ -102,6 +102,7 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
   expect_revert "registry transferOwnership" $REG "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
   expect_revert "router transferOwnership"   $RT "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
   expect_revert "executor setGlobalPaused"   $EX "setGlobalPaused(bool)" true --unlocked --from "$WHO"
+  expect_revert "executor setMaxBuyBps"      $EX "setMaxBuyBps(uint16)" 20000 --unlocked --from "$WHO"
 done
 
 echo "== operator 的日常權限（策略、enroll、暫停）"
@@ -134,6 +135,12 @@ cast send -q $EX "setGlobalPaused(bool)" true --unlocked --from "$SAFE" >/dev/nu
 [ "$(cast call $EX 'globalPaused()(bool)')" = "true" ] && ok "Safe setGlobalPaused(true) → 全域暫停" || fail "全域暫停"
 cast send -q $EX "setGlobalPaused(bool)" false --unlocked --from "$SAFE" >/dev/null
 [ "$(cast call $EX 'globalPaused()(bool)')" = "false" ] && ok "Safe setGlobalPaused(false) → 恢復" || fail "恢復"
+[ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "10000" ] && ok "部署後 maxBuyBps = 10000" || fail "maxBuyBps"
+[ "$(cast call $EX 'numeraire()(address)')" = "$USDT" ] && ok "executor numeraire = USDT" || fail "numeraire"
+cast send -q $EX "setMaxBuyBps(uint16)" 0 --unlocked --from "$SAFE" >/dev/null
+[ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "0" ] && ok "Safe setMaxBuyBps(0) → 只准賣出" || fail "setMaxBuyBps 0"
+cast send -q $EX "setMaxBuyBps(uint16)" 10000 --unlocked --from "$SAFE" >/dev/null
+[ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "10000" ] && ok "Safe setMaxBuyBps(10000) → 恢復" || fail "setMaxBuyBps 10000"
 
 echo "== 報價（100 USDT → 各資產）"
 for a in 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c 0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \

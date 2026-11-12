@@ -41,6 +41,8 @@ contract DeployAtpMainnet is Script {
 
     uint32 internal constant TWAP_WINDOW = 30 minutes;
     uint32 internal constant MAX_ORACLE_AGE = 1 hours;
+    /// @dev A10-1 buy limit: per account, buys within 24 hours may total at most 100% of its current value.
+    uint16 internal constant MAX_BUY_BPS = 10_000;
 
     struct OracleSpec {
         string symbol;
@@ -126,7 +128,13 @@ contract DeployAtpMainnet is Script {
             );
         }
         AtpExecutor executor = new AtpExecutor(
-            registry, IUniversalRouter(V3_UNIVERSAL_ROUTER), IOracleFloor(address(router)), PERMIT2, treasury
+            registry,
+            IUniversalRouter(V3_UNIVERSAL_ROUTER),
+            IOracleFloor(address(router)),
+            PERMIT2,
+            treasury,
+            USDT,
+            MAX_BUY_BPS
         );
         registry.setOperator(operator);
         registry.transferOwnership(safe);
@@ -185,6 +193,10 @@ contract DeployAtpMainnet is Script {
         require(executor.feeRecipient() == treasury, "executor feeRecipient");
         require(registry.defaultSwapFeeBps() == 0, "default fee");
         require(!executor.globalPaused(), "executor globalPaused");
+        require(
+            executor.numeraire() == USDT && executor.numeraire() == router.numeraire(), "executor numeraire"
+        );
+        require(executor.maxBuyBps() == MAX_BUY_BPS, "executor maxBuyBps");
 
         for (uint256 i; i < specs.length; ++i) {
             PancakeV3TwapOracle oracle = router.oracleOf(specs[i].asset);
@@ -225,6 +237,7 @@ contract DeployAtpMainnet is Script {
         }
         console.log(string.concat("operator           ", vm.toString(operator)));
         console.log(string.concat("feeRecipient       ", vm.toString(treasury)));
+        console.log(string.concat("maxBuyBps          ", vm.toString(uint256(MAX_BUY_BPS))));
         console.log(
             string.concat("pendingOwner       ", vm.toString(safe), "  (Safe must acceptOwnership x2)")
         );

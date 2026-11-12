@@ -4,6 +4,7 @@
 #   2. 撤銷並更換 operator（relayer 私鑰外洩）
 #   3. Safe 交接（換 Safe／換簽署人）
 #   4. 全域暫停（Safe 一筆停全部、一筆恢復）；備案：逐資產 clearOracle
+#   5. 買入額度與「只准賣出」模式（真的在 fork 上 swap）
 # 每一步都讀鏈上的值驗證，全部 ✓ 才算過。步驟與注意事項見 docs/ops-drill.zh-TW.md。
 #
 # 不送任何主網交易，也不需要私鑰：所有角色都是 anvil 預設測試地址，用 impersonate 代簽；
@@ -92,7 +93,7 @@ eq "registry owner = Safe A" "$(cast call $REG 'owner()(address)')" "$SAFE_A"
 eq "router owner = Safe A" "$(cast call $RT 'owner()(address)')" "$SAFE_A"
 eq "operator = OP1" "$(cast call $REG 'operator()(address)')" "$OP1"
 send $PROVIDER $REG "registerStrategy(string,string,bool)" "Drill" "ops drill" true
-send $PROVIDER $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "[$WBNB]" "[10000]" \
+send $PROVIDER $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "[$WBNB,$USDT]" "[5000,5000]" \
   0x0000000000000000000000000000000000000000000000000000000000000001 0
 cast rpc anvil_setCode $ACCOUNT 0x00 >/dev/null   # smart account 必須有 code，executor 才接受
 actor $ACCOUNT
@@ -200,6 +201,42 @@ NEW_ORACLE=$(cast call $RT 'oracleOf(address)(address)' $WBNB)
 [ "$NEW_ORACLE" != "$ZERO" ] || fail "setOracle"
 q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT $WBNB 100000000000000000000 | head -1 | awk '{print $1}')
 [ "$q" != "0" ] && ok "4-10 Safe B setOracle 恢復（新 oracle $NEW_ORACLE），報價 $q" || fail "恢復後報價為 0"
+
+echo
+echo "== 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）"
+REB="executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)"
+POOL_FEE=$(printf '0x%06x' "$(cast call $WBNB_POOL 'fee()(uint24)' | awk '{print $1}')")
+# 一個 V3 exact-in step（收款人釘在 executor），amountOutMin = oracle 地板（swap fee 為 0）
+steps_of() { # tokenIn tokenOut amountIn
+  local min path input
+  min=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' "$1" "$2" "$3" | sed -n 2p | awk '{print $1}')
+  path=$(cast concat-hex "$1" "$POOL_FEE" "$2")
+  input=$(cast abi-encode "f(address,uint256,uint256,bytes,bool)" $EX "$3" "$min" "$path" true)
+  echo "[($1,$2,$3,$min,0x00,[$input])]"
+}
+bal() { cast call "$1" 'balanceOf(address)(uint256)' "$2" | awk '{print $1}'; }
+eq "5-1 部署後 maxBuyBps = 10000、numeraire = USDT" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')/$(cast call $EX 'numeraire()(address)')" "10000/$USDT"
+expect_err "5-2 operator 改買入額度" "NotOwner()" $OP2 $EX "setMaxBuyBps(uint16)" 20000
+send $ACCOUNT $WBNB "deposit()" --value 0.01ether
+send $ACCOUNT $WBNB "approve(address,uint256)" $EX 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+send $ACCOUNT $USDT "approve(address,uint256)" $EX 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+eq "5-3 帳戶持有 0.01 WBNB" "$(bal $WBNB $ACCOUNT)" "10000000000000000"
+send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 0
+eq "5-4 Safe B setMaxBuyBps(0) → 只准賣出" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "0"
+expect_err "5-5 買入 USDT→WBNB" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB 1000000000000000000)" 99999999999
+send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000)" 99999999999
+USDT_GOT=$(bal $USDT $ACCOUNT)
+[ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出"
+eq "    賣出不計入額度（買入窗沒有打開）" "$(cast call $EX 'buyWindowOf(address)(uint64,uint192)' $ACCOUNT | head -1)" "0"
+send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 10000
+eq "5-7 Safe B setMaxBuyBps(10000) → 恢復" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "10000"
+HALF=$(echo "$USDT_GOT / 2" | bc)   # bc：USDT 有 18 位小數，bash 的 64 位整數可能溢位
+send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB $HALF)" 99999999999
+ALLOW=$(cast call $EX 'buyAllowance(address)(uint256,uint256,uint64)' $ACCOUNT)
+CAP=$(sed -n 1p <<<"$ALLOW" | awk '{print $1}')
+eq "5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額" "$(sed -n 2p <<<"$ALLOW" | awk '{print $1}')" "$HALF"
+ok "    額度 = 帳戶總值 $(cast from-wei $CAP) USDT，窗口到 $(sed -n 3p <<<"$ALLOW" | awk '{print $1}')"
+expect_err "5-9 再買入一整個額度（超過）" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB $CAP)" 99999999999
 
 echo
 echo "演練全部通過。"
