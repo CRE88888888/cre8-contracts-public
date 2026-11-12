@@ -24,7 +24,7 @@ jobs:
     steps:
       # lib/（OpenZeppelin、forge-std）是直接 commit 進來的，不是 submodule，
       # 所以不需要 `submodules: recursive`。
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: foundry-rs/foundry-toolchain@v1
         with:
