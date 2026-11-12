@@ -2,7 +2,7 @@
 
 給 AI agent 與新工程師的工作規則。內容皆從本 repo 程式碼、README 與 commit 歷史查證；不確定的地方會寫明。
 
-**Claude 與 Codex 分工**：規則見 [docs/AGENT_COLLABORATION](https://github.com/CRE8Finance/docs/blob/main/docs/AGENT_COLLABORATION.zh-TW.md)。本 repo 的程式碼（合約、測試、部署腳本、fork 預演）只有 Claude 寫。開工前先看本 repo 有沒有標 `agent:claude` 或 `agent:codex` 的進行中 issue，有就排隊；分支前綴 Claude 用 `claude/*`、Codex 用 `codex/*`。
+**開工前必讀：** 誰能在本 repo 工作、怎麼開 issue 與 PR、本機用哪些埠，一律以 [docs/AGENT_COLLABORATION](https://github.com/CRE8Finance/docs/blob/main/docs/AGENT_COLLABORATION.zh-TW.md) 為準（本機在 `~/Desktop/cre8-workspace/docs/docs/AGENT_COLLABORATION.zh-TW.md`）。只有擁有本 repo 的 lane 能開分支、commit、push；其他 lane 只能讀、執行、開 issue。
 
 ## 這個 repo 是什麼
 
