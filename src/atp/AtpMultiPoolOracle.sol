@@ -29,40 +29,41 @@ import { PancakeV3TwapOracle } from "./PancakeV3TwapOracle.sol";
 /// `PancakeV3TwapOracle` cannot be used to write state from here. It holds no balance and grants no
 /// allowance, and the only call the executor ever makes on it is `previewSwap`.
 ///
-/// Access: `owner` is a single key in v1, matching `AtpRegistry` (multisig / timelock before mainnet). A
-/// registered oracle's pair is immutable, so the pair check `setOracle` performs once holds for the whole
-/// life of the registration - there is no later call that could re-point a registration at the wrong pool.
+/// Access: `owner` is a Safe on mainnet and hands over in two steps, matching `AtpRegistry`. `setOracle`
+/// never accepts an oracle address: it deploys the `PancakeV3TwapOracle` itself from (pool, window,
+/// slippage, age), so the only code this router ever forwards to is the audited TWAP contract. Even the
+/// owner cannot plug in a look-alike that answers `token0` / `token1` correctly but returns a zero-discount
+/// floor. The oracle's pair is immutable and its constructor checks the pool holds exactly
+/// {asset, numeraire}, so a registration can never be re-pointed at the wrong pool.
 contract AtpMultiPoolOracle is IOracleFloor {
     // ---- configuration ----
 
     /// @notice The quote asset every registered pair must contain (for example USDT).
     address public immutable numeraire;
-    /// @notice Admin key allowed to register and clear per-asset oracles.
+    /// @notice Admin allowed to register and clear per-asset oracles.
     address public owner;
+    /// @notice Proposed next owner; becomes `owner` only when it calls `acceptOwnership`.
+    address public pendingOwner;
     /// @dev asset -> the per-pair oracle that prices `asset` against `numeraire`.
     mapping(address asset => PancakeV3TwapOracle oracle) private _oracles;
 
     // ---- events ----
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OracleSet(address indexed asset, address indexed oracle);
     event OracleCleared(address indexed asset);
 
     // ---- errors ----
 
     error NotOwner();
+    error NotPendingOwner();
     error ZeroAddress();
     /// @dev The numeraire must be a contract: a quote asset without code is a typo, and every quote against
     /// it would revert downstream rather than here.
     error InvalidNumeraire();
-    /// @dev Registered oracle has no code, so its `token0` / `token1` / `previewSwap` cannot be trusted and
-    /// the registration would fail open on the first quote.
-    error InvalidOracle();
     /// @dev Registering the numeraire against itself; there is no such pair.
     error NumeraireAsAsset();
-    /// @dev The oracle's pair does not hold exactly `asset` and `numeraire`. Without this check a
-    /// registration would silently price the asset from the wrong pool.
-    error PairMismatch(address asset, address oracle);
     /// @dev The asset already has an oracle; `clearOracle` first so replacing a live oracle is deliberate.
     error OracleAlreadySet(address asset);
     error OracleNotSet(address asset);
@@ -129,26 +130,24 @@ contract AtpMultiPoolOracle is IOracleFloor {
         return _oracles[asset];
     }
 
-    /// @notice Register the oracle that prices `asset` against `numeraire`.
-    /// @dev Validates against a silent mispricing rather than against a revert somewhere downstream: the
-    /// oracle must be a contract, and its pair must be exactly `{asset, numeraire}` in either order. The pair
-    /// is immutable on `PancakeV3TwapOracle`, so this one check is valid for the life of the registration.
+    /// @notice Deploy and register the TWAP oracle that prices `asset` against `numeraire` from `pool`.
+    /// @dev The oracle is created here, never supplied, so a registration is always the audited
+    /// `PancakeV3TwapOracle`. Its constructor rejects a pool that does not hold exactly {asset, numeraire}
+    /// and out-of-range window / slippage / age parameters, so those checks are not repeated here.
     /// @dev Re-registering an existing asset reverts with `OracleAlreadySet` instead of overwriting: swapping
     /// the oracle that prices a live index is a deliberate act, so it takes an explicit `clearOracle` first.
-    /// The checks run cheapest and most actionable first, so an already-registered asset reports
-    /// `OracleAlreadySet` even when the supplied oracle would also fail the pair check.
-    function setOracle(address asset, PancakeV3TwapOracle oracle) external onlyOwner {
-        if (asset == address(0) || address(oracle) == address(0)) revert ZeroAddress();
-        if (address(oracle).code.length == 0) revert InvalidOracle();
+    function setOracle(
+        address asset,
+        address pool,
+        uint32 twapWindow,
+        uint16 maxSlippageBps,
+        uint32 maxOracleAge
+    ) external onlyOwner returns (PancakeV3TwapOracle oracle) {
+        if (asset == address(0) || pool == address(0)) revert ZeroAddress();
         if (asset == numeraire) revert NumeraireAsAsset();
         if (address(_oracles[asset]) != address(0)) revert OracleAlreadySet(asset);
 
-        address token0 = oracle.token0();
-        address token1 = oracle.token1();
-        if (!((token0 == asset && token1 == numeraire) || (token0 == numeraire && token1 == asset))) {
-            revert PairMismatch(asset, address(oracle));
-        }
-
+        oracle = new PancakeV3TwapOracle(pool, asset, numeraire, twapWindow, maxSlippageBps, maxOracleAge);
         _oracles[asset] = oracle;
         emit OracleSet(asset, address(oracle));
     }
@@ -164,11 +163,18 @@ contract AtpMultiPoolOracle is IOracleFloor {
 
     // ---- admin ----
 
-    /// @notice Hand the registry role to `next`. Single-step on purpose in v1, as in `AtpRegistry`: a
-    /// two-step handover lands together with the multisig.
+    /// @notice Propose `next` as the new owner; nothing changes until `next` calls `acceptOwnership`.
+    /// Proposing `address(0)` cancels a pending handover.
     function transferOwnership(address next) external onlyOwner {
-        if (next == address(0)) revert ZeroAddress();
-        emit OwnershipTransferred(owner, next);
-        owner = next;
+        pendingOwner = next;
+        emit OwnershipTransferStarted(owner, next);
+    }
+
+    /// @notice Complete a handover started by `transferOwnership`; callable only by the proposed owner.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
     }
 }

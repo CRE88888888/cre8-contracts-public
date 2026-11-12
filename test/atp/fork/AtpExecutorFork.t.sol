@@ -126,6 +126,8 @@ contract AtpExecutorForkTest is Test {
         weights[0] = 5_000;
         weights[1] = 5_000;
         registry.publishVersion(strategyId, assets, weights, bytes32(0), uint64(block.timestamp));
+        // v2: the owner cannot enroll; the account itself (or the operator) does.
+        vm.prank(address(account));
         registry.enroll(address(account), strategyId);
     }
 

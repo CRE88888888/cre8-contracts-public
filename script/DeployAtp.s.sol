@@ -15,8 +15,12 @@ interface IV3Factory {
 }
 
 /// @title DeployAtp
-/// @notice Deploys the ATP stack against BSC mainnet (chain 56) addresses. Pools are resolved at runtime
-/// through the PancakeSwap V3 factory, so a fork of any block height that holds the pools deploys identically.
+/// @notice LOCAL FORK ONLY. Deploys the ATP stack on an Anvil fork of BSC mainnet (chain 56). Pools are
+/// resolved at runtime through the PancakeSwap V3 factory, so a fork of any block height deploys identically.
+///
+/// @dev Never mainnet. A fork also reports chain id 56, so the guard is the broadcaster instead: the script
+/// only broadcasts from Anvil's well-known account #0, which can never hold real funds on mainnet. The real
+/// deployment is `DeployAtpMainnet.s.sol`, which never reuses anything and cannot run twice.
 ///
 /// @dev Idempotency. `forge script` cannot read or write files here: `foundry.toml` grants no
 /// `fs_permissions` (the default is read-only on `out/`), so the address book lives in this file as
@@ -37,21 +41,16 @@ contract DeployAtp is Script {
     // ---- address book for this fork (chain 56) ----
     // An entry is reused when it still has code; otherwise it is deployed again and printed for the record.
     //
-    // Retired per-pair oracles (buggy pair check: they accepted a `tokenIn` outside their own pool and quoted
-    // it off the `token1` leg). Kept here as the record of what was replaced, never referenced again:
-    //   ORACLE_WBNB_USDT v1 = 0x3e736BF184C3FBEF85909A6407bD2Cc3Af6ba3DB
-    //   ORACLE_NVDAB_USDT v1 = 0xD14e18278cDe758E9cC6f3214f5766E7917dCE25
-    // The router and the executor are untouched by that fix: the executor points at the router, and the router
-    // points at whichever per-pair oracle is registered, so only these two addresses move.
-    address internal constant REGISTRY = 0x27739a1AD35a924F5545C7d04C2B0537069CA76C;
-    address internal constant ORACLE_WBNB_USDT = 0x535111F60a9cB7C3b95A17fB8d1dd2D17275DBFE;
-    address internal constant ORACLE_NVDAB_USDT = 0x12Ce4542B25fe53a3c606dd7783513357b6D838d;
-    address internal constant MULTI_POOL_ORACLE = 0x132cDfCe34d385f783dAB7F011B2E66E78A2f87f;
-    address internal constant EXECUTOR_MULTI_POOL = 0x9C41696ea7FaA5470eAfb77415D063beEef83f4a;
+    // v2 (router deploys its own oracles): registry nonce N, router N+1, executor N+4 (N+2, N+3 = setOracle).
+    // Account #0's key is public, so it has real mainnet history: N is its mainnet nonce at the fork block
+    // (25543 at block 133175282, 2026-11-12), not 0. A fork at a later block may see a higher N, in which
+    // case these entries have no code and the script deploys fresh and prints the new addresses.
+    address internal constant REGISTRY = 0xBe02b3db88ff0090eF3e56ac79fD4f4003ae72a7;
+    address internal constant MULTI_POOL_ORACLE = 0x4989B5A9ec17ce669663a599FBefA0e414ed0b5E;
+    address internal constant EXECUTOR_MULTI_POOL = 0xa1b9DA215e1eFab5a3935BF147009ce0687dd310;
 
-    /// @dev Not a token of any pool this stack prices, so every per-pair oracle must refuse it. Used to tell a
-    /// fixed oracle from the retired one: both pin the same pool and answer every legitimate pair identically.
-    address internal constant STRAY_PROBE = address(0x1);
+    /// @dev Anvil's default account #0. The only broadcaster this script accepts on chain 56.
+    address internal constant ANVIL_DEPLOYER = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
 
     // ---- BSC mainnet (chain 56) pins ----
     address internal constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
@@ -72,8 +71,6 @@ contract DeployAtp is Script {
 
     struct Deployment {
         AtpRegistry registry;
-        PancakeV3TwapOracle oracleWbnbUsdt;
-        PancakeV3TwapOracle oracleNvdabUsdt;
         AtpMultiPoolOracle multiPoolOracle;
         AtpExecutor executorMultiPool;
         address wbnbUsdtPool;
@@ -97,6 +94,9 @@ contract DeployAtp is Script {
         require(d.nvdabUsdtPool != address(0), "no NVDAB/USDT pool at 2500");
 
         vm.startBroadcast();
+        if (block.chainid == 56) {
+            require(msg.sender == ANVIL_DEPLOYER, "DeployAtp is fork-only; use DeployAtpMainnet on mainnet");
+        }
 
         bool created;
 
@@ -104,21 +104,15 @@ contract DeployAtp is Script {
         (d.registry, created) = _reuseRegistry(REGISTRY);
         _row("registry", created, address(d.registry));
 
-        // 2. One oracle per pair, all against the same numeraire (USDT).
-        (d.oracleWbnbUsdt, created) = _reuseOracle(ORACLE_WBNB_USDT, WBNB, d.wbnbUsdtPool);
-        _row("oracleWbnbUsdt", created, address(d.oracleWbnbUsdt));
-        (d.oracleNvdabUsdt, created) = _reuseOracle(ORACLE_NVDAB_USDT, NVDAB, d.nvdabUsdtPool);
-        _row("oracleNvdabUsdt", created, address(d.oracleNvdabUsdt));
-
-        // 3. The router: asset -> per-pair oracle, numeraire = USDT.
+        // 2. The router: asset -> per-pair oracle, numeraire = USDT.
         (d.multiPoolOracle, created) = _reuseMultiPool(MULTI_POOL_ORACLE);
         _row("multiPoolOracle", created, address(d.multiPoolOracle));
 
-        // 4. Register both pairs. `setOracle` refuses to overwrite, so the oracle itself is the guard.
-        _register(d.multiPoolOracle, WBNB, d.oracleWbnbUsdt);
-        _register(d.multiPoolOracle, NVDAB, d.oracleNvdabUsdt);
+        // 3. Register both pairs; the router deploys each TWAP oracle itself.
+        _register(d.multiPoolOracle, WBNB, d.wbnbUsdtPool);
+        _register(d.multiPoolOracle, NVDAB, d.nvdabUsdtPool);
 
-        // 5. Executor pinned to the router. Reused only while it still points at the router and at the same
+        // 4. Executor pinned to the router. Reused only while it still points at the router and at the same
         //    registry; the v1 executor (oracle = the WBNB/USDT pair oracle) can never satisfy that.
         (d.executorMultiPool, created) = _reuseExecutor(EXECUTOR_MULTI_POOL, d.registry, d.multiPoolOracle);
         _row("executorMultiPool", created, address(d.executorMultiPool));
@@ -138,40 +132,15 @@ contract DeployAtp is Script {
     }
 
     function _reuseRegistry(address recorded) internal returns (AtpRegistry registry, bool created) {
-        if (_live(recorded)) return (AtpRegistry(recorded), false);
-        return (new AtpRegistry(), true);
-    }
-
-    function _reuseOracle(address recorded, address asset, address pool)
-        internal
-        returns (PancakeV3TwapOracle oracle, bool created)
-    {
-        if (!_live(recorded)) {
-            return (
-                new PancakeV3TwapOracle(pool, asset, USDT, TWAP_WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE),
-                true
-            );
-        }
-        oracle = PancakeV3TwapOracle(recorded);
+        if (!_live(recorded)) return (new AtpRegistry(), true);
+        registry = AtpRegistry(recorded);
+        // Pin: the book's address is only ours if we own it. Someone else may have spent this nonce of the
+        // public anvil key on mainnet, leaving a foreign contract at the recorded address on a fresh fork.
         require(
-            address(oracle.pool()) == pool, "recorded oracle pins a different pool: clear its address first"
+            registry.owner() == msg.sender,
+            "recorded registry is not owned by the deployer: clear its address first"
         );
-        _requireFixedPairCheck(oracle);
-        return (oracle, false);
-    }
-
-    /// @dev The pool pin alone cannot tell the fixed oracle from the retired one: both pin the same pool and
-    /// answer every legitimate pair identically. Reuse therefore also probes the pair check with a token that
-    /// belongs to no pool, and re-reads a legitimate pair so that a pool which cannot serve a TWAP reports
-    /// itself instead of letting the probe pass for the wrong reason.
-    function _requireFixedPairCheck(PancakeV3TwapOracle oracle) internal view {
-        try oracle.previewSwap(STRAY_PROBE, oracle.token0(), 1e18) returns (uint256, uint256) {
-            revert("recorded oracle prices a tokenIn outside its pair: clear its address first");
-        } catch {
-            // Refused, which is what the two-sided check is there to do.
-        }
-        (uint256 quoted,) = oracle.previewSwap(oracle.token0(), oracle.token1(), 1e18);
-        require(quoted != 0, "recorded oracle cannot quote its own pair: clear its address first");
+        return (registry, false);
     }
 
     function _reuseMultiPool(address recorded) internal returns (AtpMultiPoolOracle multiPool, bool created) {
@@ -210,31 +179,27 @@ contract DeployAtp is Script {
         );
     }
 
-    /// @dev Registration is safe to repeat, and deliberately not a single overwriting call. The router answers
-    /// a re-registration with `OracleAlreadySet` rather than overwriting, so moving an asset to a different
-    /// oracle takes two explicit statements: `clearOracle` then `setOracle`.
-    ///
-    /// The gap between them leaves the asset unquotable and the router fails closed with `OracleNotSet` for
-    /// that one statement. That window is deliberate and acceptable - it is strictly narrower than an in-place
-    /// overwrite, and it is the price of an auditable oracle swap instead of a silent one. Both steps are read
-    /// back, so a run that stops in the middle reports the state it actually left rather than assuming it.
-    function _register(AtpMultiPoolOracle multiPool, address asset, PancakeV3TwapOracle oracle) internal {
-        address current = address(multiPool.oracleOf(asset));
-        if (current == address(oracle)) {
-            console.log(
-                string.concat("register            SKIP  ", vm.toString(asset), " already on this oracle")
-            );
-            return;
-        }
-        if (current != address(0)) {
+    /// @dev Safe to repeat: an asset already registered on the same pool is skipped. One registered on a
+    /// different pool is cleared first, so moving an asset takes two explicit statements and the gap fails
+    /// closed with `OracleNotSet`.
+    function _register(AtpMultiPoolOracle multiPool, address asset, address pool) internal {
+        PancakeV3TwapOracle current = multiPool.oracleOf(asset);
+        if (address(current) != address(0)) {
+            if (address(current.pool()) == pool) {
+                console.log(
+                    string.concat("register            SKIP  ", vm.toString(asset), " already on this pool")
+                );
+                return;
+            }
             multiPool.clearOracle(asset);
-            require(address(multiPool.oracleOf(asset)) == address(0), "clearOracle did not clear");
             console.log(
-                string.concat("clearOracle         CLEAR ", vm.toString(asset), " was ", vm.toString(current))
+                string.concat(
+                    "clearOracle         CLEAR ", vm.toString(asset), " was ", vm.toString(address(current))
+                )
             );
         }
-        multiPool.setOracle(asset, oracle);
-        require(address(multiPool.oracleOf(asset)) == address(oracle), "setOracle did not take");
+        PancakeV3TwapOracle oracle =
+            multiPool.setOracle(asset, pool, TWAP_WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
         console.log(
             string.concat(
                 "setOracle           SET   ", vm.toString(asset), " -> ", vm.toString(address(oracle))
@@ -256,8 +221,6 @@ contract DeployAtp is Script {
         console.log("");
         console.log("--- address book (deployments/fork.json) ---");
         console.log(string.concat("registry          = ", vm.toString(address(d.registry))));
-        console.log(string.concat("oracleWbnbUsdt    = ", vm.toString(address(d.oracleWbnbUsdt))));
-        console.log(string.concat("oracleNvdabUsdt   = ", vm.toString(address(d.oracleNvdabUsdt))));
         console.log(string.concat("multiPoolOracle   = ", vm.toString(address(d.multiPoolOracle))));
         console.log(string.concat("executorMultiPool = ", vm.toString(address(d.executorMultiPool))));
         console.log(string.concat("pool (WBNB/USDT)  = ", vm.toString(d.wbnbUsdtPool)));

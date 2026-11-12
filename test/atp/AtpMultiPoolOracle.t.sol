@@ -82,8 +82,9 @@ contract MockPool {
 }
 
 /// @notice Pins `AtpMultiPoolOracle`: quotes are forwarded bit for bit to the per-pair `PancakeV3TwapOracle`,
-/// both directions are priced, every unpriced route fails closed, `setOracle` cannot register a pair that
-/// would misprice an asset, and the router has no fund-moving surface.
+/// both directions are priced, every unpriced route fails closed, `setOracle` deploys the audited oracle
+/// itself and cannot register a pair that would misprice an asset, ownership moves only in two steps, and the
+/// router has no fund-moving surface.
 contract AtpMultiPoolOracleTest is Test {
     uint32 internal constant WINDOW = 30 minutes;
     uint16 internal constant MAX_SLIPPAGE_BPS = 50;
@@ -116,12 +117,12 @@ contract AtpMultiPoolOracleTest is Test {
 
         // Tick -276324 is a raw ratio of about 1e-12, i.e. one 18-decimal numeraire unit buys about one
         // 6-decimal asset unit. Tick 0 is raw parity, which keeps the second pair's numbers obvious.
-        (poolAsset6, oracleAsset6) = _deployPair(numeraire, asset6, -276_324);
-        (poolAsset18, oracleAsset18) = _deployPair(numeraire, asset18, 0);
+        poolAsset6 = _deployPool(numeraire, asset6, -276_324);
+        poolAsset18 = _deployPool(numeraire, asset18, 0);
 
         router = new AtpMultiPoolOracle(address(numeraire));
-        router.setOracle(address(asset6), oracleAsset6);
-        router.setOracle(address(asset18), oracleAsset18);
+        oracleAsset6 = _register(address(asset6), address(poolAsset6));
+        oracleAsset18 = _register(address(asset18), address(poolAsset18));
     }
 
     // ---- pricing ----
@@ -279,85 +280,90 @@ contract AtpMultiPoolOracleTest is Test {
         assertEq(address(router.oracleOf(address(stranger))), address(0), "unregistered asset");
     }
 
+    /// @dev The registration is the real `PancakeV3TwapOracle`, wired to exactly the arguments given.
+    function test_setOracle_deploysTheTwapOracleItself() public view {
+        assertEq(address(oracleAsset6.pool()), address(poolAsset6), "pool");
+        assertEq(oracleAsset6.twapWindow(), WINDOW, "window");
+        assertEq(oracleAsset6.maxSlippageBps(), MAX_SLIPPAGE_BPS, "slippage");
+        assertEq(oracleAsset6.maxOracleAge(), MAX_ORACLE_AGE, "age");
+        assertEq(oracleAsset6.token0(), address(numeraire), "token0");
+        assertEq(oracleAsset6.token1(), address(asset6), "token1");
+    }
+
     function test_setOracle_acceptsReversedPairOrdering() public {
         MockToken fresh = new MockToken(18);
         MockPool pool = new MockPool(address(fresh), address(numeraire)); // token0 = asset, token1 = numeraire
-        PancakeV3TwapOracle reversed = new PancakeV3TwapOracle(
-            address(pool), address(fresh), address(numeraire), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE
-        );
 
-        vm.expectEmit(true, true, false, false, address(router));
-        emit AtpMultiPoolOracle.OracleSet(address(fresh), address(reversed));
-        router.setOracle(address(fresh), reversed);
+        vm.expectEmit(true, false, false, false, address(router));
+        emit AtpMultiPoolOracle.OracleSet(address(fresh), address(0));
+        PancakeV3TwapOracle reversed =
+            router.setOracle(address(fresh), address(pool), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
         assertEq(address(router.oracleOf(address(fresh))), address(reversed), "reversed pair accepted");
+        assertEq(reversed.token0(), address(fresh), "pool order kept");
     }
 
     function test_setOracle_revertsOnZeroAddresses() public {
         vm.expectRevert(AtpMultiPoolOracle.ZeroAddress.selector);
-        router.setOracle(address(0), oracleAsset6);
+        router.setOracle(address(0), address(poolAsset6), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
 
         vm.expectRevert(AtpMultiPoolOracle.ZeroAddress.selector);
-        router.setOracle(address(stranger), PancakeV3TwapOracle(address(0)));
+        router.setOracle(address(stranger), address(0), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
-    function test_setOracle_revertsOnNonContract() public {
-        vm.expectRevert(AtpMultiPoolOracle.InvalidOracle.selector);
-        router.setOracle(address(stranger), PancakeV3TwapOracle(OUTSIDER));
+    function test_setOracle_revertsOnPoolWithoutCode() public {
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(stranger), OUTSIDER, WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
     function test_setOracle_revertsOnNumeraireAsAsset() public {
         vm.expectRevert(AtpMultiPoolOracle.NumeraireAsAsset.selector);
-        router.setOracle(address(numeraire), oracleAsset6);
+        router.setOracle(address(numeraire), address(poolAsset6), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
-    /// @dev The expensive mistake this check prevents: an oracle over a pool that does not hold the
-    /// numeraire would quote the asset against some third token and the executor would enforce it.
+    /// @dev The expensive mistake this check prevents: a pool that does not hold the numeraire would quote
+    /// the asset against some third token and the executor would enforce it.
     function test_setOracle_revertsOnPairWithoutNumeraire() public {
         MockToken target = new MockToken(18);
         MockPool wrongPool = new MockPool(address(stranger), address(target));
-        PancakeV3TwapOracle wrongOracle = new PancakeV3TwapOracle(
-            address(wrongPool), address(stranger), address(target), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE
-        );
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AtpMultiPoolOracle.PairMismatch.selector, address(target), address(wrongOracle)
-            )
-        );
-        router.setOracle(address(target), wrongOracle);
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(target), address(wrongPool), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
-    /// @dev And the mirror image: a pair that holds the numeraire but not the asset being registered.
+    /// @dev And the mirror image: a pool that holds the numeraire but not the asset being registered.
     function test_setOracle_revertsOnPairWithoutAsset() public {
         MockToken target = new MockToken(18);
         MockPool wrongPool = new MockPool(address(numeraire), address(stranger));
-        PancakeV3TwapOracle wrongOracle = new PancakeV3TwapOracle(
-            address(wrongPool),
-            address(numeraire),
-            address(stranger),
-            WINDOW,
-            MAX_SLIPPAGE_BPS,
-            MAX_ORACLE_AGE
-        );
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AtpMultiPoolOracle.PairMismatch.selector, address(target), address(wrongOracle)
-            )
-        );
-        router.setOracle(address(target), wrongOracle);
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(target), address(wrongPool), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
+    }
+
+    /// @dev Out-of-range oracle parameters are rejected by the oracle's own constructor.
+    function test_setOracle_revertsOnBadOracleParameters() public {
+        MockToken fresh = new MockToken(18);
+        MockPool pool = new MockPool(address(numeraire), address(fresh));
+
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(fresh), address(pool), 10 minutes, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
+
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(fresh), address(pool), WINDOW, 0, MAX_ORACLE_AGE);
+
+        vm.expectRevert(PancakeV3TwapOracle.InvalidConfig.selector);
+        router.setOracle(address(fresh), address(pool), WINDOW, MAX_SLIPPAGE_BPS, WINDOW - 1);
     }
 
     /// @dev Replacing the oracle that prices a live index takes two deliberate statements, not one.
     function test_setOracle_revertsOnDuplicateRegistration() public {
         vm.expectRevert(abi.encodeWithSelector(AtpMultiPoolOracle.OracleAlreadySet.selector, address(asset6)));
-        router.setOracle(address(asset6), oracleAsset6);
+        router.setOracle(address(asset6), address(poolAsset6), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
     function test_setOracle_revertsForNonOwner() public {
         vm.prank(OUTSIDER);
         vm.expectRevert(AtpMultiPoolOracle.NotOwner.selector);
-        router.setOracle(address(stranger), oracleAsset6);
+        router.setOracle(address(stranger), address(poolAsset6), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
     // ---- registry maintenance ----
@@ -374,7 +380,7 @@ contract AtpMultiPoolOracleTest is Test {
         assertEq(quoted18, 1e18, "unrelated asset still priced");
 
         // And the slot can be filled again after the explicit clear.
-        router.setOracle(address(asset6), oracleAsset6);
+        _register(address(asset6), address(poolAsset6));
         (uint256 quoted6,) = router.previewSwap(address(numeraire), address(asset6), 1000e18);
         assertEq(quoted6, 1_000_002_644, "re-registered oracle prices again");
     }
@@ -390,9 +396,22 @@ contract AtpMultiPoolOracleTest is Test {
         router.clearOracle(address(asset6));
     }
 
-    function test_transferOwnership_movesTheRegistryRole() public {
+    /// @dev Proposing does not move the role; only the proposed address accepting it does.
+    function test_transferOwnership_isTwoStep() public {
+        vm.expectEmit(true, true, false, false, address(router));
+        emit AtpMultiPoolOracle.OwnershipTransferStarted(address(this), OUTSIDER);
         router.transferOwnership(OUTSIDER);
+        assertEq(router.owner(), address(this), "owner unchanged until accepted");
+        assertEq(router.pendingOwner(), OUTSIDER, "pending owner recorded");
+
+        vm.prank(OUTSIDER);
+        vm.expectRevert(AtpMultiPoolOracle.NotOwner.selector);
+        router.clearOracle(address(asset6));
+
+        vm.prank(OUTSIDER);
+        router.acceptOwnership();
         assertEq(router.owner(), OUTSIDER, "ownership handed over");
+        assertEq(router.pendingOwner(), address(0), "pending cleared");
 
         vm.prank(OUTSIDER);
         router.clearOracle(address(asset6));
@@ -402,15 +421,30 @@ contract AtpMultiPoolOracleTest is Test {
         router.clearOracle(address(asset18));
     }
 
+    function test_acceptOwnership_revertsForAnyoneButThePendingOwner() public {
+        router.transferOwnership(OUTSIDER);
+        vm.prank(address(0xCAFE));
+        vm.expectRevert(AtpMultiPoolOracle.NotPendingOwner.selector);
+        router.acceptOwnership();
+
+        vm.expectRevert(AtpMultiPoolOracle.NotPendingOwner.selector);
+        router.acceptOwnership();
+    }
+
+    /// @dev Proposing `address(0)` cancels a handover: the earlier proposal can no longer accept.
+    function test_transferOwnership_toZeroCancels() public {
+        router.transferOwnership(OUTSIDER);
+        router.transferOwnership(address(0));
+        vm.prank(OUTSIDER);
+        vm.expectRevert(AtpMultiPoolOracle.NotPendingOwner.selector);
+        router.acceptOwnership();
+        assertEq(router.owner(), address(this), "owner unchanged");
+    }
+
     function test_transferOwnership_revertsForNonOwner() public {
         vm.prank(OUTSIDER);
         vm.expectRevert(AtpMultiPoolOracle.NotOwner.selector);
         router.transferOwnership(OUTSIDER);
-    }
-
-    function test_transferOwnership_revertsOnZeroAddress() public {
-        vm.expectRevert(AtpMultiPoolOracle.ZeroAddress.selector);
-        router.transferOwnership(address(0));
     }
 
     function test_constructor_revertsOnZeroNumeraire() public {
@@ -465,16 +499,15 @@ contract AtpMultiPoolOracleTest is Test {
 
     // ---- helpers ----
 
-    /// @dev Deploys a mock pool plus the real `PancakeV3TwapOracle` over it, with `a` as the pool's token0.
-    function _deployPair(MockToken a, MockToken b, int24 meanTick)
-        private
-        returns (MockPool pool, PancakeV3TwapOracle oracle)
-    {
+    /// @dev Deploys a mock pool with `a` as token0 and the given mean tick over both windows.
+    function _deployPool(MockToken a, MockToken b, int24 meanTick) private returns (MockPool pool) {
         pool = new MockPool(address(a), address(b));
         pool.setMeanTick(meanTick, WINDOW);
-        oracle = new PancakeV3TwapOracle(
-            address(pool), address(a), address(b), WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE
-        );
+    }
+
+    /// @dev Registers `asset` through the router, which deploys the real `PancakeV3TwapOracle` over `pool`.
+    function _register(address asset, address pool) private returns (PancakeV3TwapOracle) {
+        return router.setOracle(asset, pool, WINDOW, MAX_SLIPPAGE_BPS, MAX_ORACLE_AGE);
     }
 
     /// @dev True when `selector` appears as four consecutive bytes anywhere in `target`'s deployed code.

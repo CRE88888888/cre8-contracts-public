@@ -7,8 +7,11 @@ pragma solidity ^0.8.26;
 /// @dev Weights are data, not logic: the keeper reads them, the executor only uses the asset set of the
 /// enrolled version as an allowlist. A published version is immutable; a provider changes weights by
 /// publishing the next version, and existing enrollments keep the version they pinned until they re-enroll.
-/// TODO: owner is a single key in v1 (multisig / timelock before mainnet), and `enroll` has no two-phase
-/// signature check yet - see docs/atp-pivot-executor-spec.zh-TW.md §6.
+/// @dev Roles: `owner` (a Safe on mainnet) holds every admin power and hands it over in two steps
+/// (`transferOwnership` → `acceptOwnership`). `operator` is the backend relayer key, set and revoked by the
+/// owner: it may only `enroll` accounts and pause/resume them, so a leaked relayer key cannot touch fees,
+/// strategies' versions or ownership. `enroll` still has no two-phase user signature - see
+/// docs/atp-pivot-executor-spec.zh-TW.md §6.
 contract AtpRegistry {
     // ---- types ----
     struct Version {
@@ -46,8 +49,12 @@ contract AtpRegistry {
     uint256 public constant MAX_VERSION_ASSETS = 16;
 
     // ---- admin / fee ----
-    /// @notice Admin key (multisig before mainnet). Also the only address that may move `feeRecipient`.
+    /// @notice Admin (a Safe on mainnet). Also the only address that may move `feeRecipient`.
     address public owner;
+    /// @notice Proposed next owner; becomes `owner` only when it calls `acceptOwnership`.
+    address public pendingOwner;
+    /// @notice Relayer key allowed to `enroll` accounts and `setPaused`; zero means no operator.
+    address public operator;
     /// @notice Default swap fee for strategies without an override.
     uint16 public defaultSwapFeeBps;
     /// @notice Per-strategy swap fee override; 0 means "use `defaultSwapFeeBps`".
@@ -68,6 +75,8 @@ contract AtpRegistry {
 
     // ---- events ----
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OperatorUpdated(address indexed previousOperator, address indexed newOperator);
     event DefaultFeeBpsUpdated(uint16 bps);
     event FeeBpsUpdated(uint256 indexed id, uint16 bps);
     event StrategyRegistered(uint256 indexed id, address indexed provider, string name);
@@ -77,6 +86,7 @@ contract AtpRegistry {
 
     // ---- errors ----
     error NotOwner();
+    error NotPendingOwner();
     error ZeroAddress();
     error FeeTooHigh(uint16 bps);
     error UnknownStrategy(uint256 id);
@@ -100,14 +110,32 @@ contract AtpRegistry {
         _;
     }
 
+    modifier onlyOwnerOrOperator() {
+        if (msg.sender != owner && msg.sender != operator) revert Unauthorized();
+        _;
+    }
+
     // ---- admin ----
 
-    /// @notice Hand the admin role to `next`. Single-step on purpose in v1; a two-step handover lands with
-    /// the multisig TODO.
+    /// @notice Propose `next` as the new owner. Nothing changes until `next` calls `acceptOwnership`, so a
+    /// mistyped address can never take the role. Proposing `address(0)` cancels a pending handover.
     function transferOwnership(address next) external onlyOwner {
-        if (next == address(0)) revert ZeroAddress();
-        emit OwnershipTransferred(owner, next);
-        owner = next;
+        pendingOwner = next;
+        emit OwnershipTransferStarted(owner, next);
+    }
+
+    /// @notice Complete a handover started by `transferOwnership`; callable only by the proposed owner.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    /// @notice Set (or with `address(0)` revoke) the relayer key allowed to enroll and pause accounts.
+    function setOperator(address next) external onlyOwner {
+        emit OperatorUpdated(operator, next);
+        operator = next;
     }
 
     /// @notice Set the swap fee used by every strategy without an override.
@@ -171,10 +199,11 @@ contract AtpRegistry {
     // ---- enrollment ----
 
     /// @notice Enroll `account` into `id`, pinning the currently active version (and clearing any pause).
-    /// @dev Callable by the account itself, or by the owner/backend. Re-enrolling is also how a follower
-    /// moves to a newer version. TODO: replace the owner branch with the two-phase signed intent.
+    /// @dev Callable by the account itself, or by the operator (backend relayer). The owner cannot enroll:
+    /// it is a Safe and has no reason to. Re-enrolling is also how a follower moves to a newer version.
+    /// TODO: replace the operator branch with the two-phase signed intent.
     function enroll(address account, uint256 id) external {
-        if (msg.sender != account && msg.sender != owner) revert Unauthorized();
+        if (msg.sender != account && msg.sender != operator) revert Unauthorized();
         if (account == address(0)) revert ZeroAddress();
         if (strategies[id].provider == address(0)) revert UnknownStrategy(id);
         uint16 version = activeVersion[id];
@@ -186,7 +215,7 @@ contract AtpRegistry {
     }
 
     /// @notice Pause or resume an enrolled account. A paused account fails every `executeRebalance`.
-    function setPaused(address account, bool paused) external onlyOwner {
+    function setPaused(address account, bool paused) external onlyOwnerOrOperator {
         if (!isEnrolled[account]) revert Unauthorized();
         _enrollments[account].paused = paused;
         emit EnrollmentPausedSet(account, paused);
