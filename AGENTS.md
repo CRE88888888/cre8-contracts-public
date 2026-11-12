@@ -2,6 +2,8 @@
 
 給 AI agent 與新工程師的工作規則。內容皆從本 repo 程式碼、README 與 commit 歷史查證；不確定的地方會寫明。
 
+**Claude 與 Codex 分工**：規則見 [docs/AGENT_COLLABORATION](https://github.com/CRE8Finance/docs/blob/main/docs/AGENT_COLLABORATION.zh-TW.md)。本 repo 的程式碼（合約、測試、部署腳本、fork 預演）只有 Claude 寫。開工前先看本 repo 有沒有標 `agent:claude` 或 `agent:codex` 的進行中 issue，有就排隊；分支前綴 Claude 用 `claude/*`、Codex 用 `codex/*`。
+
 ## 這個 repo 是什麼
 
 CRE8 ATP（Automated Token Portfolio）的 BSC 智慧合約，Foundry 專案。自 bnb-agent-vaults 的 pooled-vault 架構遷出：每人一個 non-custodial smart account，平台只做「權重＋排程」的執行與分發。核心不變式與 spec 見 README（spec 檔在 bnb-agent-vaults repo）。
