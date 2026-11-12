@@ -101,6 +101,7 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
   expect_revert "clearOracle"       $RT "clearOracle(address)" 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c --unlocked --from "$WHO"
   expect_revert "registry transferOwnership" $REG "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
   expect_revert "router transferOwnership"   $RT "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
+  expect_revert "executor setGlobalPaused"   $EX "setGlobalPaused(bool)" true --unlocked --from "$WHO"
 done
 
 echo "== operator 的日常權限（策略、enroll、暫停）"
@@ -119,6 +120,11 @@ expect_revert "Safe（owner）enroll" $REG "enroll(address,uint256)" $S2 1 --unl
 echo "== Safe 的 admin 權限"
 cast send -q $EX "setFeeRecipient(address)" "$SAFE" --unlocked --from "$SAFE" >/dev/null && ok "Safe setFeeRecipient"
 cast send -q $REG "setOperator(address)" "$OPERATOR" --unlocked --from "$SAFE" >/dev/null && ok "Safe setOperator"
+[ "$(cast call $EX 'globalPaused()(bool)')" = "false" ] || fail "部署後 globalPaused 應為 false"
+cast send -q $EX "setGlobalPaused(bool)" true --unlocked --from "$SAFE" >/dev/null
+[ "$(cast call $EX 'globalPaused()(bool)')" = "true" ] && ok "Safe setGlobalPaused(true) → 全域暫停" || fail "全域暫停"
+cast send -q $EX "setGlobalPaused(bool)" false --unlocked --from "$SAFE" >/dev/null
+[ "$(cast call $EX 'globalPaused()(bool)')" = "false" ] && ok "Safe setGlobalPaused(false) → 恢復" || fail "恢復"
 
 echo "== 報價（100 USDT → 各資產）"
 for a in 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c 0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \

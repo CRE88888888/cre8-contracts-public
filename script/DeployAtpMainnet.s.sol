@@ -184,6 +184,7 @@ contract DeployAtpMainnet is Script {
         require(address(executor.universalRouter()) == V3_UNIVERSAL_ROUTER, "executor router");
         require(executor.feeRecipient() == treasury, "executor feeRecipient");
         require(registry.defaultSwapFeeBps() == 0, "default fee");
+        require(!executor.globalPaused(), "executor globalPaused");
 
         for (uint256 i; i < specs.length; ++i) {
             PancakeV3TwapOracle oracle = router.oracleOf(specs[i].asset);

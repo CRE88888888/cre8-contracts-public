@@ -42,6 +42,10 @@ contract AtpExecutor is ReentrancyGuard {
     IPermit2 public immutable permit2;
     /// @notice Receives the swap fee (admin-settable, registry owner only).
     address public feeRecipient;
+    /// @notice Kill switch (registry owner only): while set, every `executeRebalance` reverts, sales to the
+    /// numeraire included. For an oracle or executor incident, where even a sale would trade against a wrong
+    /// floor. Owners can still move funds out of their own accounts; that path never touches this contract.
+    bool public globalPaused;
 
     struct SwapStep {
         /// @notice Token sold, pulled from the account.
@@ -70,6 +74,7 @@ contract AtpExecutor is ReentrancyGuard {
         uint256 oracleFloor
     );
     event FeeRecipientUpdated(address indexed previousRecipient, address indexed newRecipient);
+    event GlobalPausedSet(bool paused);
 
     error InvalidConfig();
     error NotOwner();
@@ -78,6 +83,9 @@ contract AtpExecutor is ReentrancyGuard {
     error NotContract();
     error NotEnrolled();
     error Paused();
+    /// @dev The registry owner stopped every rebalance (`globalPaused`). Distinct from `Paused`, which is one
+    /// account's enrollment.
+    error ExecutorPaused();
     error DeadlineExpired();
     error ZeroAmount();
     /// @dev `amountIn` does not fit Permit2's uint160 allowance model, so the Permit2 leg would truncate it.
@@ -134,6 +142,14 @@ contract AtpExecutor is ReentrancyGuard {
         feeRecipient = next;
     }
 
+    /// @notice Stop (`true`) or resume (`false`) every rebalance in one transaction. Registry owner only, the
+    /// same single admin key as `setFeeRecipient`; the operator has no access.
+    function setGlobalPaused(bool paused) external {
+        if (msg.sender != registry.owner()) revert NotOwner();
+        globalPaused = paused;
+        emit GlobalPausedSet(paused);
+    }
+
     // ---- execution ----
 
     /// @notice Execute one rebalance batch for `account`.
@@ -144,6 +160,7 @@ contract AtpExecutor is ReentrancyGuard {
         external
         nonReentrant
     {
+        if (globalPaused) revert ExecutorPaused();
         if (msg.sender != account) revert NotAccount();
         if (account.code.length == 0) revert NotContract();
         if (block.timestamp > deadline) revert DeadlineExpired();

@@ -153,6 +153,12 @@ contract DeployAtp is Script {
         return (multiPool, false);
     }
 
+    /// @dev An executor deployed before A10-3 (still alive on a long-running fork) has no `globalPaused`.
+    function _hasGlobalPause(address candidate) internal view returns (bool) {
+        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("globalPaused()"));
+        return ok && ret.length == 32;
+    }
+
     function _reuseExecutor(address recorded, AtpRegistry registry, AtpMultiPoolOracle multiPool)
         internal
         returns (AtpExecutor executor, bool created)
@@ -164,6 +170,12 @@ contract DeployAtp is Script {
                 address(candidate.oracle()) == address(multiPool)
                     && address(candidate.registry()) == address(registry)
             ) {
+                // Reusing it would silently drop the kill switch, and deploying a replacement would leave the
+                // book pointing at the old one (a new executor on every run). Stop instead.
+                require(
+                    _hasGlobalPause(recorded),
+                    "recorded executor predates the global pause (A10-3): restart the fork"
+                );
                 return (candidate, false);
             }
         }

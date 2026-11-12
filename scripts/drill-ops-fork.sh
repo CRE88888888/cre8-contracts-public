@@ -3,7 +3,7 @@
 #   1. 緊急暫停單一帳戶（先撤 operator，再暫停）
 #   2. 撤銷並更換 operator（relayer 私鑰外洩）
 #   3. Safe 交接（換 Safe／換簽署人）
-#   4. 緊急開關盤點：沒有全域暫停；資產層只能 clearOracle
+#   4. 全域暫停（Safe 一筆停全部、一筆恢復）；備案：逐資產 clearOracle
 # 每一步都讀鏈上的值驗證，全部 ✓ 才算過。步驟與注意事項見 docs/ops-drill.zh-TW.md。
 #
 # 不送任何主網交易，也不需要私鑰：所有角色都是 anvil 預設測試地址，用 impersonate 代簽；
@@ -158,18 +158,30 @@ send "$SAFE_B" $REG "setOperator(address)" $OP2
 eq "    Safe B setOperator" "$(cast call $REG 'operator()(address)')" "$OP2"
 
 echo
-echo "== 情境 4：緊急開關盤點"
-forge inspect AtpExecutor methodIdentifiers | grep -qi paus && fail "executor 出現 pause 函式，文件要更新" \
-  || ok "4-1 executor 沒有全域暫停；registry 只有逐帳戶 setPaused"
+echo "== 情境 4：全域暫停（Safe 一筆停全部、一筆恢復）"
+eq "4-1 部署後 globalPaused = false" "$(cast call $EX 'globalPaused()(bool)')" "false"
+expect_err "4-2 operator 啟動全域暫停" "NotOwner()" $OP2 $EX "setGlobalPaused(bool)" true
+expect_err "    舊 Safe A 啟動全域暫停" "NotOwner()" "$SAFE_A" $EX "setGlobalPaused(bool)" true
+send "$SAFE_B" $EX "setGlobalPaused(bool)" true
+eq "4-3 Safe B setGlobalPaused(true) → globalPaused = true" "$(cast call $EX 'globalPaused()(bool)')" "true"
+expect_err "4-4 帳戶 executeRebalance（未被逐帳戶暫停）" "ExecutorPaused()" $ACCOUNT $EX \
+  "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" $ACCOUNT "[]" 99999999999
+expect_err "4-5 operator 解除全域暫停" "NotOwner()" $OP2 $EX "setGlobalPaused(bool)" false
+send "$SAFE_B" $EX "setGlobalPaused(bool)" false
+eq "4-6 Safe B setGlobalPaused(false) → globalPaused = false" "$(cast call $EX 'globalPaused()(bool)')" "false"
+rebalance_noop && ok "4-7 恢復後 executeRebalance 不再 revert" || fail "恢復後 executeRebalance 仍 revert"
+
+echo
+echo "== 情境 4 備案：逐資產拔價格來源（只停單一資產）"
 send "$SAFE_B" $RT "clearOracle(address)" $WBNB
-eq "4-2 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0" "$(cast call $RT 'oracleOf(address)(address)' $WBNB)" "$ZERO"
-expect_err "4-3 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停）" "OracleNotSet(address)" $S1 $RT \
+eq "4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0" "$(cast call $RT 'oracleOf(address)(address)' $WBNB)" "$ZERO"
+expect_err "4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停）" "OracleNotSet(address)" $S1 $RT \
   "previewSwap(address,address,uint256)" $USDT $WBNB 100000000000000000000
 send "$SAFE_B" $RT "setOracle(address,address,uint32,uint16,uint32)" $WBNB $WBNB_POOL 1800 100 3600
 NEW_ORACLE=$(cast call $RT 'oracleOf(address)(address)' $WBNB)
 [ "$NEW_ORACLE" != "$ZERO" ] || fail "setOracle"
 q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT $WBNB 100000000000000000000 | head -1 | awk '{print $1}')
-[ "$q" != "0" ] && ok "4-4 Safe B setOracle 恢復（新 oracle $NEW_ORACLE），報價 $q" || fail "恢復後報價為 0"
+[ "$q" != "0" ] && ok "4-10 Safe B setOracle 恢復（新 oracle $NEW_ORACLE），報價 $q" || fail "恢復後報價為 0"
 
 echo
 echo "演練全部通過。"

@@ -4,16 +4,16 @@
 
 合約上線後，平台有兩種「鑰匙」：
 
-- **Safe**（多簽錢包，至少 2 個人一起簽才能動）：最高權限。可以換 operator、暫停任何帳戶、改手續費、換價格來源、把整個管理權交給另一個 Safe。
+- **Safe**（多簽錢包，至少 2 個人一起簽才能動）：最高權限。可以換 operator、暫停任何帳戶、一次暫停全部交易、改手續費、換價格來源、把整個管理權交給另一個 Safe。
 - **operator**（後端伺服器上的一把私鑰）：只能做日常的兩件事：幫使用者「加入策略」(enroll) 和「暫停／恢復」某個帳戶。動不到錢、手續費和管理權。
 
 出事時要記住三件事：
 
 1. **要暫停某個帳戶，先撤掉 operator，再暫停。** operator 可以解除暫停，也可以用「重新加入策略」把暫停清掉。如果懷疑 operator 的私鑰外洩，先暫停的話，對方可以馬上解除。
 2. **使用者自己重新加入策略，也會清掉暫停。** Safe 的暫停只能擋住平台這一側，擋不住帳戶本人。
-3. **目前沒有「一鍵全部停止」的開關。** 只能逐個帳戶暫停，或逐個資產拔掉價格來源（所有人那個資產的交易都會停）。
+3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 
-以下三個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
+以下四個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
 
 ## 怎麼重跑
 
@@ -86,26 +86,44 @@ registry 和 router 各自做兩步交接；executor 沒有自己的 owner，`se
 - registry 和 router 是兩筆獨立的交接，**兩筆都要接受**。只接受一筆的話，兩份合約的 owner 會不一樣（例如 router 還在 Safe A 手上）。演練 3-4 兩邊都有驗。
 - 只換簽署人（不換 Safe 地址）不用動合約，在 Safe 介面裡增刪簽署人即可；本情境是換成另一個 Safe 地址的做法。
 
-## 情境 4：緊急開關盤點
+## 情境 4：全域暫停
 
-**目前沒有全域暫停。** executor 沒有 pause 函式，registry 只有逐帳戶的 `setPaused`（4-1 用 `forge inspect` 驗證）。要「全部停下來」，只有下面兩條路：
+**什麼時候用：** oracle 或 executor 本身有問題，例如報價異常、發現合約漏洞，任何一筆再平衡都可能用錯的地板價成交。
 
-- 撤 operator（1-1）後逐個帳戶 `setPaused`，帳戶數多時要很多筆 Safe 交易；
-- **逐資產拔價格來源：** Safe 對 router 送 `clearOracle(資產)`。之後所有帳戶涉及該資產的 swap 都會 fail closed（`OracleNotSet`）。
+executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）能切換；Safe 交接後，開關自動跟著新 Safe。`executeRebalance` 第一行就檢查它，比任何逐帳戶的檢查都早。
 
 | 步驟 | 誰簽 | 呼叫 | 預期結果 |
 | --- | --- | --- | --- |
-| 4-2 | Safe | router `clearOracle(WBNB)` | `oracleOf(WBNB)` = 0 |
-| 4-3 | （任何人） | router `previewSwap(USDT, WBNB, …)` | revert `OracleNotSet(address)` |
-| 4-4 | Safe | router `setOracle(WBNB, 池子, 1800, 100, 3600)` | 部署一個**新的** oracle，報價恢復 |
+| 4-1 | — | executor `globalPaused()` | 部署後是 false |
+| 4-2 | （operator、舊 Safe 嘗試） | executor `setGlobalPaused(true)` | revert `NotOwner()` |
+| 4-3 | Safe | executor `setGlobalPaused(true)` | `globalPaused()` = true |
+| 4-4 | （帳戶嘗試，帳戶本身沒被暫停） | executor `executeRebalance(帳戶, …)` | revert `ExecutorPaused()` |
+| 4-5 | （operator 嘗試） | executor `setGlobalPaused(false)` | revert `NotOwner()` |
+| 4-6 | Safe | executor `setGlobalPaused(false)` | `globalPaused()` = false |
+| 4-7 | 帳戶 | `executeRebalance(帳戶, [], …)` | 不再 revert |
 
-**注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。7 個資產全停就要 7 筆 Safe 交易，恢復也要 7 筆。
+**注意：**
+- 全域暫停**連賣成 USDT 也擋**：會用到它，通常是價格來源有問題，這時賣出也會用錯的地板價。使用者退出走 owner 轉出（錢包的 sudo 交易），不經過 executor，不受影響。
+- 錯誤名稱是 `ExecutorPaused()`，跟單一帳戶的 `Paused()` 不同，後端和 app 用它分辨「平台暫停」和「你的帳戶暫停」。
+- 全域暫停不改任何帳戶的 enrollment，也不改逐帳戶暫停。恢復後每個帳戶回到原本的狀態。
 
-## 演練輸出（2026-11-12，fork block 133187577，42 秒）
+### 備案：逐資產拔價格來源
+
+只想停單一資產時，Safe 對 router 送 `clearOracle(資產)`。之後所有帳戶涉及該資產的 swap 都會 fail closed（`OracleNotSet`），其他資產照常。
+
+| 步驟 | 誰簽 | 呼叫 | 預期結果 |
+| --- | --- | --- | --- |
+| 4-8 | Safe | router `clearOracle(WBNB)` | `oracleOf(WBNB)` = 0 |
+| 4-9 | （任何人） | router `previewSwap(USDT, WBNB, …)` | revert `OracleNotSet(address)` |
+| 4-10 | Safe | router `setOracle(WBNB, 池子, 1800, 100, 3600)` | 部署一個**新的** oracle，報價恢復 |
+
+**注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
+
+## 演練輸出（2026-11-13，fork block 133197019，28 秒）
 
 ```
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0xC5A6CFacA6BE8dB9D011F17666E729B560265Ca0（2-of-3：#1 #2 #3）
+  ✓ Safe A 0xA5b01c26BaB3c4194d45C3cd6Aa8fB23f3B7Fef5（2-of-3：#1 #2 #3）
   ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xcd8a3ae15dff0fc218473ca58d00f4b49b6414a9
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
@@ -132,7 +150,7 @@ registry 和 router 各自做兩步交接；executor 沒有自己的 owner，`se
   ✓ 2-6 帳戶恢復，executeRebalance 不再 revert
 
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0xD0BA62DcCbf6FDfD98b9488e3EaF4AC0ca962427（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x11574a86dfE775B6921d86b855c65103E3fEb3D8（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -151,11 +169,20 @@ registry 和 router 各自做兩步交接；executor 沒有自己的 owner，`se
   ✓ 3-6 Safe B setFeeRecipient（executor 跟著 registry owner，不用另外交接）
   ✓     Safe B setOperator
 
-== 情境 4：緊急開關盤點
-  ✓ 4-1 executor 沒有全域暫停；registry 只有逐帳戶 setPaused
-  ✓ 4-2 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
-  ✓ 4-3 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-4 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 153292749463350088
+== 情境 4：全域暫停（Safe 一筆停全部、一筆恢復）
+  ✓ 4-1 部署後 globalPaused = false
+  ✓ 4-2 operator 啟動全域暫停 → revert NotOwner()
+  ✓     舊 Safe A 啟動全域暫停 → revert NotOwner()
+  ✓ 4-3 Safe B setGlobalPaused(true) → globalPaused = true
+  ✓ 4-4 帳戶 executeRebalance（未被逐帳戶暫停） → revert ExecutorPaused()
+  ✓ 4-5 operator 解除全域暫停 → revert NotOwner()
+  ✓ 4-6 Safe B setGlobalPaused(false) → globalPaused = false
+  ✓ 4-7 恢復後 executeRebalance 不再 revert
+
+== 情境 4 備案：逐資產拔價格來源（只停單一資產）
+  ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
+  ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152360556379834836
 
 演練全部通過。
 ```
