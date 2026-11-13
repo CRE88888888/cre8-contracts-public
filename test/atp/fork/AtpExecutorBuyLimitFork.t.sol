@@ -94,11 +94,12 @@ contract AtpExecutorBuyLimitForkTest is Test {
         step.tokenOut = tokenOut;
         step.amountIn = amountIn;
         step.amountOutMin = minimum;
-        step.commands = hex"00";
-        step.inputs = new bytes[](1);
-        step.inputs[0] = abi.encode(
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(
             address(executor), amountIn, minimum, abi.encodePacked(tokenIn, fee, tokenOut), true
         );
+        step.venue = V3_UNIVERSAL_ROUTER;
+        step.data = abi.encode(hex"00", inputs);
     }
 
     function _buy(uint256 usdtIn) internal view returns (AtpExecutor.SwapStep memory) {

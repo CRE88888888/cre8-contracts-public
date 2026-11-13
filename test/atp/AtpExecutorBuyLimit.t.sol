@@ -155,11 +155,12 @@ contract AtpExecutorBuyLimitTest is Test {
         step.tokenOut = tokenOut;
         step.amountIn = amountIn;
         step.amountOutMin = quoted;
-        step.commands = hex"00";
-        step.inputs = new bytes[](1);
-        step.inputs[0] = abi.encode(
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(
             address(executor), amountIn, quoted, abi.encodePacked(tokenIn, uint24(500), tokenOut), true
         );
+        step.venue = address(router); // the Universal Router venue registered at construction
+        step.data = abi.encode(hex"00", inputs);
     }
 
     function _run(AtpExecutor.SwapStep memory a) internal {

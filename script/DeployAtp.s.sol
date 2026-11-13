@@ -162,11 +162,13 @@ contract DeployAtp is Script {
         return (multiPool, false);
     }
 
-    /// @dev An executor deployed before A10-1 (still alive on a long-running fork) has no buy limit (and, if
-    /// older still, no global pause either). A10-1 shipped after A10-3, so `maxBuyBps` vouches for both.
-    function _hasBuyLimit(address candidate) internal view returns (bool) {
-        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("maxBuyBps()"));
-        return ok && ret.length == 32;
+    /// @dev An executor deployed before the venue allowlist (#15; still alive on a long-running fork) has the
+    /// old `SwapStep` ABI and no venues (and, if older still, no buy limit or global pause). The allowlist
+    /// shipped after A10-1 and A10-3, so `venues` vouches for all three.
+    function _hasVenues(address candidate) internal view returns (bool) {
+        (bool ok, bytes memory ret) =
+            candidate.staticcall(abi.encodeWithSignature("venues(address)", V3_UNIVERSAL_ROUTER));
+        return ok && ret.length == 64;
     }
 
     function _reuseExecutor(address recorded, AtpRegistry registry, AtpMultiPoolOracle multiPool)
@@ -180,11 +182,11 @@ contract DeployAtp is Script {
                 address(candidate.oracle()) == address(multiPool)
                     && address(candidate.registry()) == address(registry)
             ) {
-                // Reusing it would silently drop the buy limit / kill switch, and deploying a replacement would
-                // leave the book pointing at the old one (a new executor on every run). Stop instead.
+                // Reusing it would silently drop the venue allowlist (and older guards), and deploying a
+                // replacement would leave the book pointing at the old one (a new executor on every run).
                 require(
-                    _hasBuyLimit(recorded),
-                    "recorded executor predates the buy limit (A10-1): restart the fork"
+                    _hasVenues(recorded),
+                    "recorded executor predates the venue allowlist (#15): restart the fork"
                 );
                 return (candidate, false);
             }

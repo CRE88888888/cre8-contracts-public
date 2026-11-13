@@ -5,6 +5,8 @@
 #   3. Safe 交接（換 Safe／換簽署人）
 #   4. 全域暫停（Safe 一筆停全部、一筆恢復）；備案：逐資產 clearOracle
 #   5. 買入額度與「只准賣出」模式（真的在 fork 上 swap）
+#   6. venue 白名單：Safe 加入 KyberSwap、OpenOcean，用它們 API 現拿的 calldata 在 fork 上成交，移除後立刻停用
+#      （需要網路連到兩家的公開 API；只送查詢，不送任何交易）
 # 每一步都讀鏈上的值驗證，全部 ✓ 才算過。步驟與注意事項見 docs/ops-drill.zh-TW.md。
 #
 # 不送任何主網交易，也不需要私鑰：所有角色都是 anvil 預設測試地址，用 impersonate 代簽；
@@ -27,6 +29,7 @@ SAFE_SINGLETON=0x29fcB43b46531BcA003ddC8FCB67FFE91900C762   # SafeL2 v1.4.1
 SAFE_FALLBACK=0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99    # CompatibilityFallbackHandler v1.4.1
 USDT=0x55d398326f99059fF775485246999027B3197955
 WBNB=0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
+DOGE=0xbA2aE424d960c26247Dd6c32edC70B295c744C43   # 直接池淺，靠聚合器才買得到大單（docs#26、#29）
 WBNB_POOL=0x36696169C63e42cd08ce11f5deeBbCeBae652050          # 與 DeployAtpMainnet 相同
 
 # 角色：全部是 anvil 預設測試地址（只存在 fork 上）
@@ -46,7 +49,16 @@ fail() { echo "  ✗ $*"; exit 1; }
 # 讓某個地址可以在 fork 上送交易（impersonate + 給 gas）
 actor() { cast rpc anvil_impersonateAccount "$1" >/dev/null; cast rpc anvil_setBalance "$1" 0x16345785D8A0000 >/dev/null; }
 # $1 = 誰送，其餘 = cast send 參數；失敗就整份停
-send() { local from="$1"; shift; cast send -q "$@" --unlocked --from "$from" >/dev/null || fail "send $*"; }
+# 交易成功要看 receipt 的 status，不能只看 cast 的結束碼；失敗時用 cast call 重跑一次印出 revert 原因
+send() {
+  local from="$1"; shift
+  local out
+  # 固定 gas limit：cast 對 executeRebalance（UR 與聚合器路徑）的估算偶爾偏低，交易會 out of gas。
+  # backend 送真的 UserOp 時也要對估算加餘裕。
+  out=$(cast send --json --gas-limit 5000000 "$@" --unlocked --from "$from" 2>&1) || fail "send $1 $2：$(tail -c 300 <<<"$out")"
+  [ "$(jq -r .status <<<"$out" 2>/dev/null)" = "0x1" ] \
+    || fail "send $1 $2 reverted（gasUsed $(jq -r .gasUsed <<<"$out")／gas limit $(cast tx "$(jq -r .transactionHash <<<"$out")" gas)）：$(cast call "$@" --from "$from" 2>&1 | tail -c 300)"
+}
 # 驗證某個呼叫會 revert 而且是指定的 error，不是別的原因（沒解鎖、沒錢、參數錯）
 # $1 = 說明, $2 = error 名稱（如 "Unauthorized()"）, $3 = 誰送, 其餘 = 目標與函式參數
 expect_err() {
@@ -59,7 +71,7 @@ expect_err() {
 eq() { [ "$(tr '[:upper:]' '[:lower:]' <<<"$2")" = "$(tr '[:upper:]' '[:lower:]' <<<"$3")" ] && ok "$1" || fail "$1：得到 $2，預期 $3"; }
 flags_of() { cast call $REG 'pauseFlags(address)(uint8)' "$1"; }   # 1 = Safe、2 = operator、4 = 帳戶本人
 paused_of() { cast call $REG "enrollments(address)((uint256,uint16,bool))" "$1" | tr -d '()' | awk -F', ' '{print $3}'; }
-rebalance_noop() { cast call $EX "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" \
+rebalance_noop() { cast call $EX "executeRebalance(address,(address,address,uint256,uint256,address,bytes)[],uint256)" \
   "$ACCOUNT" "[]" 99999999999 --from "$ACCOUNT" >/dev/null 2>&1; }
 new_safe() { # $@ = 簽署人；門檻固定 2
   local signers; signers=$(IFS=,; echo "$*")
@@ -93,7 +105,7 @@ eq "registry owner = Safe A" "$(cast call $REG 'owner()(address)')" "$SAFE_A"
 eq "router owner = Safe A" "$(cast call $RT 'owner()(address)')" "$SAFE_A"
 eq "operator = OP1" "$(cast call $REG 'operator()(address)')" "$OP1"
 send $PROVIDER $REG "registerStrategy(string,string,bool)" "Drill" "ops drill" true
-send $PROVIDER $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "[$WBNB,$USDT]" "[5000,5000]" \
+send $PROVIDER $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "[$WBNB,$USDT,$DOGE]" "[4000,4000,2000]" \
   0x0000000000000000000000000000000000000000000000000000000000000001 0
 cast rpc anvil_setCode $ACCOUNT 0x00 >/dev/null   # smart account 必須有 code，executor 才接受
 actor $ACCOUNT
@@ -110,7 +122,7 @@ eq "1-2 Safe A setPaused(帳戶, true) → paused = true" "$(paused_of $ACCOUNT)
 expect_err "1-3 舊 operator 解除暫停" "Unauthorized()" $OP1 $REG "setPaused(address,bool)" $ACCOUNT false
 expect_err "1-4 舊 operator 重新 enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256)" $ACCOUNT 1
 expect_err "1-5 帳戶 executeRebalance" "Paused()" $ACCOUNT $EX \
-  "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" $ACCOUNT "[]" 99999999999
+  "executeRebalance(address,(address,address,uint256,uint256,address,bytes)[],uint256)" $ACCOUNT "[]" 99999999999
 echo "  -- 注意：帳戶本人重新 enroll 會清掉暫停"
 send $ACCOUNT $REG "enroll(address,uint256)" $ACCOUNT 1
 eq "1-6 帳戶自己 enroll → paused = false（Safe 的暫停被帳戶本人解除）" "$(paused_of $ACCOUNT)" "false"
@@ -184,7 +196,7 @@ expect_err "    舊 Safe A 啟動全域暫停" "NotOwner()" "$SAFE_A" $EX "setGl
 send "$SAFE_B" $EX "setGlobalPaused(bool)" true
 eq "4-3 Safe B setGlobalPaused(true) → globalPaused = true" "$(cast call $EX 'globalPaused()(bool)')" "true"
 expect_err "4-4 帳戶 executeRebalance（未被逐帳戶暫停）" "ExecutorPaused()" $ACCOUNT $EX \
-  "executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)" $ACCOUNT "[]" 99999999999
+  "executeRebalance(address,(address,address,uint256,uint256,address,bytes)[],uint256)" $ACCOUNT "[]" 99999999999
 expect_err "4-5 operator 解除全域暫停" "NotOwner()" $OP2 $EX "setGlobalPaused(bool)" false
 send "$SAFE_B" $EX "setGlobalPaused(bool)" false
 eq "4-6 Safe B setGlobalPaused(false) → globalPaused = false" "$(cast call $EX 'globalPaused()(bool)')" "false"
@@ -204,7 +216,8 @@ q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT 
 
 echo
 echo "== 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）"
-REB="executeRebalance(address,(address,address,uint256,uint256,bytes,bytes[])[],uint256)"
+REB="executeRebalance(address,(address,address,uint256,uint256,address,bytes)[],uint256)"
+UR=$(cast call $EX 'universalRouter()(address)')   # 建構時就登錄的 PANCAKE_UR venue
 POOL_FEE=$(printf '0x%06x' "$(cast call $WBNB_POOL 'fee()(uint24)' | awk '{print $1}')")
 # 一個 V3 exact-in step（收款人釘在 executor），amountOutMin = oracle 地板（swap fee 為 0）
 steps_of() { # tokenIn tokenOut amountIn
@@ -212,7 +225,7 @@ steps_of() { # tokenIn tokenOut amountIn
   min=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' "$1" "$2" "$3" | sed -n 2p | awk '{print $1}')
   path=$(cast concat-hex "$1" "$POOL_FEE" "$2")
   input=$(cast abi-encode "f(address,uint256,uint256,bytes,bool)" $EX "$3" "$min" "$path" true)
-  echo "[($1,$2,$3,$min,0x00,[$input])]"
+  echo "[($1,$2,$3,$min,$UR,$(cast abi-encode "f(bytes,bytes[])" 0x00 "[$input]"))]"
 }
 bal() { cast call "$1" 'balanceOf(address)(uint256)' "$2" | awk '{print $1}'; }
 eq "5-1 部署後 maxBuyBps = 10000、numeraire = USDT" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')/$(cast call $EX 'numeraire()(address)')" "10000/$USDT"
@@ -226,7 +239,7 @@ eq "5-4 Safe B setMaxBuyBps(0) → 只准賣出" "$(cast call $EX 'maxBuyBps()(u
 expect_err "5-5 買入 USDT→WBNB" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB 1000000000000000000)" 99999999999
 send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000)" 99999999999
 USDT_GOT=$(bal $USDT $ACCOUNT)
-[ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出"
+[ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出（USDT $USDT_GOT、WBNB $(bal $WBNB $ACCOUNT)）"
 eq "    賣出不計入額度（買入窗沒有打開）" "$(cast call $EX 'buyWindowOf(address)(uint64,uint192)' $ACCOUNT | head -1)" "0"
 send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 10000
 eq "5-7 Safe B setMaxBuyBps(10000) → 恢復" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "10000"
@@ -237,6 +250,78 @@ CAP=$(sed -n 1p <<<"$ALLOW" | awk '{print $1}')
 eq "5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額" "$(sed -n 2p <<<"$ALLOW" | awk '{print $1}')" "$HALF"
 ok "    額度 = 帳戶總值 $(cast from-wei $CAP) USDT，窗口到 $(sed -n 3p <<<"$ALLOW" | awk '{print $1}')"
 expect_err "5-9 再買入一整個額度（超過）" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB $CAP)" 99999999999
+
+echo
+echo "== 情境 6：venue 白名單（聚合器，用 API 現拿的 calldata 在 fork 上成交）"
+KYBER=0x6131B5fae19EA4f9D964eAc0408E4408b66337b5      # KyberSwap MetaAggregationRouterV2（官方文件，所有鏈同址）
+OPENOCEAN=0x6352a56caadC4F1E25CD6c75970Fa768A3304e64  # OpenOcean exchange proxy（官方 API 回傳的 to）
+venue_kind() { cast call $EX 'venues(address)(uint8,address)' "$1" | head -1; }
+floor_of() { cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' "$1" "$2" "$3" | sed -n 2p | awk '{print $1}'; }
+eq "6-1 Universal Router 是建構時登錄的 PANCAKE_UR venue（kind 1）" "$(venue_kind $UR)" "1"
+eq "    KyberSwap 尚未加入（kind 0）" "$(venue_kind $KYBER)" "0"
+expect_err "6-2 operator 加 venue" "NotOwner()" $OP2 $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER
+SELL=$(( $(bal $WBNB $ACCOUNT) / 2 ))
+MIN=$(floor_of $WBNB $USDT $SELL)
+KQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" \
+  "https://aggregator-api.kyberswap.com/bsc/api/v1/routes?tokenIn=$WBNB&tokenOut=$USDT&amountIn=$SELL") || fail "KyberSwap API 無法連線"
+KB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 50}' <<<"$KQ" \
+  | curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" -H "content-type: application/json" -d @- \
+  "https://aggregator-api.kyberswap.com/bsc/api/v1/route/build") || fail "KyberSwap build 失敗"
+[ "$(jq -r .data.routerAddress <<<"$KB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 $KYBER：$(head -c 300 <<<"$KB")"
+KDATA=$(jq -r .data.data <<<"$KB")
+expect_err "6-3 KyberSwap 還沒加入就成交" "VenueNotAllowed(address)" $ACCOUNT $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL,$MIN,$KYBER,$KDATA)]" 99999999999
+send "$SAFE_B" $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER
+eq "6-4 Safe B setVenue(KyberSwap, ERC20_APPROVE) → kind 2" "$(venue_kind $KYBER)" "2"
+U0=$(bal $USDT $ACCOUNT)
+send $ACCOUNT $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL,$MIN,$KYBER,$KDATA)]" 99999999999
+GOT=$(echo "$(bal $USDT $ACCOUNT) - $U0" | bc)
+[ "$(echo "$GOT >= $MIN" | bc)" = "1" ] && ok "6-5 經 KyberSwap 賣 $(cast from-wei $SELL) WBNB → $(cast from-wei $GOT) USDT（地板 $(cast from-wei $MIN)）" || fail "KyberSwap 成交低於地板"
+eq "    executor 對 KyberSwap 的 allowance 歸零" "$(cast call $WBNB 'allowance(address,address)(uint256)' $EX $KYBER | awk '{print $1}')" "0"
+eq "    executor 沒有留下任何 WBNB／USDT" "$(bal $WBNB $EX)/$(bal $USDT $EX)" "0/0"
+echo "  -- DOGE：直接池 1,000 USDT 過不了地板，經 KyberSwap 可以（docs#26、#29）"
+cast rpc anvil_setBalance $ACCOUNT 0xA688906BD8B00000 >/dev/null   # 12 BNB（fork 上的假錢）
+send $ACCOUNT $WBNB "deposit()" --value 10ether
+send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000000)" 99999999999
+ok "6-6 帳戶包 10 BNB 並經 Pancake 賣成 $(cast from-wei $(bal $USDT $ACCOUNT)) USDT（準備買 DOGE）"
+DIN_AMT=1000000000000000000000   # 1,000 USDT
+DMIN=$(floor_of $USDT $DOGE $DIN_AMT)
+DINPUT=$(cast abi-encode "f(address,uint256,uint256,bytes,bool)" $EX $DIN_AMT 0 "$(cast concat-hex $USDT 0x002710 $DOGE)" true)
+expect_err "6-7 經 DOGE/USDT 1% 直接池買 1,000 USDT 的 DOGE" "BelowFloor(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT \
+  "[($USDT,$DOGE,$DIN_AMT,$DMIN,$UR,$(cast abi-encode "f(bytes,bytes[])" 0x00 "[$DINPUT]"))]" 99999999999
+DQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" \
+  "https://aggregator-api.kyberswap.com/bsc/api/v1/routes?tokenIn=$USDT&tokenOut=$DOGE&amountIn=$DIN_AMT") || fail "KyberSwap API 無法連線"
+DB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 50}' <<<"$DQ" \
+  | curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" -H "content-type: application/json" -d @- \
+  "https://aggregator-api.kyberswap.com/bsc/api/v1/route/build") || fail "KyberSwap build 失敗"
+[ "$(jq -r .data.routerAddress <<<"$DB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 $KYBER：$(head -c 300 <<<"$DB")"
+D0=$(bal $DOGE $ACCOUNT)
+send $ACCOUNT $EX "$REB" $ACCOUNT "[($USDT,$DOGE,$DIN_AMT,$DMIN,$KYBER,$(jq -r .data.data <<<"$DB"))]" 99999999999
+DGOT=$(echo "$(bal $DOGE $ACCOUNT) - $D0" | bc)
+[ "$(echo "$DGOT >= $DMIN" | bc)" = "1" ] && ok "6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → $(echo "scale=2; $DGOT/10^8" | bc) DOGE（地板 $(echo "scale=2; $DMIN/10^8" | bc)）" || fail "KyberSwap DOGE 成交低於地板"
+eq "    executor 沒有留下任何 USDT／DOGE、對 KyberSwap 的 allowance 歸零" "$(bal $USDT $EX)/$(bal $DOGE $EX)/$(cast call $USDT 'allowance(address,address)(uint256)' $EX $KYBER | awk '{print $1}')" "0/0/0"
+SELL2=$(bal $WBNB $ACCOUNT)
+MIN2=$(floor_of $WBNB $USDT $SELL2)
+OQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 "https://open-api.openocean.finance/v4/bsc/swap?inTokenAddress=$WBNB&outTokenAddress=$USDT&amountDecimals=$SELL2&gasPriceDecimals=50000000&slippage=0.5&account=$EX") \
+  || fail "OpenOcean API 無法連線"
+[ "$(jq -r .data.to <<<"$OQ" | tr '[:upper:]' '[:lower:]')" = "$(tr '[:upper:]' '[:lower:]' <<<"$OPENOCEAN")" ] || fail "OpenOcean 回傳的 to 不是 $OPENOCEAN：$(head -c 300 <<<"$OQ")"
+ODATA=$(jq -r .data.data <<<"$OQ")
+send "$SAFE_B" $EX "setVenue(address,uint8,address)" $OPENOCEAN 2 $OPENOCEAN
+eq "6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2" "$(venue_kind $OPENOCEAN)" "2"
+U1=$(bal $USDT $ACCOUNT)
+# OpenOcean 的 route 是照「現在的主網」算的，fork 落後一兩分鐘時，某些來源會在 OpenOcean 內部 revert。
+# 成交就驗地板；revert 就驗「整筆退回、帳戶與 executor 餘額不變」——venue 失敗不能動到任何資金。
+OOUT=$(cast send --json --gas-limit 5000000 $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL2,$MIN2,$OPENOCEAN,$ODATA)]" 99999999999 --unlocked --from $ACCOUNT 2>&1 || true)
+if [ "$(jq -r .status <<<"$OOUT" 2>/dev/null)" = "0x1" ]; then
+  GOT2=$(echo "$(bal $USDT $ACCOUNT) - $U1" | bc)
+  [ "$(echo "$GOT2 >= $MIN2" | bc)" = "1" ] && ok "6-10 經 OpenOcean 賣 $(cast from-wei $SELL2) WBNB → $(cast from-wei $GOT2) USDT（地板 $(cast from-wei $MIN2)）" || fail "OpenOcean 成交低於地板"
+else
+  echo "  ⚠ 6-10 OpenOcean 的 calldata 在 fork 上 revert：$(grep -o 'OpenOcean[^"\\]*' <<<"$OOUT" | head -1)"
+  eq "    整筆退回：帳戶 WBNB／USDT 不變" "$(bal $WBNB $ACCOUNT)/$(bal $USDT $ACCOUNT)" "$SELL2/$U1"
+fi
+eq "    executor 對 OpenOcean 的 allowance 為 0、沒有留下任何 WBNB／USDT" "$(cast call $WBNB 'allowance(address,address)(uint256)' $EX $OPENOCEAN | awk '{print $1}')/$(bal $WBNB $EX)/$(bal $USDT $EX)" "0/0/0"
+send "$SAFE_B" $EX "removeVenue(address)" $KYBER
+eq "6-11 Safe B removeVenue(KyberSwap) → kind 0" "$(venue_kind $KYBER)" "0"
+expect_err "    移除後同一筆 KyberSwap 交易" "VenueNotAllowed(address)" $ACCOUNT $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL,$MIN,$KYBER,$KDATA)]" 99999999999
 
 echo
 echo "演練全部通過。"

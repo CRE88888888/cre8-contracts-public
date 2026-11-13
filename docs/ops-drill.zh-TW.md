@@ -9,14 +9,15 @@
 
 使用者的帳戶本人（用自己錢包簽的交易）也能暫停、恢復自己，換策略或換版本只能由帳戶本人做。
 
-出事時要記住四件事：
+出事時要記住五件事：
 
 1. **Safe 暫停的帳戶，operator 解除不了。** 暫停會記下是誰暫停的（Safe、operator、帳戶本人）。operator 只能解除自己暫停的；Safe 可以解除自己和 operator 的；帳戶本人可以解除全部。懷疑 operator 私鑰外洩時，仍然建議先撤掉 operator（它還能幫新帳戶第一次加入策略）。
 2. **使用者自己恢復或重新加入策略，會清掉所有暫停。** 帳戶是使用者自己的，Safe 的暫停只能擋住平台這一側，擋不住帳戶本人；反過來，使用者自己暫停的，Safe 也解除不了。
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 4. **每個帳戶每 24 小時最多買入「帳戶總值 × 100%」，賣成 USDT 不受限制。** 外洩的 session key 就算繞過後端，自己反覆來回換幣，每一輪都要買回，買到額度就停。Safe 可以把額度調成 0，變成「只准賣出」模式：所有人都只能賣、不能買。operator 碰不到這個設定。
+5. **交易只能走 Safe 允許的「成交管道」（venue）。** 部署時只有 PancakeSwap；聚合器（KyberSwap、OpenOcean）要由 Safe 一筆加入，懷疑某個管道出問題時，Safe 一筆移除就立刻停用。就算某個管道被駭，每一步最多被吃掉「這一步的金額 − 價格地板」，它碰不到帳戶裡其他的錢。
 
-以下五個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
+以下六個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
 
 ## 怎麼重跑
 
@@ -26,6 +27,8 @@ anvil --fork-url https://bsc-dataseed.bnbchain.org --chain-id 56 --port 8547 --h
 # 終端機 2
 scripts/drill-ops-fork.sh
 ```
+
+情境 6 會呼叫 KyberSwap 和 OpenOcean 的公開 API 拿報價和 calldata（只送查詢，不送交易），所以要有網路；API 被限流時腳本會自動重試。
 
 不送主網交易、不用私鑰：所有角色都是 anvil 預設測試地址，用 `anvil_impersonateAccount` 代簽。腳本裡「Safe 送出」等同真實環境中 Safe 湊滿 2 個簽名後執行。部署用的是主網同一支 `script/DeployAtpMainnet.s.sol`。每一步都讀鏈上的值驗證；預期 revert 的步驟會檢查 revert 的 error 名稱，避免把「沒解鎖」或「沒 gas」誤算成權限擋下。
 
@@ -173,11 +176,40 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 - 使用者退出（redeem、close 都是賣成 USDT）和 owner 自己轉出不受額度影響。
 - 額度跟著「目前」總值算，所以同一天加碼存入後，額度也跟著變大。
 
-## 演練輸出（2026-11-13，fork block 133202784，40 秒）
+## 情境 6：venue 白名單（聚合器，#15）
+
+**規則：** 每一步都要指定一個 Safe 允許的 venue（成交管道）。
+- **Pancake Universal Router**：部署時由 executor 建構子自動加入，命令仍然照舊檢查，收款人必須是 executor。
+- **聚合器**：Safe 用 `setVenue(地址, 2, spender)` 加入（2 = `ERC20_APPROVE`）；calldata 照原樣轉發，不解碼。
+
+安全靠四件事：帳戶只 approve executor；executor 平常沒有任何餘額；每一步只對該 venue 給「這一步的 `amountIn`」額度，呼叫完立刻歸零；成交後 executor 收到的 `tokenOut` 必須 ≥ oracle 地板，否則整筆 revert。
+
+| 步驟 | 誰簽 | 呼叫 | 預期結果 |
+| --- | --- | --- | --- |
+| 6-1 | — | executor `venues(UR)`、`venues(KyberSwap)` | UR 是 kind 1（`PANCAKE_UR`），KyberSwap 是 0（沒有） |
+| 6-2 | （operator 嘗試） | `setVenue(KyberSwap, 2, KyberSwap)` | revert `NotOwner()` |
+| 6-3 | （帳戶嘗試） | 用 KyberSwap API 拿到的 calldata 成交 | revert `VenueNotAllowed`（還沒加入） |
+| 6-4 | Safe | `setVenue(KyberSwap, 2, KyberSwap)` | kind 2 |
+| 6-5 | 帳戶 | 同一筆 KyberSwap calldata：WBNB → USDT | 成交 ≥ 地板；executor 對 KyberSwap 的額度歸零，沒有殘留 |
+| 6-6 | 帳戶 | 包 10 BNB，經 Pancake 賣成 USDT | 準備買 DOGE 的資金（fork 上的假錢） |
+| 6-7 | （帳戶嘗試） | 1,000 USDT 經 DOGE/USDT 1% 直接池買 DOGE | revert `BelowFloor`：直接池太淺（docs#26） |
+| 6-8 | 帳戶 | 1,000 USDT 經 KyberSwap（API 現拿的 calldata）買 DOGE | 成交 ≥ 地板；**同一個資產，換成聚合器就買得到**（docs#29） |
+| 6-9 | Safe | `setVenue(OpenOcean, 2, OpenOcean)` | kind 2 |
+| 6-10 | 帳戶 | 用 OpenOcean API 拿到的 calldata 成交 | 成交就驗地板；在 fork 上 revert 時，驗「整筆退回、餘額不變」（⚠） |
+| 6-11 | Safe | `removeVenue(KyberSwap)` | kind 0；同一筆交易 revert `VenueNotAllowed` |
+
+**注意：**
+- 聚合器 API 的報價是照「現在的主網」算的，fork 落後一兩分鐘時，某些路由會在聚合器內部 revert（6-10 的 OpenOcean 就是）。聚合器路由會碰到很多 fork 還沒讀過的池子，dataseed 的歷史窗口一過就可能卡住（交易等不到確認）；遇到時重開 fork 再跑一次。這時整筆 revert、什麼都沒動，結果是安全的，但代表那個 venue 當下用不了。
+- `executeRebalance` 的 gas 估算偶爾偏低（UR 和聚合器路徑都遇過），交易會 out of gas；腳本用固定 gas limit，backend 送真的 UserOp 時也要加餘裕。
+- 加入聚合器的候選地址：
+  - KyberSwap `MetaAggregationRouterV2`：`0x6131B5fae19EA4f9D964eAc0408E4408b66337b5`（[官方文件](https://docs.kyberswap.com/developer-guide/aggregator-api/contracts)，所有鏈同址）；
+  - OpenOcean exchange：`0x6352a56caadC4F1E25CD6c75970Fa768A3304e64`（官方 API 回傳的 `to`；這是 proxy，可以升級）。
+
+## 演練輸出（2026-11-13，fork block 133297657，51 秒）
 
 ```
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0x73d35883F3Ce673Af336C34b314D2c0119AF2921（2-of-3：#1 #2 #3）
+  ✓ Safe A 0x3711909bE8bbC2279ad1415451577Cf5dff9f028（2-of-3：#1 #2 #3）
   ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xcd8a3ae15dff0fc218473ca58d00f4b49b6414a9
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
@@ -214,7 +246,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 2-10 帳戶恢復，executeRebalance 不再 revert
 
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0x1EdD6B66E068a150F23025Dc1B90136f8fF7f46c（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x3565cCCBa5267790868632efB1506b1E75311806（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -246,7 +278,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 == 情境 4 備案：逐資產拔價格來源（只停單一資產）
   ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
   ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 152406269117717839
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xc2903F80Ada219b73328025cDf23daDe08a02d96），報價 157897803185095359
 
 == 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）
   ✓ 5-1 部署後 maxBuyBps = 10000、numeraire = USDT
@@ -254,12 +286,33 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 5-3 帳戶持有 0.01 WBNB
   ✓ 5-4 Safe B setMaxBuyBps(0) → 只准賣出
   ✓ 5-5 買入 USDT→WBNB → revert BuyLimitExceeded(uint256,uint256)
-  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.555140152971590208 USDT）
+  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.320075054781942851 USDT）
   ✓     賣出不計入額度（買入窗沒有打開）
   ✓ 5-7 Safe B setMaxBuyBps(10000) → 恢復
   ✓ 5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額
-  ✓     額度 = 帳戶總值 6.555323016786556153 USDT，窗口到 1794592218
+  ✓     額度 = 帳戶總值 6.323793523978354692 USDT，窗口到 1794634908
   ✓ 5-9 再買入一整個額度（超過） → revert BuyLimitExceeded(uint256,uint256)
+
+== 情境 6：venue 白名單（聚合器，用 API 現拿的 calldata 在 fork 上成交）
+  ✓ 6-1 Universal Router 是建構時登錄的 PANCAKE_UR venue（kind 1）
+  ✓     KyberSwap 尚未加入（kind 0）
+  ✓ 6-2 operator 加 venue → revert NotOwner()
+  ✓ 6-3 KyberSwap 還沒加入就成交 → revert VenueNotAllowed(address)
+  ✓ 6-4 Safe B setVenue(KyberSwap, ERC20_APPROVE) → kind 2
+  ✓ 6-5 經 KyberSwap 賣 0.002497500858288270 WBNB → 1.579323551444281275 USDT（地板 1.566059218310754404）
+  ✓     executor 對 KyberSwap 的 allowance 歸零
+  ✓     executor 沒有留下任何 WBNB／USDT
+  -- DOGE：直接池 1,000 USDT 過不了地板，經 KyberSwap 可以（docs#26、#29）
+  ✓ 6-6 帳戶包 10 BNB 並經 Pancake 賣成 6323.634525729981854716 USDT（準備買 DOGE）
+  ✓ 6-7 經 DOGE/USDT 1% 直接池買 1,000 USDT 的 DOGE → revert BelowFloor(uint256,uint256)
+  ✓ 6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → 15631.34 DOGE（地板 15203.19）
+  ✓     executor 沒有留下任何 USDT／DOGE、對 KyberSwap 的 allowance 歸零
+  ✓ 6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2
+  ⚠ 6-10 OpenOcean 的 calldata 在 fork 上 revert：OpenOcean external call failed: Unknown(), data: 
+  ✓     整筆退回：帳戶 WBNB／USDT 不變
+  ✓     executor 對 OpenOcean 的 allowance 為 0、沒有留下任何 WBNB／USDT
+  ✓ 6-11 Safe B removeVenue(KyberSwap) → kind 0
+  ✓     移除後同一筆 KyberSwap 交易 → revert VenueNotAllowed(address)
 
 演練全部通過。
 ```

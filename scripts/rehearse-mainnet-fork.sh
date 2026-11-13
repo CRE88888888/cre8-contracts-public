@@ -24,6 +24,8 @@ SAFE_FACTORY=0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67     # SafeProxyFactory v
 SAFE_SINGLETON=0x29fcB43b46531BcA003ddC8FCB67FFE91900C762   # SafeL2 v1.4.1
 SAFE_FALLBACK=0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99    # CompatibilityFallbackHandler v1.4.1
 USDT=0x55d398326f99059fF775485246999027B3197955
+UR=0x1A0A18AC4BECDDbd6389559687d1A73d8927E416     # PancakeSwap Universal Router（建構時登錄的 venue）
+KYBER=0x6131B5fae19EA4f9D964eAc0408E4408b66337b5  # KyberSwap MetaAggregationRouterV2（由 Safe 加入的候選）
 # Anvil 預設帳號 #1..#3 當 Safe signer（只存在 fork 上）
 S1=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 S2=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
@@ -103,6 +105,8 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
   expect_revert "router transferOwnership"   $RT "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
   expect_revert "executor setGlobalPaused"   $EX "setGlobalPaused(bool)" true --unlocked --from "$WHO"
   expect_revert "executor setMaxBuyBps"      $EX "setMaxBuyBps(uint16)" 20000 --unlocked --from "$WHO"
+  expect_revert "executor setVenue"          $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --from "$WHO"
+  expect_revert "executor removeVenue"       $EX "removeVenue(address)" $UR --unlocked --from "$WHO"
 done
 
 echo "== operator 的日常權限（策略、enroll、暫停）"
@@ -141,6 +145,13 @@ cast send -q $EX "setMaxBuyBps(uint16)" 0 --unlocked --from "$SAFE" >/dev/null
 [ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "0" ] && ok "Safe setMaxBuyBps(0) → 只准賣出" || fail "setMaxBuyBps 0"
 cast send -q $EX "setMaxBuyBps(uint16)" 10000 --unlocked --from "$SAFE" >/dev/null
 [ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "10000" ] && ok "Safe setMaxBuyBps(10000) → 恢復" || fail "setMaxBuyBps 10000"
+venue_kind() { cast call $EX 'venues(address)(uint8,address)' "$1" | head -1; }
+[ "$(venue_kind $UR)" = "1" ] && ok "部署後唯一的 venue：Universal Router（PANCAKE_UR）" || fail "UR venue"
+[ "$(venue_kind $KYBER)" = "0" ] || fail "部署後不該有 KyberSwap venue"
+cast send -q $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --from "$SAFE" >/dev/null
+[ "$(venue_kind $KYBER)" = "2" ] && ok "Safe setVenue(KyberSwap, ERC20_APPROVE)" || fail "setVenue"
+cast send -q $EX "removeVenue(address)" $KYBER --unlocked --from "$SAFE" >/dev/null
+[ "$(venue_kind $KYBER)" = "0" ] && ok "Safe removeVenue(KyberSwap)" || fail "removeVenue"
 
 echo "== 報價（100 USDT → 各資產）"
 for a in 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c 0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \

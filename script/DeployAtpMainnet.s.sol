@@ -197,6 +197,13 @@ contract DeployAtpMainnet is Script {
             executor.numeraire() == USDT && executor.numeraire() == router.numeraire(), "executor numeraire"
         );
         require(executor.maxBuyBps() == MAX_BUY_BPS, "executor maxBuyBps");
+        // The only venue at deployment is the Universal Router, registered by the constructor. Aggregators
+        // (KyberSwap, OpenOcean) are added by the Safe with `setVenue` after it has taken ownership.
+        (AtpExecutor.VenueKind urKind, address urSpender) = executor.venues(V3_UNIVERSAL_ROUTER);
+        require(
+            urKind == AtpExecutor.VenueKind.PANCAKE_UR && urSpender == V3_UNIVERSAL_ROUTER,
+            "executor UR venue"
+        );
 
         for (uint256 i; i < specs.length; ++i) {
             PancakeV3TwapOracle oracle = router.oracleOf(specs[i].asset);

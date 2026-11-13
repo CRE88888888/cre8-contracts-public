@@ -561,14 +561,17 @@ contract AtpExecutorTest is Test {
         step.tokenOut = tokenOut;
         step.amountIn = amountIn;
         step.amountOutMin = 0;
-        step.commands = hex"00";
-        step.inputs = _one(
-            abi.encode(
-                address(executor),
-                amountIn,
-                uint256(0),
-                abi.encodePacked(tokenIn, uint24(500), tokenOut),
-                true
+        step.venue = address(routerStub); // the Universal Router venue registered at construction
+        step.data = abi.encode(
+            hex"00",
+            _one(
+                abi.encode(
+                    address(executor),
+                    amountIn,
+                    uint256(0),
+                    abi.encodePacked(tokenIn, uint24(500), tokenOut),
+                    true
+                )
             )
         );
     }

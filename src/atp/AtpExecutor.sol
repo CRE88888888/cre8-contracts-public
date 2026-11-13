@@ -26,6 +26,13 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// back and forth, each step clearing the floor. Every round trip needs a buy, so buys (numeraire -> asset)
 /// are capped per account at `maxBuyBps` of the account's current value per fixed 24-hour window. Sales to the
 /// numeraire are never limited nor counted, so exits always go through.
+/// @dev Venues (cre8-contracts#15): every step names a venue from a Safe-managed allowlist - the Pancake
+/// Universal Router (commands allowlisted, recipient pinned here, as before) or an aggregator / DEX router
+/// whose calldata is passed through undecoded. What bounds a malicious or compromised venue is not decoding but
+/// four invariants: accounts approve only this executor; this executor holds no balance between calls; the
+/// venue is approved exactly this step's `amountIn` of `tokenIn` and the approval is zeroed right after the
+/// call; and the `tokenOut` that actually landed here must clear the oracle floor or the whole batch reverts.
+/// A venue can therefore take at most (step amount - floor) per step, the same bound as a sandwich today.
 contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -41,7 +48,8 @@ contract AtpExecutor is ReentrancyGuard {
 
     /// @notice Strategy/enrollment/fee record. Also the admin for `feeRecipient`.
     AtpRegistry public immutable registry;
-    /// @notice PancakeSwap Universal Router, pinned per chain.
+    /// @notice PancakeSwap Universal Router, pinned per chain; registered as the first `PANCAKE_UR` venue at
+    /// construction.
     IUniversalRouter public immutable universalRouter;
     /// @notice Oracle floor adapter; see IOracleFloor for the previewSwap/_saleFloor semantics.
     IOracleFloor public immutable oracle;
@@ -72,6 +80,28 @@ contract AtpExecutor is ReentrancyGuard {
     /// empty) once `start + BUY_WINDOW` has passed.
     mapping(address => BuyWindow) public buyWindowOf;
 
+    /// @notice How a venue is paid and called.
+    /// - `PANCAKE_UR`: Universal Router. `data` = `abi.encode(bytes commands, bytes[] inputs)`; commands are
+    ///   allowlisted with every recipient pinned to this executor; paid through Permit2 (spender = the venue).
+    /// - `ERC20_APPROVE`: aggregator / router pulling `tokenIn` with a plain ERC20 allowance granted to `spender`.
+    /// - `PERMIT2`: router pulling `tokenIn` through Permit2, with the Permit2 allowance granted to `spender`.
+    /// For the last two `data` is the raw calldata for the venue, never decoded here.
+    enum VenueKind {
+        NONE,
+        PANCAKE_UR,
+        ERC20_APPROVE,
+        PERMIT2
+    }
+
+    struct Venue {
+        VenueKind kind;
+        /// @notice Who gets this step's allowance (the venue itself for `PANCAKE_UR`).
+        address spender;
+    }
+
+    /// @notice Venue allowlist, keyed by call target. Registry owner (Safe) only; `NONE` = not allowed.
+    mapping(address => Venue) public venues;
+
     struct SwapStep {
         /// @notice Token sold, pulled from the account.
         address tokenIn;
@@ -82,10 +112,10 @@ contract AtpExecutor is ReentrancyGuard {
         /// @notice The agent's own bound. Advisory only: the executor additionally requires it to be at
         /// least `minGross` and independently checks the realised output against `minGross`.
         uint256 amountOutMin;
-        /// @notice Universal Router command bytes, allowlisted per step.
-        bytes commands;
-        /// @notice Universal Router input payloads, one per command.
-        bytes[] inputs;
+        /// @notice Call target, must be an allowlisted venue.
+        address venue;
+        /// @notice `PANCAKE_UR`: `abi.encode(commands, inputs)`; otherwise the venue's raw calldata.
+        bytes data;
     }
 
     event SwapExecuted(
@@ -101,6 +131,8 @@ contract AtpExecutor is ReentrancyGuard {
     event FeeRecipientUpdated(address indexed previousRecipient, address indexed newRecipient);
     event GlobalPausedSet(bool paused);
     event MaxBuyBpsSet(uint16 bps);
+    event VenueSet(address indexed target, VenueKind kind, address spender);
+    event VenueRemoved(address indexed target);
 
     error InvalidConfig();
     error NotOwner();
@@ -130,6 +162,9 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev Neither leg is the numeraire, so the step is neither a sale nor a countable buy. The oracle router
     /// rejects such a pair as well; this keeps the buy limit fail-closed on its own.
     error NotNumeraireRoute(address tokenIn, address tokenOut);
+    error VenueNotAllowed(address venue);
+    /// @dev A venue (or its spender) that would be one of this step's tokens, the account, or a protocol contract.
+    error BadVenue(address target);
 
     constructor(
         AtpRegistry registry_,
@@ -168,6 +203,7 @@ contract AtpExecutor is ReentrancyGuard {
         numeraire = numeraire_;
         maxBuyBps = maxBuyBps_;
         emit MaxBuyBpsSet(maxBuyBps_);
+        _setVenue(address(universalRouter_), VenueKind.PANCAKE_UR, address(0));
     }
 
     // ---- admin ----
@@ -197,6 +233,40 @@ contract AtpExecutor is ReentrancyGuard {
         emit MaxBuyBpsSet(bps);
     }
 
+    /// @notice Allow (or reconfigure) `target` as a venue. Registry owner only; the operator has no access.
+    /// `spender` is ignored for `PANCAKE_UR` (the venue itself is the Permit2 spender).
+    function setVenue(address target, VenueKind kind, address spender) external {
+        if (msg.sender != registry.owner()) revert NotOwner();
+        _setVenue(target, kind, spender);
+    }
+
+    /// @notice Stop using `target` immediately. Registry owner only.
+    function removeVenue(address target) external {
+        if (msg.sender != registry.owner()) revert NotOwner();
+        delete venues[target];
+        emit VenueRemoved(target);
+    }
+
+    /// @dev Neither the target nor the spender may be a contract this executor trusts or holds allowances on:
+    /// approving or calling the registry, the oracle, Permit2, the numeraire or this executor would turn the
+    /// pass-through call into something other than a swap.
+    function _setVenue(address target, VenueKind kind, address spender) internal {
+        if (kind == VenueKind.NONE || target.code.length == 0) revert InvalidConfig();
+        if (kind == VenueKind.PANCAKE_UR) spender = target;
+        if (spender.code.length == 0) revert InvalidConfig();
+        _requireNotProtocol(target);
+        _requireNotProtocol(spender);
+        venues[target] = Venue({ kind: kind, spender: spender });
+        emit VenueSet(target, kind, spender);
+    }
+
+    function _requireNotProtocol(address target) internal view {
+        if (
+            target == address(this) || target == address(registry) || target == address(oracle)
+                || target == address(permit2) || target == numeraire
+        ) revert BadVenue(target);
+    }
+
     // ---- execution ----
 
     /// @notice Execute one rebalance batch for `account`.
@@ -221,7 +291,7 @@ contract AtpExecutor is ReentrancyGuard {
         uint256 count = steps.length;
         for (uint256 i; i < count; ++i) {
             SwapStep calldata step = steps[i];
-            uint256 floor = _checkStep(step, enrollment, feeBps);
+            uint256 floor = _checkStep(account, step, enrollment, feeBps);
             if (step.tokenOut != numeraire) {
                 // A buy: counted against the window, before any token moves.
                 if (step.tokenIn != numeraire) revert NotNumeraireRoute(step.tokenIn, step.tokenOut);
@@ -319,11 +389,12 @@ contract AtpExecutor is ReentrancyGuard {
     // ---- step checks ----
 
     /// @dev Returns the gross-output floor for this step: the oracle floor grossed back up over the fee.
-    function _checkStep(SwapStep calldata step, AtpRegistry.Enrollment memory enrollment, uint16 feeBps)
-        internal
-        view
-        returns (uint256 minGross)
-    {
+    function _checkStep(
+        address account,
+        SwapStep calldata step,
+        AtpRegistry.Enrollment memory enrollment,
+        uint16 feeBps
+    ) internal view returns (uint256 minGross) {
         if (step.amountIn == 0) revert ZeroAmount();
         if (step.tokenIn == step.tokenOut) revert SameToken();
         if (
@@ -331,7 +402,18 @@ contract AtpExecutor is ReentrancyGuard {
                 || !registry.isAssetAllowed(enrollment.strategyId, enrollment.version, step.tokenOut)
         ) revert AssetNotAllowed();
 
-        _checkCommands(step.commands, step.inputs);
+        Venue memory venue = venues[step.venue];
+        if (venue.kind == VenueKind.NONE) revert VenueNotAllowed(step.venue);
+        // Never call or approve one of this step's own tokens or the account: the allowance this step grants
+        // must only ever be spendable by a swap venue.
+        if (
+            step.venue == step.tokenIn || step.venue == step.tokenOut || step.venue == account
+                || venue.spender == step.tokenIn || venue.spender == step.tokenOut || venue.spender == account
+        ) revert BadVenue(step.venue);
+        if (venue.kind == VenueKind.PANCAKE_UR) {
+            (bytes memory commands, bytes[] memory inputs) = abi.decode(step.data, (bytes, bytes[]));
+            _checkCommands(commands, inputs);
+        }
 
         (, uint256 minimum) = oracle.previewSwap(step.tokenIn, step.tokenOut, step.amountIn);
         if (minimum == 0) revert NoFloor();
@@ -347,7 +429,7 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev Command allowlist (fixed decision): V3_SWAP_EXACT_IN, V2_SWAP_EXACT_IN, SWEEP, TRANSFER only.
     /// Exact bytes, so flag bits such as FLAG_ALLOW_REVERT are rejected as well. Every admitted command must
     /// pay out to this executor, which is what makes the fee split and the residual sweep safe.
-    function _checkCommands(bytes calldata commands, bytes[] calldata inputs) internal view {
+    function _checkCommands(bytes memory commands, bytes[] memory inputs) internal view {
         uint256 count = commands.length;
         if (count == 0 || count != inputs.length) revert BadCommands();
         for (uint256 i; i < count; ++i) {
@@ -369,13 +451,13 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev ABI encoding right-aligns an `address` in its 32-byte word (the top 12 bytes are zero), so the
     /// address is the LOW 20 bytes of that word. The mask is load-bearing: shifting the word right by 96
     /// bits keeps the address's top 8 bytes instead and rejects every well-formed swap as BadRecipient.
-    function _checkRecipient(bytes calldata input, uint256 wordIndex) internal view {
+    function _checkRecipient(bytes memory input, uint256 wordIndex) internal view {
         uint256 offset = (wordIndex + 1) * 32;
         if (input.length < offset) revert BadCommands();
         address recipient;
         assembly {
             recipient := and(
-                calldataload(add(input.offset, mul(wordIndex, 32))),
+                mload(add(add(input, 32), mul(wordIndex, 32))),
                 0xffffffffffffffffffffffffffffffffffffffff
             )
         }
@@ -390,44 +472,65 @@ contract AtpExecutor is ReentrancyGuard {
     {
         IERC20 tokenIn = IERC20(step.tokenIn);
         IERC20 tokenOut = IERC20(step.tokenOut);
+        Venue memory venue = venues[step.venue];
 
         uint256 inBaseline = tokenIn.balanceOf(address(this));
         // TODO(permit2): the account -> executor leg is still a plain ERC20 `safeTransferFrom`, so the
         // account must approve this executor per token. Move that leg to Permit2 (accounts signing a
         // Permit2 transfer) once the account layer supports it; the router leg below is already Permit2.
         tokenIn.safeTransferFrom(account, address(this), step.amountIn);
-
-        // Permit2's allowance model is uint160: `permit2.approve` takes a uint160 amount, so the explicit
-        // `uint160(step.amountIn)` cast below would silently keep only the low 160 bits of a larger value.
-        // The router would then be allowed to pull far less than the executor approved to Permit2 (the
-        // ERC20 leg is the full uint256), and the swap would fail inside Permit2 with an opaque allowance
-        // error instead of failing here. Every real token supply is orders of magnitude below 2**160 units,
-        // so this only rejects unrepresentable input: reject it, never truncate it.
-        if (step.amountIn > type(uint160).max) revert AmountTooLarge();
-
-        // The Universal Router does not `transferFrom` the caller: its V3 path asks Permit2 to move the
-        // input token, and Permit2 only does so against an allowance granted inside Permit2. Both legs are
-        // needed: ERC20 approve to Permit2, then Permit2 approve for the router with the batch deadline.
-        tokenIn.forceApprove(address(permit2), step.amountIn);
-        permit2.approve(step.tokenIn, address(universalRouter), uint160(step.amountIn), uint48(deadline));
-
         uint256 before = tokenOut.balanceOf(address(this));
-        universalRouter.execute(step.commands, step.inputs, deadline);
-        gross = tokenOut.balanceOf(address(this)) - before;
-        // Permit2's own allowance expires at `deadline`, but the ERC20 allowance to Permit2 does not: it is
-        // an unbounded-lifetime approval, so it is reset to zero here.
-        //
-        // Deliberate approve churn: a batch that swaps the same input token twice pays
-        // approve -> swap -> approve(0) twice, i.e. two extra ERC20 approvals and the gas of two extra
-        // non-zero allowance writes. Batching the approvals and zeroing each token once after the whole
-        // batch would be cheaper, but that keeps every input token approved to Permit2 for the entire
-        // batch. The cost is deliberately paid to keep the authorization window as short as possible:
-        // security first, gas second. The call sequence is intentionally unchanged.
-        tokenIn.forceApprove(address(permit2), 0);
 
-        // Router may consume less than the pulled amount; never strand it here.
+        if (venue.kind == VenueKind.ERC20_APPROVE) {
+            // Exactly this step's amount, to exactly this venue's spender, zeroed straight after the call.
+            tokenIn.forceApprove(venue.spender, step.amountIn);
+            _callVenue(step.venue, step.data);
+            tokenIn.forceApprove(venue.spender, 0);
+        } else {
+            // Permit2's allowance model is uint160: `permit2.approve` takes a uint160 amount, so the explicit
+            // `uint160(step.amountIn)` cast below would silently keep only the low 160 bits of a larger value.
+            // The router would then be allowed to pull far less than the executor approved to Permit2 (the
+            // ERC20 leg is the full uint256), and the swap would fail inside Permit2 with an opaque allowance
+            // error instead of failing here. Every real token supply is orders of magnitude below 2**160
+            // units, so this only rejects unrepresentable input: reject it, never truncate it.
+            if (step.amountIn > type(uint160).max) revert AmountTooLarge();
+
+            // A Permit2 venue does not `transferFrom` the caller: it asks Permit2 to move the input token, and
+            // Permit2 only does so against an allowance granted inside Permit2. Both legs are needed: ERC20
+            // approve to Permit2, then Permit2 approve for the venue's spender with the batch deadline.
+            tokenIn.forceApprove(address(permit2), step.amountIn);
+            permit2.approve(step.tokenIn, venue.spender, uint160(step.amountIn), uint48(deadline));
+            if (venue.kind == VenueKind.PANCAKE_UR) {
+                (bytes memory commands, bytes[] memory inputs) = abi.decode(step.data, (bytes, bytes[]));
+                IUniversalRouter(step.venue).execute(commands, inputs, deadline);
+            } else {
+                _callVenue(step.venue, step.data);
+            }
+            // Permit2's own allowance expires at `deadline`, but the ERC20 allowance to Permit2 does not: it
+            // is an unbounded-lifetime approval, so it is reset to zero here.
+            //
+            // Deliberate approve churn: a batch that swaps the same input token twice pays
+            // approve -> swap -> approve(0) twice. Batching the approvals and zeroing each token once after the
+            // whole batch would be cheaper, but that keeps every input token approved for the entire batch.
+            // The cost is deliberately paid to keep the authorization window as short as possible.
+            tokenIn.forceApprove(address(permit2), 0);
+        }
+        gross = tokenOut.balanceOf(address(this)) - before;
+
+        // The venue may consume less than the pulled amount; never strand it here. Underflows (reverts) if the
+        // venue somehow left this executor with less `tokenIn` than it held before the step.
         uint256 residual = tokenIn.balanceOf(address(this)) - inBaseline;
         if (residual > 0) tokenIn.safeTransfer(account, residual);
+    }
+
+    /// @dev Pass-through call with no value; a venue revert is bubbled up verbatim.
+    function _callVenue(address target, bytes calldata data) internal {
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
     }
 
     /// @dev fee = floor(gross * feeBps / 10000); the account gets the rest. Fee is taken from the output

@@ -150,8 +150,8 @@ contract AtpExecutorForkTest is Test {
             tokenOut: USDT,
             amountIn: AMOUNT_IN,
             amountOutMin: amountOutMin,
-            commands: hex"00", // V3_SWAP_EXACT_IN
-            inputs: _single(_v3SwapInput(address(executor), AMOUNT_IN, amountOutMin))
+            venue: V3_UNIVERSAL_ROUTER,
+            data: abi.encode(hex"00", _single(_v3SwapInput(address(executor), AMOUNT_IN, amountOutMin))) // V3_SWAP_EXACT_IN
         });
 
         // The account must approve the executor, exactly like a real Kernel account would.
