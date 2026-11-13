@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IOracleFloor } from "./interfaces/IOracleFloor.sol";
+import { IAggregatorV3 } from "./interfaces/IAggregatorV3.sol";
+import { IPriceSource } from "./interfaces/IPriceSource.sol";
 import { PancakeV3TwapOracle } from "./PancakeV3TwapOracle.sol";
+import { PushFeedPriceSource } from "./PushFeedPriceSource.sol";
 
 /// @title AtpMultiPoolOracle
 /// @notice `IOracleFloor` router: one numeraire, one `PancakeV3TwapOracle` per asset, forwarded per call.
@@ -35,6 +39,12 @@ import { PancakeV3TwapOracle } from "./PancakeV3TwapOracle.sol";
 /// owner cannot plug in a look-alike that answers `token0` / `token1` correctly but returns a zero-discount
 /// floor. The oracle's pair is immutable and its constructor checks the pool holds exactly
 /// {asset, numeraire}, so a registration can never be re-pointed at the wrong pool.
+///
+/// Secondary source (cre8-contracts#15 §2): an asset may additionally carry one independent `IPriceSource`
+/// (today `PushFeedPriceSource` over Chainlink / RedStone Push USD feeds), likewise deployed here from feed
+/// addresses, never supplied. When present, every quote must agree with it within `maxDeviationBps` and the
+/// floor becomes the stricter of the two; a stale or unusable secondary reverts the quote instead of being
+/// skipped. Assets without a secondary keep the pool TWAP alone, exactly as before.
 contract AtpMultiPoolOracle is IOracleFloor {
     // ---- configuration ----
 
@@ -47,12 +57,28 @@ contract AtpMultiPoolOracle is IOracleFloor {
     /// @dev asset -> the per-pair oracle that prices `asset` against `numeraire`.
     mapping(address asset => PancakeV3TwapOracle oracle) private _oracles;
 
+    /// @notice Upper bound for a secondary's `maxDeviationBps` (10%).
+    uint16 public constant MAX_DEVIATION_CEILING_BPS = 1_000;
+    uint256 internal constant BPS = 10_000;
+
+    struct Secondary {
+        IPriceSource source;
+        /// @notice Largest allowed gap between the pool TWAP quote and the secondary quote, in bps of the
+        /// secondary quote.
+        uint16 maxDeviationBps;
+    }
+
+    /// @dev asset -> optional independent second source.
+    mapping(address asset => Secondary secondary) private _secondaries;
+
     // ---- events ----
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OracleSet(address indexed asset, address indexed oracle);
     event OracleCleared(address indexed asset);
+    event SecondarySet(address indexed asset, address indexed source, uint16 maxDeviationBps);
+    event SecondaryCleared(address indexed asset);
 
     // ---- errors ----
 
@@ -72,6 +98,11 @@ contract AtpMultiPoolOracle is IOracleFloor {
     error SameToken();
     /// @dev Neither leg is the numeraire: a multi-hop route, which v1 does not price.
     error UnsupportedRoute(address tokenIn, address tokenOut);
+    error SecondaryAlreadySet(address asset);
+    error SecondaryNotSet(address asset);
+    error InvalidDeviation(uint16 maxDeviationBps);
+    /// @dev The pool TWAP and the secondary source differ by more than the asset's `maxDeviationBps`.
+    error SourcesDisagree(address asset, uint256 poolQuote, uint256 secondaryQuote);
 
     /// @param numeraire_ Quote asset every registered pair is priced against.
     constructor(address numeraire_) {
@@ -120,7 +151,24 @@ contract AtpMultiPoolOracle is IOracleFloor {
 
         // The pair is re-checked against `tokenIn` / `tokenOut` by the oracle itself; the registration check
         // guarantees that pair is exactly `asset` / `numeraire`, so this forward cannot price a third token.
-        return oracle.previewSwap(tokenIn, tokenOut, amountIn);
+        (quoted, minimum) = oracle.previewSwap(tokenIn, tokenOut, amountIn);
+
+        Secondary memory secondary = _secondaries[asset];
+        if (address(secondary.source) == address(0)) return (quoted, minimum);
+
+        // Reverts when stale or unusable: no trade rather than a TWAP-only floor.
+        uint256 price = secondary.source.price();
+        uint256 secondaryQuote = tokenOut == numeraire
+            ? Math.mulDiv(amountIn, price, 1e18)  // sale: asset -> numeraire
+            : Math.mulDiv(amountIn, 1e18, price); // buy: numeraire -> asset
+        uint256 gap = quoted > secondaryQuote ? quoted - secondaryQuote : secondaryQuote - quoted;
+        if (secondaryQuote == 0 || gap * BPS > secondaryQuote * secondary.maxDeviationBps) {
+            revert SourcesDisagree(asset, quoted, secondaryQuote);
+        }
+        // Same slippage budget as the pool floor, rounded up; the stricter (higher) floor wins.
+        uint256 secondaryFloor =
+            Math.mulDiv(secondaryQuote, BPS - oracle.maxSlippageBps(), BPS, Math.Rounding.Ceil);
+        if (secondaryFloor > minimum) minimum = secondaryFloor;
     }
 
     // ---- registry ----
@@ -159,6 +207,46 @@ contract AtpMultiPoolOracle is IOracleFloor {
         if (address(_oracles[asset]) == address(0)) revert OracleNotSet(asset);
         delete _oracles[asset];
         emit OracleCleared(asset);
+        // A secondary belongs to the registration it was checked against; a new pool starts without one.
+        if (address(_secondaries[asset].source) != address(0)) {
+            delete _secondaries[asset];
+            emit SecondaryCleared(asset);
+        }
+    }
+
+    /// @notice The secondary source registered for `asset` (zero address when none) and its deviation bound.
+    function secondaryOf(address asset) external view returns (IPriceSource source, uint16 maxDeviationBps) {
+        Secondary memory secondary = _secondaries[asset];
+        return (secondary.source, secondary.maxDeviationBps);
+    }
+
+    /// @notice Deploy and register a `PushFeedPriceSource` (asset/USD and numeraire/USD push feeds, Chainlink
+    /// or RedStone Push) as `asset`'s secondary source.
+    /// @dev The adapter is created here, never supplied. The asset must already have its pool oracle, and an
+    /// existing secondary must be cleared first, like `setOracle`. Only for assets whose token is the feed's
+    /// underlying: never an equity feed for a bStock (see `PushFeedPriceSource`).
+    function setSecondary(
+        address asset,
+        IAggregatorV3 assetFeed,
+        IAggregatorV3 numeraireFeed,
+        uint32 maxAge,
+        uint16 maxDeviationBps
+    ) external onlyOwner returns (IPriceSource source) {
+        if (address(_oracles[asset]) == address(0)) revert OracleNotSet(asset);
+        if (address(_secondaries[asset].source) != address(0)) revert SecondaryAlreadySet(asset);
+        if (maxDeviationBps == 0 || maxDeviationBps > MAX_DEVIATION_CEILING_BPS) {
+            revert InvalidDeviation(maxDeviationBps);
+        }
+        source = new PushFeedPriceSource(assetFeed, numeraireFeed, asset, numeraire, maxAge);
+        _secondaries[asset] = Secondary({ source: source, maxDeviationBps: maxDeviationBps });
+        emit SecondarySet(asset, address(source), maxDeviationBps);
+    }
+
+    /// @notice Drop `asset`'s secondary source; the asset is then priced by its pool TWAP alone.
+    function clearSecondary(address asset) external onlyOwner {
+        if (address(_secondaries[asset].source) == address(0)) revert SecondaryNotSet(asset);
+        delete _secondaries[asset];
+        emit SecondaryCleared(asset);
     }
 
     // ---- admin ----

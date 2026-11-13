@@ -103,6 +103,7 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
   expect_revert "clearOracle"       $RT "clearOracle(address)" 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c --unlocked --from "$WHO"
   expect_revert "registry transferOwnership" $REG "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
   expect_revert "router transferOwnership"   $RT "transferOwnership(address)" "$WHO" --unlocked --from "$WHO"
+  expect_revert "router clearSecondary"      $RT "clearSecondary(address)" 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c --unlocked --from "$WHO"
   expect_revert "executor setGlobalPaused"   $EX "setGlobalPaused(bool)" true --unlocked --from "$WHO"
   expect_revert "executor setMaxBuyBps"      $EX "setMaxBuyBps(uint16)" 20000 --unlocked --from "$WHO"
   expect_revert "executor setVenue"          $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --from "$WHO"
@@ -152,6 +153,18 @@ cast send -q $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --
 [ "$(venue_kind $KYBER)" = "2" ] && ok "Safe setVenue(KyberSwap, ERC20_APPROVE)" || fail "setVenue"
 cast send -q $EX "removeVenue(address)" $KYBER --unlocked --from "$SAFE" >/dev/null
 [ "$(venue_kind $KYBER)" = "0" ] && ok "Safe removeVenue(KyberSwap)" || fail "removeVenue"
+
+echo "== 第二價格來源（#15）：有 Chainlink feed 的 4 個資產掛上，bStock 沒有"
+for pair in WBNB:0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c DOGE:0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \
+            BTCB:0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c ETH:0x2170Ed0880ac9A755fd29B2688956BD959F933F8; do
+  src=$(cast call $RT 'secondaryOf(address)(address,uint16)' "${pair#*:}")
+  [ "$(head -1 <<<"$src")" != "0x0000000000000000000000000000000000000000" ] && [ "$(sed -n 2p <<<"$src" | awk '{print $1}')" = "200" ] \
+    && ok "${pair%%:*} secondary $(head -1 <<<"$src")（Chainlink、差距上限 200 bps）" || fail "${pair%%:*} secondary"
+done
+for pair in NVDAB:0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 TSLAB:0x5b1910eAaD6450E50f816082Aa078C41F10C292f SPCXB:0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1; do
+  [ "$(cast call $RT 'secondaryOf(address)(address,uint16)' "${pair#*:}" | head -1)" = "0x0000000000000000000000000000000000000000" ] \
+    && ok "${pair%%:*} 沒有 secondary（只用池子 TWAP）" || fail "${pair%%:*} 不該有 secondary"
+done
 
 echo "== 報價（100 USDT → 各資產）"
 for a in 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c 0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \

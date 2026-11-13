@@ -8,6 +8,9 @@ import { AtpMultiPoolOracle } from "../src/atp/AtpMultiPoolOracle.sol";
 import { PancakeV3TwapOracle } from "../src/atp/PancakeV3TwapOracle.sol";
 import { IUniversalRouter } from "../src/atp/interfaces/IUniversalRouter.sol";
 import { IOracleFloor } from "../src/atp/interfaces/IOracleFloor.sol";
+import { IAggregatorV3 } from "../src/atp/interfaces/IAggregatorV3.sol";
+import { IPriceSource } from "../src/atp/interfaces/IPriceSource.sol";
+import { PushFeedPriceSource } from "../src/atp/PushFeedPriceSource.sol";
 
 /// @dev The two Safe reads this script relies on to tell a real multisig from a mistyped address.
 interface ISafe {
@@ -44,11 +47,22 @@ contract DeployAtpMainnet is Script {
     /// @dev A10-1 buy limit: per account, buys within 24 hours may total at most 100% of its current value.
     uint16 internal constant MAX_BUY_BPS = 10_000;
 
+    /// @dev Secondary source (#15): Chainlink standard (non-SVR) push feeds on BSC, picked from docs#28
+    /// (`research/2026-11-13-price-feeds/`). USDT/USD converts the USD feeds so USDT is never assumed to be $1.
+    /// 1 hour matches the pool oracle's `MAX_ORACLE_AGE`; within it the 200 bps agreement check already catches
+    /// a feed that stopped while the market moved.
+    address internal constant USDT_USD_FEED = 0xB97Ad0E74fa7d920791E90258A6E2085088b4320;
+    uint32 internal constant SECONDARY_MAX_AGE = 1 hours;
+    uint16 internal constant SECONDARY_MAX_DEVIATION_BPS = 200;
+
     struct OracleSpec {
         string symbol;
         address asset;
         address pool;
         uint16 maxSlippageBps;
+        /// @dev asset/USD push feed for the secondary source, or zero for pool TWAP only (bStocks: no feed
+        /// prices the token itself, docs#28).
+        address usdFeed;
     }
 
     function _oracleSpecs() internal pure returns (OracleSpec[] memory specs) {
@@ -57,40 +71,50 @@ contract DeployAtpMainnet is Script {
             "WBNB",
             0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c,
             0x36696169C63e42cd08ce11f5deeBbCeBae652050,
-            100
+            100,
+            0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE // Chainlink BNB / USD
         );
         specs[1] = OracleSpec(
             "NVDAB",
             0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436,
             0x8FB4243b553aC29BA088aCf00B9B7dA24bD6690C,
-            100
+            100,
+            address(0)
         );
         specs[2] = OracleSpec(
             "DOGE",
             0xbA2aE424d960c26247Dd6c32edC70B295c744C43,
             0x89da4102853C6cf3F4e9979CBb1dC4a166F38E84,
-            300
+            300,
+            0x3AB0A0d137D4F946fBB19eecc6e92E64660231C8 // Chainlink DOGE / USD
         );
         specs[3] = OracleSpec(
             "TSLAB",
             0x5b1910eAaD6450E50f816082Aa078C41F10C292f,
             0xB0f5E5400E8F0F7C242F2b7740C004f020579c41,
-            300
+            300,
+            address(0)
         );
         specs[4] = OracleSpec(
             "SPCXB",
             0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1,
             0x977DaFFC095b33872E2741c19568925015C35b4d,
-            300
+            300,
+            address(0)
         );
         specs[5] = OracleSpec(
             "BTCB",
             0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c,
             0x46Cf1cF8c69595804ba91dFdd8d6b960c9B0a7C4,
-            300
+            300,
+            0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf // Chainlink BTC / USD
         );
         specs[6] = OracleSpec(
-            "ETH", 0x2170Ed0880ac9A755fd29B2688956BD959F933F8, 0xBe141893E4c6AD9272e8C04BAB7E6a10604501a5, 300
+            "ETH",
+            0x2170Ed0880ac9A755fd29B2688956BD959F933F8,
+            0xBe141893E4c6AD9272e8C04BAB7E6a10604501a5,
+            300,
+            0x9ef1B8c0E4F7dc8bF5719Ea496883DC6401d5b2e // Chainlink ETH / USD
         );
     }
 
@@ -126,6 +150,15 @@ contract DeployAtpMainnet is Script {
             router.setOracle(
                 specs[i].asset, specs[i].pool, TWAP_WINDOW, specs[i].maxSlippageBps, MAX_ORACLE_AGE
             );
+            if (specs[i].usdFeed != address(0)) {
+                router.setSecondary(
+                    specs[i].asset,
+                    IAggregatorV3(specs[i].usdFeed),
+                    IAggregatorV3(USDT_USD_FEED),
+                    SECONDARY_MAX_AGE,
+                    SECONDARY_MAX_DEVIATION_BPS
+                );
+            }
         }
         AtpExecutor executor = new AtpExecutor(
             registry,
@@ -209,9 +242,31 @@ contract DeployAtpMainnet is Script {
             PancakeV3TwapOracle oracle = router.oracleOf(specs[i].asset);
             require(address(oracle) != address(0), string.concat("oracle missing: ", specs[i].symbol));
             require(address(oracle.pool()) == specs[i].pool, string.concat("oracle pool: ", specs[i].symbol));
+            (IPriceSource source, uint16 deviation) = router.secondaryOf(specs[i].asset);
+            if (specs[i].usdFeed == address(0)) {
+                require(
+                    address(source) == address(0), string.concat("unexpected secondary: ", specs[i].symbol)
+                );
+            } else {
+                require(
+                    address(PushFeedPriceSource(address(source)).assetFeed()) == specs[i].usdFeed
+                        && address(PushFeedPriceSource(address(source)).numeraireFeed()) == USDT_USD_FEED
+                        && PushFeedPriceSource(address(source)).maxAge() == SECONDARY_MAX_AGE
+                        && deviation == SECONDARY_MAX_DEVIATION_BPS,
+                    string.concat("secondary: ", specs[i].symbol)
+                );
+            }
             (uint256 quoted, uint256 minimum) = router.previewSwap(USDT, specs[i].asset, 100e18);
             require(quoted != 0 && minimum != 0, string.concat("oracle cannot quote: ", specs[i].symbol));
         }
+    }
+
+    function _secondary(AtpMultiPoolOracle router, address asset)
+        internal
+        view
+        returns (IPriceSource source)
+    {
+        (source,) = router.secondaryOf(asset);
     }
 
     function _report(
@@ -238,7 +293,12 @@ contract DeployAtpMainnet is Script {
                     "  ",
                     vm.toString(address(router.oracleOf(specs[i].asset))),
                     "  pool ",
-                    vm.toString(specs[i].pool)
+                    vm.toString(specs[i].pool),
+                    specs[i].usdFeed == address(0)
+                        ? ""
+                        : string.concat(
+                            "  secondary ", vm.toString(address(_secondary(router, specs[i].asset)))
+                        )
                 )
             );
         }

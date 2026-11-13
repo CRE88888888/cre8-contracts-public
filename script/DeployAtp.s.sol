@@ -159,6 +159,13 @@ contract DeployAtp is Script {
             multiPool.numeraire() == USDT,
             "recorded router has a different numeraire: clear its address first"
         );
+        // A router from before the secondary source (#15; still alive on a long-running fork) prices with the
+        // pool TWAP alone and has no `setSecondary`; reusing it would silently drop the second opinion.
+        (bool ok, bytes memory ret) =
+            recorded.staticcall(abi.encodeWithSignature("secondaryOf(address)", address(0)));
+        require(
+            ok && ret.length == 64, "recorded router predates the secondary source (#15): restart the fork"
+        );
         return (multiPool, false);
     }
 

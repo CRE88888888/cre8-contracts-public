@@ -213,6 +213,12 @@ NEW_ORACLE=$(cast call $RT 'oracleOf(address)(address)' $WBNB)
 [ "$NEW_ORACLE" != "$ZERO" ] || fail "setOracle"
 q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT $WBNB 100000000000000000000 | head -1 | awk '{print $1}')
 [ "$q" != "0" ] && ok "4-10 Safe B setOracle 恢復（新 oracle $NEW_ORACLE），報價 $q" || fail "恢復後報價為 0"
+eq "4-11 clearOracle 也一併拿掉 WBNB 的第二價格來源" "$(cast call $RT 'secondaryOf(address)(address,uint16)' $WBNB | head -1)" "$ZERO"
+send "$SAFE_B" $RT "setSecondary(address,address,address,uint32,uint16)" $WBNB 0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE \
+  0xB97Ad0E74fa7d920791E90258A6E2085088b4320 3600 200
+[ "$(cast call $RT 'secondaryOf(address)(address,uint16)' $WBNB | head -1)" != "$ZERO" ] \
+  && ok "4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD, USDT/USD, 1h, 200 bps) 恢復" || fail "setSecondary"
+expect_err "    operator 拿掉第二價格來源" "NotOwner()" $OP2 $RT "clearSecondary(address)" $WBNB
 
 echo
 echo "== 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）"
@@ -278,7 +284,7 @@ GOT=$(echo "$(bal $USDT $ACCOUNT) - $U0" | bc)
 [ "$(echo "$GOT >= $MIN" | bc)" = "1" ] && ok "6-5 經 KyberSwap 賣 $(cast from-wei $SELL) WBNB → $(cast from-wei $GOT) USDT（地板 $(cast from-wei $MIN)）" || fail "KyberSwap 成交低於地板"
 eq "    executor 對 KyberSwap 的 allowance 歸零" "$(cast call $WBNB 'allowance(address,address)(uint256)' $EX $KYBER | awk '{print $1}')" "0"
 eq "    executor 沒有留下任何 WBNB／USDT" "$(bal $WBNB $EX)/$(bal $USDT $EX)" "0/0"
-echo "  -- DOGE：直接池 1,000 USDT 過不了地板，經 KyberSwap 可以（docs#26、#29）"
+echo "  -- DOGE：1,000 USDT 經 KyberSwap（docs#26 量到直接池過不了地板）"
 cast rpc anvil_setBalance $ACCOUNT 0xA688906BD8B00000 >/dev/null   # 12 BNB（fork 上的假錢）
 send $ACCOUNT $WBNB "deposit()" --value 10ether
 send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000000)" 99999999999
@@ -286,8 +292,13 @@ ok "6-6 帳戶包 10 BNB 並經 Pancake 賣成 $(cast from-wei $(bal $USDT $ACCO
 DIN_AMT=1000000000000000000000   # 1,000 USDT
 DMIN=$(floor_of $USDT $DOGE $DIN_AMT)
 DINPUT=$(cast abi-encode "f(address,uint256,uint256,bytes,bool)" $EX $DIN_AMT 0 "$(cast concat-hex $USDT 0x002710 $DOGE)" true)
-expect_err "6-7 經 DOGE/USDT 1% 直接池買 1,000 USDT 的 DOGE" "BelowFloor(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT \
-  "[($USDT,$DOGE,$DIN_AMT,$DMIN,$UR,$(cast abi-encode "f(bytes,bytes[])" 0x00 "[$DINPUT]"))]" 99999999999
+# 直接池能不能過地板取決於當下深度（docs#26 量的是某個區塊），所以只模擬、照實印出，不當成驗收條件。
+DOUT=$(cast call $EX "$REB" $ACCOUNT "[($USDT,$DOGE,$DIN_AMT,$DMIN,$UR,$(cast abi-encode "f(bytes,bytes[])" 0x00 "[$DINPUT]"))]" 99999999999 --from $ACCOUNT 2>&1 || true)
+if grep -qiE "BelowFloor|$(cast sig 'BelowFloor(uint256,uint256)' | cut -c3-)" <<<"$DOUT"; then
+  echo "  · 6-7 對照：同一筆走 DOGE/USDT 1% 直接池 → BelowFloor（這個區塊直接池過不了地板）"
+else
+  echo "  · 6-7 對照：同一筆走 DOGE/USDT 1% 直接池，這個區塊模擬可以成交（池子深度隨時間變）"
+fi
 DQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" \
   "https://aggregator-api.kyberswap.com/bsc/api/v1/routes?tokenIn=$USDT&tokenOut=$DOGE&amountIn=$DIN_AMT") || fail "KyberSwap API 無法連線"
 DB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 50}' <<<"$DQ" \
