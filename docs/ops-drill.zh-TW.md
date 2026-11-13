@@ -16,15 +16,16 @@
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 4. **每個帳戶每 24 小時最多買入「帳戶總值 × 100%」，賣成 USDT 不受限制。** 外洩的 session key 就算繞過後端，自己反覆來回換幣，每一輪都要買回，買到額度就停。Safe 可以把額度調成 0，變成「只准賣出」模式：所有人都只能賣、不能買。operator 碰不到這個設定。
 5. **交易只能走 Safe 允許的「成交管道」（venue）。** 部署時只有 PancakeSwap；聚合器（KyberSwap、OpenOcean）要由 Safe 一筆加入，懷疑某個管道出問題時，Safe 一筆移除就立刻停用。就算某個管道被駭，每一步最多被吃掉「這一步的金額 − 價格地板」，它碰不到帳戶裡其他的錢。
-6. **有 Chainlink 價格的資產（WBNB、BTCB、ETH、DOGE）用兩個價格來源互相檢查。** 池子的 30 分鐘均價和 Chainlink 差超過 2%，或 Chainlink 超過 1 小時沒更新，這個資產就停止交易，直到恢復；地板取兩者中比較嚴的。bStock 沒有能直接用的外部價格，只用池子均價。換掉或拿掉第二來源只有 Safe 能做。
+6. **有 Chainlink 價格的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、XRP、TRX、LTC、USDC、DAI）用兩個價格來源互相檢查。** 池子的 30 分鐘均價和 Chainlink 差超過 2%，或 Chainlink 超過時限沒更新（AVAX 的 feed 一天才固定更新一次，時限 1 天；其他 1 小時），這個資產就停止交易，直到恢復；地板取兩者中比較嚴的。bStock 和 SGOVon、TLTon、XAUt 沒有能直接用的外部價格，只用池子均價。部署時依 docs#32 的准入清單設定 38 個資產。換掉或拿掉第二來源只有 Safe 能做。
 
 以下六個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
 
 ## 怎麼重跑
 
 ```bash
-# 終端機 1：全新的 fork（dataseed 不是 archive，起來後要立刻跑）
-anvil --fork-url https://bsc-dataseed.bnbchain.org --chain-id 56 --port 8547 --hardfork cancun
+# 終端機 1：全新的 fork。要用保留較長歷史的 RPC（Blast）：部署要讀 38 個池子、跑好幾分鐘，
+# dataseed 不是 archive，只有一兩分鐘的歷史，會 missing trie node
+anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
 # 終端機 2
 scripts/drill-ops-fork.sh
 ```
@@ -150,7 +151,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 
 **注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
 
-**第二價格來源（#15）**：WBNB、BTCB、ETH、DOGE 部署時就掛了 Chainlink（asset/USD 除以 USDT/USD，所以不假設 USDT = 1 美元），bStock 沒有。router 的規則：
+**第二價格來源（#15）**：38 個上線資產裡，11 個不是 bStock、而且有新鮮的 Chainlink 標準 feed，部署時就掛上（asset/USD 除以 USDT/USD，所以不假設 USDT = 1 美元）；其他 27 個只用池子 TWAP。router 的規則：
 - 池子報價和 Chainlink 報價差超過 200 bps → revert `SourcesDisagree`；
 - 任一個 feed 超過 1 小時沒更新、或是值 ≤ 0 → revert（`StaleFeed`／`InvalidAnswer`）；
 - 地板取比較嚴的那個（賣出取較高的 USDT 地板、買入取較多的資產地板）；
@@ -220,12 +221,12 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   - KyberSwap `MetaAggregationRouterV2`：`0x6131B5fae19EA4f9D964eAc0408E4408b66337b5`（[官方文件](https://docs.kyberswap.com/developer-guide/aggregator-api/contracts)，所有鏈同址）；
   - OpenOcean exchange：`0x6352a56caadC4F1E25CD6c75970Fa768A3304e64`（官方 API 回傳的 `to`；這是 proxy，可以升級）。
 
-## 演練輸出（2026-11-13，fork block 133351776，54 秒）
+## 演練輸出（2026-11-13，Blast fork block 133358010，8 分 21 秒）
 
 ```
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0x952D18678B6f50277e1fCA73AE475c6299C553c5（2-of-3：#1 #2 #3）
-  ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0x2fbb4110e4140a68d14a79501c140f31925dd7f4
+  ✓ Safe A 0x802381df98074f1b5BC6f25741ba0698B4f8eBF4（2-of-3：#1 #2 #3）
+  ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xa5d9d8a6e06b482f03deaf33f103b8f4ad60e92a
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
   ✓ operator = OP1
@@ -261,7 +262,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 2-10 帳戶恢復，executeRebalance 不再 revert
 
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0xd28C02730882dF1423aa304F51BEc55c0F655A10（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x060D2CC3BC8515AA2268D683FBda60b14c432092（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -293,7 +294,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 == 情境 4 備案：逐資產拔價格來源（只停單一資產）
   ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
   ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0x3d96d69eD5De7DD1254b69Ec44b9383883e433a0），報價 156248632008488444
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xd679387C9579477fEC149F44cdaB9840C120BfDf），報價 156092469278864030
   ✓ 4-11 clearOracle 也一併拿掉 WBNB 的第二價格來源
   ✓ 4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD, USDT/USD, 1h, 200 bps) 恢復
   ✓     operator 拿掉第二價格來源 → revert NotOwner()
@@ -304,11 +305,11 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 5-3 帳戶持有 0.01 WBNB
   ✓ 5-4 Safe B setMaxBuyBps(0) → 只准賣出
   ✓ 5-5 買入 USDT→WBNB → revert BuyLimitExceeded(uint256,uint256)
-  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.397605170745467139 USDT）
+  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.403043165469122009 USDT）
   ✓     賣出不計入額度（買入窗沒有打開）
   ✓ 5-7 Safe B setMaxBuyBps(10000) → 恢復
   ✓ 5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額
-  ✓     額度 = 帳戶總值 6.395951320621441214 USDT，窗口到 1794659343
+  ✓     額度 = 帳戶總值 6.401548770770989744 USDT，窗口到 1794662488
   ✓ 5-9 再買入一整個額度（超過） → revert BuyLimitExceeded(uint256,uint256)
 
 == 情境 6：venue 白名單（聚合器，用 API 現拿的 calldata 在 fork 上成交）
@@ -317,13 +318,13 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 6-2 operator 加 venue → revert NotOwner()
   ✓ 6-3 KyberSwap 還沒加入就成交 → revert VenueNotAllowed(address)
   ✓ 6-4 Safe B setVenue(KyberSwap, ERC20_APPROVE) → kind 2
-  ✓ 6-5 經 KyberSwap 賣 0.002497500830968301 WBNB → 1.599071909976959243 USDT（地板 1.583325233099349548）
+  ✓ 6-5 經 KyberSwap 賣 0.002497500727700529 WBNB → 1.600197485906213888 USDT（地板 1.584409351205608192）
   ✓     executor 對 KyberSwap 的 allowance 歸零
   ✓     executor 沒有留下任何 WBNB／USDT
   -- DOGE：1,000 USDT 經 KyberSwap（docs#26 量到直接池過不了地板）
-  ✓ 6-6 帳戶包 10 BNB 並經 Pancake 賣成 6401.348527855204346103 USDT（準備買 DOGE）
+  ✓ 6-6 帳戶包 10 BNB 並經 Pancake 賣成 6407.318587494241238195 USDT（準備買 DOGE）
   · 6-7 對照：同一筆走 DOGE/USDT 1% 直接池，這個區塊模擬可以成交（池子深度隨時間變）
-  ✓ 6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → 15257.62 DOGE（地板 14963.38）
+  ✓ 6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → 15281.42 DOGE（地板 14927.51）
   ✓     executor 沒有留下任何 USDT／DOGE、對 KyberSwap 的 allowance 歸零
   ✓ 6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2
   ⚠ 6-10 OpenOcean 的 calldata 在 fork 上 revert：OpenOcean external call failed: Unknown(), data: 

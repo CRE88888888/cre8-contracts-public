@@ -2,9 +2,10 @@
 # 在 BSC 主網 fork 上完整預演 DeployAtpMainnet：建一個 2-of-3 Safe、用真實部署者地址（impersonate）部署、
 # 驗證重跑會被擋、模擬 Safe acceptOwnership、確認 operator 與 owner 的權限邊界、報價與 enroll。
 #
-# 不送任何主網交易，也不需要私鑰。先在另一個終端機起 fork（cancun：dataseed 不是 archive 節點，
-# prague 的 EIP-2935 blockhash 讀取會 missing trie node）：
-#   anvil --fork-url https://bsc-dataseed.bnbchain.org --chain-id 56 --port 8547 --hardfork cancun
+# 不送任何主網交易，也不需要私鑰。先在另一個終端機起 fork（cancun：prague 的 EIP-2935 blockhash 讀取
+# 會 missing trie node）。部署要讀 38 個池子、跑幾分鐘，要用保留較長歷史的 RPC（Blast）；
+# dataseed 不是 archive，只有一兩分鐘的歷史，部署到一半就會 missing trie node：
+#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
 # 再執行（部署者、operator 必須是不同地址；Safe 由本腳本在 fork 上新建）：
 #   DEPLOYER=0x… OPERATOR=0x… scripts/rehearse-mainnet-fork.sh
 set -euo pipefail
@@ -154,24 +155,35 @@ cast send -q $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --
 cast send -q $EX "removeVenue(address)" $KYBER --unlocked --from "$SAFE" >/dev/null
 [ "$(venue_kind $KYBER)" = "0" ] && ok "Safe removeVenue(KyberSwap)" || fail "removeVenue"
 
-echo "== 第二價格來源（#15）：有 Chainlink feed 的 4 個資產掛上，bStock 沒有"
-for pair in WBNB:0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c DOGE:0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \
-            BTCB:0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c ETH:0x2170Ed0880ac9A755fd29B2688956BD959F933F8; do
-  src=$(cast call $RT 'secondaryOf(address)(address,uint16)' "${pair#*:}")
-  [ "$(head -1 <<<"$src")" != "0x0000000000000000000000000000000000000000" ] && [ "$(sed -n 2p <<<"$src" | awk '{print $1}')" = "200" ] \
-    && ok "${pair%%:*} secondary $(head -1 <<<"$src")（Chainlink、差距上限 200 bps）" || fail "${pair%%:*} secondary"
-done
-for pair in NVDAB:0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 TSLAB:0x5b1910eAaD6450E50f816082Aa078C41F10C292f SPCXB:0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1; do
-  [ "$(cast call $RT 'secondaryOf(address)(address,uint16)' "${pair#*:}" | head -1)" = "0x0000000000000000000000000000000000000000" ] \
-    && ok "${pair%%:*} 沒有 secondary（只用池子 TWAP）" || fail "${pair%%:*} 不該有 secondary"
-done
+# 資產清單直接取自這次部署實際送出的 setOracle／setSecondary，不在腳本裡再列一份（docs#32 的 admission 清單）
+ASSETS=$(jq -r '.transactions[] | select(.function != null and (.function | startswith("setOracle("))) | .arguments[0]' $RUN)
+SECONDARIES=$(jq -r '.transactions[] | select(.function != null and (.function | startswith("setSecondary("))) | .arguments[0]' $RUN)
+N_ASSETS=$(wc -l <<<"$ASSETS" | tr -d ' ')
+N_SEC=$(grep -c . <<<"$SECONDARIES" || true)
+sym() { cast call "$1" 'symbol()(string)' | tr -d '"'; }
+has_sec() { grep -qix "$1" <<<"$SECONDARIES"; }
 
-echo "== 報價（100 USDT → 各資產）"
-for a in 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c 0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436 0xbA2aE424d960c26247Dd6c32edC70B295c744C43 \
-         0x5b1910eAaD6450E50f816082Aa078C41F10C292f 0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1 0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c \
-         0x2170Ed0880ac9A755fd29B2688956BD959F933F8; do
-  q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT $a 100000000000000000000 | head -1 | awk '{print $1}')
-  [ "$q" != "0" ] && ok "$a quoted $q" || fail "$a quote"
+echo "== 第二價格來源（#15）：$N_SEC／$N_ASSETS 個資產掛上 Chainlink（不是 bStock、有新鮮的標準 feed）"
+for a in $ASSETS; do
+  src=$(cast call $RT 'secondaryOf(address)(address,uint16)' "$a")
+  if has_sec "$a"; then
+    [ "$(head -1 <<<"$src")" != "$ZERO" ] && [ "$(sed -n 2p <<<"$src" | awk '{print $1}')" = "200" ] \
+      && ok "$(sym $a) secondary（maxAge $(cast call "$(head -1 <<<"$src")" 'maxAge()(uint32)') 秒、差距上限 200 bps）" || fail "$(sym $a) secondary"
+  else
+    [ "$(head -1 <<<"$src")" = "$ZERO" ] || fail "$(sym $a) 不該有 secondary"
+  fi
+done
+ok "其餘 $(( N_ASSETS - N_SEC )) 個資產沒有 secondary（只用池子 TWAP）"
+
+echo "== 報價：全部 $N_ASSETS 個資產，100 USDT 買入、再把買到的數量賣回"
+for a in $ASSETS; do
+  BUY=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT "$a" 100000000000000000000) || fail "$(sym $a) 買入報價 revert"
+  QB=$(head -1 <<<"$BUY" | awk '{print $1}'); MB=$(sed -n 2p <<<"$BUY" | awk '{print $1}')
+  SELL=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' "$a" $USDT "$QB") || fail "$(sym $a) 賣出報價 revert"
+  QS=$(head -1 <<<"$SELL" | awk '{print $1}'); MS=$(sed -n 2p <<<"$SELL" | awk '{print $1}')
+  [ "$QB" != "0" ] && [ "$MB" != "0" ] && [ "$QS" != "0" ] && [ "$MS" != "0" ] \
+    && ok "$(sym $a)$(has_sec "$a" && echo '＋CL')：買 100 USDT → $QB（地板 $MB）；賣回 → $(cast from-wei $QS) USDT（地板 $(cast from-wei $MS)）" \
+    || fail "$(sym $a) 報價為 0"
 done
 
 echo

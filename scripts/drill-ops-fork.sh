@@ -11,8 +11,8 @@
 #
 # 不送任何主網交易，也不需要私鑰：所有角色都是 anvil 預設測試地址，用 impersonate 代簽；
 # 「Safe 送出」等同 Safe 多簽湊滿門檻後執行。先在另一個終端機起全新的 fork：
-#   anvil --fork-url https://bsc-dataseed.bnbchain.org --chain-id 56 --port 8547 --hardfork cancun
-# 起來後立刻執行（dataseed 不是 archive，歷史窗口只有一兩分鐘）：
+#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
+# 要用保留較長歷史的 RPC（Blast）：部署要讀 38 個池子，dataseed 只有一兩分鐘的歷史，會 missing trie node。
 #   scripts/drill-ops-fork.sh
 set -euo pipefail
 
