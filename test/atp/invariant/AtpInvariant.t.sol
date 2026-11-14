@@ -105,10 +105,11 @@ contract AtpInvariantTest is Test {
     }
 
     /// (7) Whatever a venue does (steal, underpay, pay elsewhere, pull more, re-enter, call admin, donate...),
-    /// every executed step pays the account at least the oracle floor: the loss is bounded by
-    /// amountIn's value - floor.
+    /// every executed step pays the account at least the oracle floor, and its gross output clears the step's
+    /// own amountOutMin (cre8-contracts#24): the loss is bounded by amountIn's value - max(floor, amountOutMin).
     function invariant_7_venueLossBoundedByTheFloor() public view {
         assertEq(handler.ghostFloorViolations(), 0, "account received less than the floor");
+        assertEq(handler.ghostMinOutViolations(), 0, "gross output below amountOutMin");
     }
 
     /// @dev Coverage guard: the handler really settles swaps through every venue kind and through the two
@@ -117,24 +118,33 @@ contract AtpInvariantTest is Test {
     function test_handlerSettlesEveryVenueKindAndRejectsTheRest() public {
         AtpHandler h = new AtpHandler();
         for (uint256 venue; venue < 7; ++venue) {
-            h.rebalance(0, true, 0, 100e18, venue, 15, 10_000); // honest buy of A
-            h.rebalance(0, false, 0, 10e18, venue, 15, 10_000); // honest sale of A
+            h.rebalance(0, true, 0, 100e18, venue, 15, 10_000, 0); // honest buy of A
+            h.rebalance(0, false, 0, 10e18, venue, 15, 10_000, 0); // honest sale of A
         }
         assertEq(h.callsSwapOk(), 14, "UR, ERC20 and Permit2 venues settle both ways");
-        h.rebalance(0, true, 0, 100e18, 7, 15, 10_000); // venue off the allowlist
+        h.rebalance(0, true, 0, 100e18, 7, 15, 10_000, 0); // venue off the allowlist
         assertEq(h.callsSwapReverted(), 1);
 
-        h.rebalance(0, true, 0, 100e18, 2, 7, 10_000); // PullHalf on the ERC20 venue
-        h.rebalance(0, true, 0, 100e18, 2, 9, 10_000); // DonateStray on the ERC20 venue
+        h.rebalance(0, true, 0, 100e18, 2, 7, 10_000, 0); // PullHalf on the ERC20 venue
+        h.rebalance(0, true, 0, 100e18, 2, 9, 10_000, 0); // DonateStray on the ERC20 venue
         assertEq(h.callsMaliciousOk(), 2, "the settleable malicious behaviours settle");
         for (uint256 mode = 1; mode <= 8; ++mode) {
             if (mode == 7) continue;
-            h.rebalance(0, true, 0, 100e18, 2, mode, 10_000); // every other behaviour must revert
+            h.rebalance(0, true, 0, 100e18, 2, mode, 10_000, 0); // every other behaviour must revert
         }
         assertEq(h.callsSwapOk(), 16, "no other malicious behaviour settles");
-        h.rebalance(0, true, 0, 100e18, 2, 15, 9_400); // pays 94% of the quote: below the 97% floor
+        h.rebalance(0, true, 0, 100e18, 2, 15, 9_400, 0); // pays 94% of the quote: below the 97% floor
         assertEq(h.callsSwapOk(), 16, "underpayment reverts");
-        assertEq(h.ghostFloorViolations() + h.ghostFeeViolations() + h.ghostLeaks(), 0);
+        for (uint256 venue; venue < 7; ++venue) {
+            // pays 99% of the quote, above the floor but below an amountOutMin of 100%: every venue kind reverts
+            h.rebalance(0, true, 0, 100e18, venue, 15, 9_900, 10_000);
+        }
+        assertEq(h.callsSwapOk(), 16, "a payout between the floor and amountOutMin reverts");
+        h.rebalance(0, true, 0, 100e18, 2, 15, 10_000, 10_000); // pays exactly amountOutMin
+        assertEq(h.callsSwapOk(), 17, "a payout equal to amountOutMin settles");
+        assertEq(
+            h.ghostFloorViolations() + h.ghostMinOutViolations() + h.ghostFeeViolations() + h.ghostLeaks(), 0
+        );
     }
 
     function afterInvariant() public view {

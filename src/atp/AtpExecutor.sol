@@ -20,8 +20,9 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// "account -> executeRebalance", enforced in the Kernel layer, so this contract does not inspect session
 /// keys. It trusts `msg.sender == account` and enforces the domain rules itself: enrolled/unpaused
 /// strategy, version asset allowlist, command allowlist with the recipient pinned back here, deadline, and
-/// the oracle floor. The agent chooses routes and fills `amountOutMin`, but the oracle-derived `minGross`
-/// is the authority: the realised gross output must clear it, so `amountOutMin = 0` cannot weaken the floor.
+/// the oracle floor. The agent chooses routes and fills `amountOutMin`, which must be at least the oracle-derived
+/// `minGross`; the realised gross output must then clear `amountOutMin` itself (cre8-contracts#24), so a tighter
+/// agent bound binds on chain even when a venue's own calldata is opaque, and no bound can go below the floor.
 /// @dev Buy limit (A10-1, cre8-contracts#10): a leaked session key could grind an account down by trading
 /// back and forth, each step clearing the floor. Every round trip needs a buy, so buys (numeraire -> asset)
 /// are capped per account at `maxBuyBps` of the account's current value per fixed 24-hour window. Sales to the
@@ -31,8 +32,9 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// whose calldata is passed through undecoded. What bounds a malicious or compromised venue is not decoding but
 /// four invariants: accounts approve only this executor; this executor holds no balance between calls; the
 /// venue is approved exactly this step's `amountIn` of `tokenIn` and the approval is zeroed right after the
-/// call; and the `tokenOut` that actually landed here must clear the oracle floor or the whole batch reverts.
-/// A venue can therefore take at most (step amount - floor) per step, the same bound as a sandwich today.
+/// call; and the `tokenOut` that actually landed here must clear the step's `amountOutMin` (never below the
+/// oracle floor) or the whole batch reverts. A venue can therefore take at most (step amount - amountOutMin)
+/// per step, and never more than (step amount - floor), the same bound as a sandwich today.
 contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -109,8 +111,8 @@ contract AtpExecutor is ReentrancyGuard {
         address tokenOut;
         /// @notice Exact input amount, in `tokenIn` units.
         uint256 amountIn;
-        /// @notice The agent's own bound. Advisory only: the executor additionally requires it to be at
-        /// least `minGross` and independently checks the realised output against `minGross`.
+        /// @notice The agent's own bound on the gross output. Must be at least `minGross` (the oracle floor
+        /// grossed up over the fee), and the realised output measured here must clear it (cre8-contracts#24).
         uint256 amountOutMin;
         /// @notice Call target, must be an allowlisted venue.
         address venue;
@@ -155,6 +157,8 @@ contract AtpExecutor is ReentrancyGuard {
     error BadRecipient(address recipient);
     error NoFloor();
     error FeeTooHigh(uint256 bps);
+    /// @dev `floor` is the bound that failed: `minGross` when `amountOutMin` is below it (checked before any token
+    /// moves), otherwise the step's `amountOutMin` (checked against the realised output after the swap).
     error BelowFloor(uint256 realised, uint256 floor);
     /// @dev This batch would take the window's buys to `bought`, above `cap` (value x `maxBuyBps`).
     error BuyLimitExceeded(uint256 bought, uint256 cap);
@@ -300,7 +304,8 @@ contract AtpExecutor is ReentrancyGuard {
                 window.bought = SafeCast.toUint192(bought);
             }
             uint256 gross = _swap(account, step, deadline);
-            if (gross < floor) revert BelowFloor(gross, floor);
+            // `_checkStep` already required amountOutMin >= floor, so this bound also covers the oracle floor.
+            if (gross < step.amountOutMin) revert BelowFloor(gross, step.amountOutMin);
             uint256 fee = _splitFee(step.tokenOut, gross, feeBps, account);
             emit SwapExecuted(
                 account, step.tokenIn, step.tokenOut, step.amountIn, gross, fee, gross - fee, floor
@@ -419,10 +424,9 @@ contract AtpExecutor is ReentrancyGuard {
         if (minimum == 0) revert NoFloor();
         minGross = _minGross(minimum, feeBps);
 
-        // amountOutMin is agent-supplied, so it is never the authority: require it to be at least the floor
-        // (a lying agent is rejected up front) and then check the real gross output in `executeRebalance`.
-        // TODO: also overwrite the router's own amountOutMin inside `inputs` with `minGross`; today the
-        // router-level value stays whatever the agent encoded, and the post-swap check is what binds.
+        // amountOutMin is agent-supplied, so it may only tighten the floor: require it to be at least the floor
+        // (a lying agent is rejected up front); `executeRebalance` then checks the real gross output against it.
+        // The router-level bound inside the venue calldata stays whatever the agent encoded and is not relied on.
         if (step.amountOutMin < minGross) revert BelowFloor(step.amountOutMin, minGross);
     }
 

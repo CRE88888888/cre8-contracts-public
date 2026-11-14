@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import { Test } from "forge-std/Test.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { AtpExecutor } from "../../../src/atp/AtpExecutor.sol";
 import { AtpRegistry } from "../../../src/atp/AtpRegistry.sol";
 import { AtpMultiPoolOracle } from "../../../src/atp/AtpMultiPoolOracle.sol";
@@ -58,6 +59,7 @@ contract AtpHandler is Test {
     // ---- ghosts ----
     mapping(address => uint256) public ghostDonated;
     uint256 public ghostFloorViolations; // (7) account received less than the oracle floor
+    uint256 public ghostMinOutViolations; // (7) a step settled with gross output below its amountOutMin
     uint256 public ghostInOverspend; // (2) more tokenIn left the account than amountIn
     uint256 public ghostFeeViolations; // (2) fee != floor(gross x feeBps) or went elsewhere
     uint256 public ghostLeaks; // (2) the other account's balances moved
@@ -171,6 +173,7 @@ contract AtpHandler is Test {
         bool listed;
         uint16 feeBps;
         uint256 minimum;
+        uint256 amountOutMin;
         uint256 accIn;
         uint256 accOut;
         uint256 feeOut;
@@ -179,7 +182,8 @@ contract AtpHandler is Test {
         uint256 cap;
     }
 
-    /// @param modeSeed selects the venue behaviour; `payBps` scales what an honest-ish venue pays vs the quote.
+    /// @param modeSeed selects the venue behaviour; `payBps` scales what an honest-ish venue pays vs the quote;
+    /// `minBps` sets the step's `amountOutMin` vs the quote, never below `minGross` (the executor's own bound).
     function rebalance(
         uint256 accountSeed,
         bool buy,
@@ -187,7 +191,8 @@ contract AtpHandler is Test {
         uint256 amountSeed,
         uint256 venueSeed,
         uint256 modeSeed,
-        uint256 payBps
+        uint256 payBps,
+        uint256 minBps
     ) external {
         TestAccount account = accounts[accountSeed % 2];
         TestAccount other = accounts[(accountSeed + 1) % 2];
@@ -204,12 +209,18 @@ contract AtpHandler is Test {
             return;
         }
         uint256 payout = quote * _bound(payBps, 9_400, 10_600) / BPS;
+        // amountOutMin anywhere from the executor's minGross (oracle floor grossed up over the fee) to 3% above
+        // the quote, so payouts land below, between and above the two bounds.
+        AtpRegistry.Enrollment memory enrollment = registry.enrollments(address(account));
+        pre.feeBps = registry.effectiveFeeBps(enrollment.strategyId);
+        uint256 minGross = Math.mulDiv(pre.minimum, BPS, BPS - pre.feeBps, Math.Rounding.Ceil);
+        pre.amountOutMin = Math.max(minGross, quote * _bound(minBps, 9_000, 10_300) / BPS);
 
         AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](1);
         steps[0].tokenIn = address(tokenIn);
         steps[0].tokenOut = address(tokenOut);
         steps[0].amountIn = amount;
-        steps[0].amountOutMin = quote + 2; // >= minGross for any fee <= slippage
+        steps[0].amountOutMin = pre.amountOutMin;
         // Weighted: 6 of 16 draws are an honest(-ish) payment, the other 10 one of the ten behaviours, so enough
         // swaps settle for the floor / fee / buy-limit checks to bite while every malicious path keeps running.
         uint256 draw = modeSeed % 16;
@@ -235,14 +246,12 @@ contract AtpHandler is Test {
         }
 
         // ---- pre-state ----
-        AtpRegistry.Enrollment memory enrollment = registry.enrollments(address(account));
         pre.paused = executor.globalPaused() || enrollment.paused;
         pre.allowed = registry.isEnrolled(address(account))
             && registry.isAssetAllowed(enrollment.strategyId, enrollment.version, address(tokenIn))
             && registry.isAssetAllowed(enrollment.strategyId, enrollment.version, address(tokenOut));
         (AtpExecutor.VenueKind kind,) = executor.venues(steps[0].venue);
         pre.listed = kind != AtpExecutor.VenueKind.NONE;
-        pre.feeBps = registry.effectiveFeeBps(enrollment.strategyId);
         pre.accIn = tokenIn.balanceOf(address(account));
         pre.accOut = tokenOut.balanceOf(address(account));
         pre.feeOut = tokenOut.balanceOf(FEE_RECIPIENT);
@@ -286,6 +295,7 @@ contract AtpHandler is Test {
         uint256 net = accOut - pre.accOut;
         uint256 fee = tokenOut.balanceOf(FEE_RECIPIENT) - pre.feeOut;
         if (net < pre.minimum) ++ghostFloorViolations;
+        if (net + fee < pre.amountOutMin) ++ghostMinOutViolations;
         if (fee != (net + fee) * pre.feeBps / BPS) ++ghostFeeViolations;
         if (
             tokenIn.balanceOf(address(other)) != pre.otherIn

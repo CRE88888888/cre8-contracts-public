@@ -15,7 +15,7 @@
 2. **使用者自己恢復或重新加入策略，會清掉所有暫停。** 帳戶是使用者自己的，Safe 的暫停只能擋住平台這一側，擋不住帳戶本人；反過來，使用者自己暫停的，Safe 也解除不了。
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 4. **每個帳戶每 24 小時最多買入「帳戶總值 × 100%」，賣成 USDT 不受限制。** 外洩的 session key 就算繞過後端，自己反覆來回換幣，每一輪都要買回，買到額度就停。Safe 可以把額度調成 0，變成「只准賣出」模式：所有人都只能賣、不能買。operator 碰不到這個設定。
-5. **交易只能走 Safe 允許的「成交管道」（venue）。** 部署時只有 PancakeSwap；聚合器（KyberSwap、OpenOcean）要由 Safe 一筆加入，懷疑某個管道出問題時，Safe 一筆移除就立刻停用。就算某個管道被駭，每一步最多被吃掉「這一步的金額 − 價格地板」，它碰不到帳戶裡其他的錢。
+5. **交易只能走 Safe 允許的「成交管道」（venue）。** 部署時只有 PancakeSwap；聚合器（KyberSwap、OpenOcean）要由 Safe 一筆加入，懷疑某個管道出問題時，Safe 一筆移除就立刻停用。就算某個管道被駭，每一步最多被吃掉「這一步的金額 − 這一步的最低成交量」：最低成交量（`amountOutMin`）由後端依報價填，合約要求它不低於價格地板，並以實際入帳量檢查它（#24），所以最壞也只到價格地板，碰不到帳戶裡其他的錢。
 6. **有 Chainlink 價格的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、XRP、TRX、LTC、USDC、DAI）用兩個價格來源互相檢查。** 池子的 30 分鐘均價和 Chainlink 差超過 2%，或 Chainlink 超過時限沒更新（AVAX 的 feed 一天才固定更新一次，時限 1 天；其他 1 小時），這個資產就停止交易，直到恢復；地板取兩者中比較嚴的。bStock 和 SGOVon、TLTon、XAUt 沒有能直接用的外部價格，只用池子均價。部署時依 docs#32 的准入清單設定 38 個資產。換掉或拿掉第二來源只有 Safe 能做。
 
 以下六個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
@@ -198,7 +198,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 - **Pancake Universal Router**：部署時由 executor 建構子自動加入，命令仍然照舊檢查，收款人必須是 executor。
 - **聚合器**：Safe 用 `setVenue(地址, 2, spender)` 加入（2 = `ERC20_APPROVE`）；calldata 照原樣轉發，不解碼。
 
-安全靠四件事：帳戶只 approve executor；executor 平常沒有任何餘額；每一步只對該 venue 給「這一步的 `amountIn`」額度，呼叫完立刻歸零；成交後 executor 收到的 `tokenOut` 必須 ≥ oracle 地板，否則整筆 revert。
+安全靠四件事：帳戶只 approve executor；executor 平常沒有任何餘額；每一步只對該 venue 給「這一步的 `amountIn`」額度，呼叫完立刻歸零；成交後 executor 實際收到的 `tokenOut` 必須 ≥ 這一步的 `amountOutMin`（它本身不得低於 oracle 地板），否則整筆 revert（#24）。
 
 | 步驟 | 誰簽 | 呼叫 | 預期結果 |
 | --- | --- | --- | --- |

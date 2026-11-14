@@ -326,6 +326,79 @@ contract AtpExecutorVenuesTest is Test {
         _run(steps);
     }
 
+    // ---- cre8-contracts#24: the step's own amountOutMin binds on chain, on every venue kind ----
+
+    /// @dev A venue (or an aggregator API behind it) that pays above the oracle floor but below the step's
+    /// amountOutMin is rejected; paying exactly amountOutMin settles. Generic venues get `amountOut` through
+    /// opaque calldata, so the executor's own balance check is the only thing that can enforce the bound.
+    function _assertAmountOutMinBinds(address venue_) internal {
+        uint256 floor = _floor(100e18);
+        uint256 minOut = floor + 1e18;
+        uint256 between = floor + 0.5e18;
+
+        AtpExecutor.SwapStep[] memory steps = _buyStep(venue_, 100e18, between, EvilVenue.Mode.Honest);
+        steps[0].amountOutMin = minOut;
+        vm.expectRevert(abi.encodeWithSelector(AtpExecutor.BelowFloor.selector, between, minOut));
+        _run(steps);
+        _assertUntouched();
+
+        steps = _buyStep(venue_, 100e18, minOut, EvilVenue.Mode.Honest);
+        steps[0].amountOutMin = minOut;
+        _run(steps);
+        assertEq(tokenA.balanceOf(address(this)), minOut, "account got exactly amountOutMin");
+    }
+
+    function test_amountOutMin_binds_erc20Venue() public {
+        _assertAmountOutMinBinds(address(venue));
+    }
+
+    function test_amountOutMin_binds_permit2Venue() public {
+        EvilVenue p2Venue = new EvilVenue();
+        p2Venue.configure(address(this), BurnableToken(address(0)), permit2);
+        executor.setVenue(address(p2Venue), AtpExecutor.VenueKind.PERMIT2, address(p2Venue));
+        _assertAmountOutMinBinds(address(p2Venue));
+    }
+
+    /// @dev The Universal Router's own amountOutMin (inside `inputs`) is set below the step's: the router would
+    /// accept the trade, the executor does not.
+    function test_amountOutMin_binds_universalRouter() public {
+        uint256 floor = _floor(100e18);
+        uint256 minOut = floor + 1e18;
+        uint256 between = floor + 0.5e18;
+        AtpExecutor.SwapStep[] memory steps = _urStep(100e18, between, minOut);
+        vm.expectRevert(abi.encodeWithSelector(AtpExecutor.BelowFloor.selector, between, minOut));
+        _run(steps);
+        _assertUntouched();
+
+        _run(_urStep(100e18, minOut, minOut));
+        assertEq(tokenA.balanceOf(address(this)), minOut, "account got exactly amountOutMin");
+    }
+
+    /// @dev `PricedRouter` pays exactly the router-level amountOutMin encoded in `inputs`.
+    function _urStep(uint256 usdtIn, uint256 routerPays, uint256 stepMin)
+        internal
+        view
+        returns (AtpExecutor.SwapStep[] memory steps)
+    {
+        bytes[] memory inputs = new bytes[](1);
+        inputs[0] = abi.encode(
+            address(executor),
+            usdtIn,
+            routerPays,
+            abi.encodePacked(address(usdt), uint24(500), address(tokenA)),
+            true
+        );
+        steps = new AtpExecutor.SwapStep[](1);
+        steps[0] = AtpExecutor.SwapStep({
+            tokenIn: address(usdt),
+            tokenOut: address(tokenA),
+            amountIn: usdtIn,
+            amountOutMin: stepMin,
+            venue: address(ur),
+            data: abi.encode(hex"00", inputs)
+        });
+    }
+
     function test_pullsMoreThanAmountIn_reverts() public {
         AtpExecutor.SwapStep[] memory steps = _buyStep(address(venue), 100e18, 0, EvilVenue.Mode.PullMore);
         vm.expectRevert(stdError.arithmeticError); // allowance is exactly amountIn
