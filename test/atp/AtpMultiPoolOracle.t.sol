@@ -45,6 +45,12 @@ contract MockPool {
         return (sqrtPriceX96, 0, 0, observationCardinality, observationCardinality, 0, unlocked);
     }
 
+    /// @dev The newest observation (index 0) is always from the current block: these tests price a live pool.
+    function observations(uint256 index) external view returns (uint32, int56, uint160, bool) {
+        if (index != 0) return (0, 0, 0, false);
+        return (uint32(block.timestamp), cumulativeNow, 0, true);
+    }
+
     function observe(uint32[] calldata secondsAgos)
         external
         view
@@ -74,6 +80,11 @@ contract MockPool {
         cumulativeAtWindow = 0;
         cumulativeNow = int56(meanTick) * int56(uint56(window_));
         cumulativeAtRecent = cumulativeNow - int56(meanTick) * int56(uint56(RECENT_WINDOW));
+    }
+
+    /// @dev Pins the recent 5 minute segment to its own mean tick, independent of the TWAP segment.
+    function setRecentMeanTick(int24 recentMeanTick) external {
+        cumulativeAtRecent = cumulativeNow - int56(recentMeanTick) * int56(uint56(RECENT_WINDOW));
     }
 
     function setObservationCardinality(uint16 cardinality) external {

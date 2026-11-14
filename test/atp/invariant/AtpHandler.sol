@@ -139,7 +139,7 @@ contract AtpHandler is Test {
         routerSparePool = _pool(numeraire, routerAssetUnregistered);
         spareFeedA = new MockAggregator(8, 1e8);
         spareFeedB = new MockAggregator(8, 1e8);
-        router.setSecondary(routerAssetWithSecondary, spareFeedA, spareFeedB, 1 hours, 200);
+        router.setSecondary(routerAssetWithSecondary, spareFeedA, spareFeedB, 1 hours, 1 hours, 200);
     }
 
     function _pool(MockToken numeraire, address asset) internal returns (address) {
@@ -443,7 +443,7 @@ contract AtpHandler is Test {
                 address(router),
                 abi.encodeCall(
                     AtpMultiPoolOracle.setSecondary,
-                    (routerAssetNoSecondary, spareFeedA, spareFeedB, 1 hours, 200)
+                    (routerAssetNoSecondary, spareFeedA, spareFeedB, 1 hours, 1 hours, 200)
                 )
             );
         } else {

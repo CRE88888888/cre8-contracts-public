@@ -181,6 +181,7 @@ contract TestnetContractsTest is Test {
             IAggregatorV3(address(usdtUsd)),
             address(btc),
             address(usdt),
+            1 hours,
             1 hours
         );
         assertEq(source.price(), 67_000e18, "USDT per 1e18 BTCB");

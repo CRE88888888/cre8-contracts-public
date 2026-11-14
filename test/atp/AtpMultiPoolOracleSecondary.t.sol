@@ -40,7 +40,8 @@ contract MockAggregator is IAggregatorV3 {
 contract AtpMultiPoolOracleSecondaryTest is Test {
     uint32 internal constant WINDOW = 30 minutes;
     uint16 internal constant SLIPPAGE_BPS = 50;
-    uint32 internal constant MAX_AGE = 1 hours;
+    uint32 internal constant MAX_AGE = 1 hours; // asset feed
+    uint32 internal constant NUMERAIRE_MAX_AGE = 45 minutes; // numeraire feed: its own bound (L-5)
     uint16 internal constant DEVIATION_BPS = 200;
     address internal constant OUTSIDER = address(0xB0B);
 
@@ -49,6 +50,7 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
     MockToken internal asset6;
     AtpMultiPoolOracle internal router;
     PancakeV3TwapOracle internal oracle18;
+    MockPool internal pool18;
     MockAggregator internal assetFeed; // asset/USD, 8 decimals (Chainlink-style)
     MockAggregator internal usdtFeed; // numeraire/USD, 8 decimals
     MockAggregator internal asset6Feed; // asset/USD, 18 decimals (SVR-style)
@@ -59,8 +61,8 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
         asset18 = new MockToken(18);
         asset6 = new MockToken(6);
         router = new AtpMultiPoolOracle(address(numeraire));
-        oracle18 =
-            router.setOracle(address(asset18), address(_pool(asset18, 0)), WINDOW, SLIPPAGE_BPS, MAX_AGE);
+        pool18 = _pool(asset18, 0);
+        oracle18 = router.setOracle(address(asset18), address(pool18), WINDOW, SLIPPAGE_BPS, MAX_AGE);
         router.setOracle(address(asset6), address(_pool(asset6, -276_324)), WINDOW, SLIPPAGE_BPS, MAX_AGE);
         assetFeed = new MockAggregator(8, 1e8);
         usdtFeed = new MockAggregator(8, 1e8);
@@ -73,7 +75,9 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
     }
 
     function _wire() internal returns (IPriceSource) {
-        return router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, DEVIATION_BPS);
+        return router.setSecondary(
+            address(asset18), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS
+        );
     }
 
     function _sell(uint256 amount) internal view returns (uint256 quoted, uint256 minimum) {
@@ -117,7 +121,7 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
     function test_setSecondary_onlyOwner() public {
         vm.prank(OUTSIDER);
         vm.expectRevert(AtpMultiPoolOracle.NotOwner.selector);
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, DEVIATION_BPS);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS);
 
         _wire();
         vm.prank(OUTSIDER);
@@ -130,23 +134,34 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(AtpMultiPoolOracle.OracleNotSet.selector, address(unregistered))
         );
-        router.setSecondary(address(unregistered), assetFeed, usdtFeed, MAX_AGE, DEVIATION_BPS);
+        router.setSecondary(
+            address(unregistered), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS
+        );
 
         vm.expectRevert(abi.encodeWithSelector(AtpMultiPoolOracle.InvalidDeviation.selector, uint16(0)));
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, 0);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, 0);
         vm.expectRevert(abi.encodeWithSelector(AtpMultiPoolOracle.InvalidDeviation.selector, uint16(1_001)));
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, 1_001);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, 1_001);
 
         vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
         router.setSecondary(
-            address(asset18), IAggregatorV3(address(0xDEAD)), usdtFeed, MAX_AGE, DEVIATION_BPS
+            address(asset18),
+            IAggregatorV3(address(0xDEAD)),
+            usdtFeed,
+            MAX_AGE,
+            NUMERAIRE_MAX_AGE,
+            DEVIATION_BPS
         );
         vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
-        router.setSecondary(address(asset18), assetFeed, assetFeed, MAX_AGE, DEVIATION_BPS); // same feed twice
+        // same feed twice
+        router.setSecondary(address(asset18), assetFeed, assetFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS);
         vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, 59, DEVIATION_BPS); // below a minute
+        // below a minute
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, 59, NUMERAIRE_MAX_AGE, DEVIATION_BPS);
         vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, 1 days + 1, DEVIATION_BPS); // above a day
+        router.setSecondary(
+            address(asset18), assetFeed, usdtFeed, 1 days + 1, NUMERAIRE_MAX_AGE, DEVIATION_BPS
+        ); // above a day
 
         _wire();
         vm.expectRevert(
@@ -183,7 +198,7 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
         vm.expectRevert(AtpMultiPoolOracle.NotOwner.selector);
         _wire();
         vm.prank(OUTSIDER);
-        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, DEVIATION_BPS);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS);
     }
 
     // ---- agreement and the stricter floor ----
@@ -257,6 +272,101 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
         _sell(100e18);
     }
 
+    // ---- either pool mean may agree (L-5, cre8-contracts#25) ----
+
+    /// @dev Fast market: over the last 5 minutes the pool moved 3% up (tick -300 ~ +3.05%), the live feed moved with
+    /// it, and the 30 minute TWAP still lags. The TWAP is 2.9% off the feed (> 200 bps) but the recent mean agrees,
+    /// so the quote goes through. Before #25 this reverted `SourcesDisagree` in both directions.
+    function test_twapLagsButRecentMeanAgrees_quotes_bothDirections() public {
+        _wire();
+        pool18.setRecentMeanTick(-300); // numeraire is token0: a lower tick prices the asset higher
+        assetFeed.set(1.03e8, block.timestamp);
+
+        (uint256 q, uint256 m) = _sell(100e18);
+        assertEq(q, 100e18, "quoted stays the TWAP quote");
+        (, uint256 recentQ,) = oracle18.previewSwapWindows(address(asset18), address(numeraire), 100e18);
+        assertEq(m, _floor(Math.max(recentQ, 103e18)), "floor = the stricter of recent mean and feed");
+
+        (q, m) = _buy(100e18);
+        assertEq(q, 100e18);
+        assertGe(m, _floor(Math.mulDiv(100e18, 1e18, 1.03e18)), "never looser than the feed's buy floor");
+    }
+
+    /// @dev The other way round: the recent mean is off (a pool-only move of 5 minutes, the shape of a
+    /// sandwich), the TWAP still agrees with the feed. The quote goes through and the floor is the strictest.
+    function test_recentMeanOffButTwapAgrees_quotes() public {
+        _wire();
+        pool18.setRecentMeanTick(-500); // ~ +5.1% over the last 5 minutes on the pool alone
+
+        (uint256 q, uint256 m) = _sell(100e18);
+        assertEq(q, 100e18);
+        (, uint256 recentQ,) = oracle18.previewSwapWindows(address(asset18), address(numeraire), 100e18);
+        assertEq(m, _floor(recentQ), "the recent-mean floor (above both the TWAP and the feed) still binds");
+    }
+
+    function test_bothMeansDisagree_failsClosed_bothDirections() public {
+        _wire();
+        pool18.setRecentMeanTick(300); // recent ~ -3%, TWAP 0, feed +3%
+        assetFeed.set(1.03e8, block.timestamp);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AtpMultiPoolOracle.SourcesDisagree.selector, address(asset18), 100e18, 103e18
+            )
+        );
+        _sell(100e18);
+        vm.expectPartialRevert(AtpMultiPoolOracle.SourcesDisagree.selector);
+        _buy(100e18);
+    }
+
+    /// @dev Boundary on the recent mean (TWAP far off): 196 bps of the secondary quote passes, 204 bps fails.
+    function test_recentMeanDeviationBound() public {
+        _wire();
+        pool18.setMeanTick(1_000, WINDOW); // TWAP ~ -9.5%: only the recent mean can agree
+        pool18.setRecentMeanTick(0); // recent quote exactly 100 per 100
+
+        assetFeed.set(1.02e8, block.timestamp); // gap 2 / 102 = 196 bps
+        _sell(100e18);
+        assetFeed.set(0.98e8, block.timestamp); // gap 2 / 98 = 204 bps
+        vm.expectPartialRevert(AtpMultiPoolOracle.SourcesDisagree.selector);
+        _sell(100e18);
+    }
+
+    // ---- each feed has its own max age (L-5, cre8-contracts#25) ----
+
+    function test_setSecondary_pinsBothMaxAges() public {
+        PushFeedPriceSource adapter = PushFeedPriceSource(address(_wire()));
+        assertEq(adapter.maxAge(), MAX_AGE);
+        assertEq(adapter.numeraireMaxAge(), NUMERAIRE_MAX_AGE);
+    }
+
+    /// @dev The asset feed may be older than the numeraire's bound as long as it is within its own, and the
+    /// other way round: the bounds are independent.
+    function test_feedAgesAreCheckedAgainstTheirOwnBound() public {
+        _wire();
+        assetFeed.set(1e8, block.timestamp - MAX_AGE); // older than NUMERAIRE_MAX_AGE, within its own
+        usdtFeed.set(1e8, block.timestamp - NUMERAIRE_MAX_AGE);
+        _sell(100e18);
+
+        usdtFeed.set(1e8, block.timestamp - NUMERAIRE_MAX_AGE - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PushFeedPriceSource.StaleFeed.selector,
+                address(usdtFeed),
+                block.timestamp - NUMERAIRE_MAX_AGE - 1
+            )
+        );
+        _sell(100e18);
+    }
+
+    function test_setSecondary_rejectsNumeraireMaxAgeOutOfBounds() public {
+        vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, 59, DEVIATION_BPS);
+        vm.expectRevert(PushFeedPriceSource.InvalidConfig.selector);
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, MAX_AGE, 1 days + 1, DEVIATION_BPS);
+        // Both bounds are inclusive.
+        router.setSecondary(address(asset18), assetFeed, usdtFeed, 1 minutes, 1 days, DEVIATION_BPS);
+    }
+
     // ---- stale or unusable feeds fail closed ----
 
     function test_staleAssetFeed_failsClosed() public {
@@ -275,12 +385,17 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
 
     function test_staleNumeraireFeed_failsClosed() public {
         _wire();
-        usdtFeed.set(1e8, block.timestamp - MAX_AGE - 1);
+        usdtFeed.set(1e8, block.timestamp - NUMERAIRE_MAX_AGE - 1);
         vm.expectRevert(
             abi.encodeWithSelector(
-                PushFeedPriceSource.StaleFeed.selector, address(usdtFeed), block.timestamp - MAX_AGE - 1
+                PushFeedPriceSource.StaleFeed.selector,
+                address(usdtFeed),
+                block.timestamp - NUMERAIRE_MAX_AGE - 1
             )
         );
+        _buy(100e18);
+
+        usdtFeed.set(1e8, block.timestamp - NUMERAIRE_MAX_AGE); // exactly its own max age is still fresh
         _buy(100e18);
     }
 
@@ -319,8 +434,9 @@ contract AtpMultiPoolOracleSecondaryTest is Test {
     // ---- decimals ----
 
     function test_decimalsAreFolded_6DecimalAsset_18DecimalFeed() public {
-        IPriceSource source =
-            router.setSecondary(address(asset6), asset6Feed, usdtFeed, MAX_AGE, DEVIATION_BPS);
+        IPriceSource source = router.setSecondary(
+            address(asset6), asset6Feed, usdtFeed, MAX_AGE, NUMERAIRE_MAX_AGE, DEVIATION_BPS
+        );
         // 1e18 raw of a 6-decimal asset = 1e12 tokens = 1e12 USDT = 1e30 raw numeraire.
         assertEq(source.price(), 1e30);
         (uint256 q, uint256 m) = router.previewSwap(address(asset6), address(numeraire), 100e6);

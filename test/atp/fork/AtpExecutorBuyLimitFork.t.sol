@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import { Test } from "forge-std/Test.sol";
+import { ForkPoolHelpers } from "./ForkPoolHelpers.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { AtpExecutor } from "../../../src/atp/AtpExecutor.sol";
 import { AtpRegistry } from "../../../src/atp/AtpRegistry.sol";
@@ -19,7 +19,7 @@ import { IV3Factory, MockSmartAccount } from "./AtpExecutorFork.t.sol";
 /// cap reverts; sales to USDT still go through with the cap spent and are not counted; the cap is back in the
 /// next 24-hour window. Swap fee is 0 so each step only has to clear the oracle floor (1% slippage on WBNB).
 /// @dev Without `BSC_RPC_URL` the suite is skipped, never passed.
-contract AtpExecutorBuyLimitForkTest is Test {
+contract AtpExecutorBuyLimitForkTest is ForkPoolHelpers {
     address internal constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address internal constant USDT = 0x55d398326f99059fF775485246999027B3197955;
     address internal constant V3_FACTORY = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865;
@@ -33,6 +33,7 @@ contract AtpExecutorBuyLimitForkTest is Test {
     AtpExecutor internal executor;
     MockSmartAccount internal account;
     uint24 internal fee;
+    address internal pool;
 
     function setUp() public {
         string memory rpc = vm.envOr("BSC_RPC_URL", string(""));
@@ -44,7 +45,7 @@ contract AtpExecutorBuyLimitForkTest is Test {
         assertEq(block.chainid, 56, "fork is BSC mainnet (56)");
 
         fee = 500;
-        address pool = IV3Factory(V3_FACTORY).getPool(WBNB, USDT, fee);
+        pool = IV3Factory(V3_FACTORY).getPool(WBNB, USDT, fee);
         if (pool == address(0)) {
             fee = 2500;
             pool = IV3Factory(V3_FACTORY).getPool(WBNB, USDT, fee);
@@ -188,8 +189,11 @@ contract AtpExecutorBuyLimitForkTest is Test {
         // Same window: the cap is spent, any buy reverts.
         _execExpectLimit(_one(_buy(10e18)));
 
-        // 24 hours later the window resets (the pool's TWAP extrapolates the current tick over the gap).
+        // 24 hours later the window resets. The fork has no other traders, so one trade stands in for the live
+        // WBNB market: without it the pool would look idle for a day and the oracle would fail closed
+        // (`maxOracleAge`, cre8-contracts#25); the TWAP extrapolates the tick over the rest of the gap.
         vm.warp(opened + 1 days);
+        _touch(pool);
         (, uint256 bought, uint64 endsAt) = executor.buyAllowance(address(account));
         assertEq(bought, 0, "expired window reads as empty");
         assertEq(endsAt, 0, "next buy opens a new window");

@@ -309,6 +309,9 @@ contract DeployTestnet is Script {
                     IAggregatorV3(out.feed),
                     IAggregatorV3(address(core.usdtUsdFeed)),
                     spec.maxFeedAge,
+                    // The testnet keeps one max age for both feeds (its pre-#25 behaviour): the deployed
+                    // chain-97 stack was built that way and this script re-verifies it as is.
+                    spec.maxFeedAge,
                     SECONDARY_MAX_DEVIATION_BPS
                 );
         }

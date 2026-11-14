@@ -28,12 +28,22 @@ contract MockPancakeV3Pool {
     uint24 public fee = 500;
     uint128 public liquidity = 1e18;
     uint16 public observationCardinality = 2;
+    /// @dev Not read by the oracle; `DeployAtpMainnet._verifyQuotes` checks it.
+    uint16 public observationCardinalityNext = 2_400;
     bool public unlocked = true;
 
     uint32 public window;
     int56 public cumulativeAtWindow;
     int56 public cumulativeNow;
     int56 public cumulativeAtRecent;
+
+    /// @dev Ring index of the newest observation, as `slot0` reports it. Non-zero so a reader that ignores it
+    /// and reads slot 0 sees an uninitialized slot and fails.
+    uint16 public observationIndex = 7;
+    /// @dev Age of the newest observation in seconds; 0 means the pool traded in the current block. Expressed
+    /// as an age (not a timestamp) so tests that `vm.warp` keep a live pool unless they say otherwise.
+    uint32 public observationAge;
+    bool public observationInitialized = true;
 
     bool public observeReverts;
     /// @dev Injects the second `observe` failing: the pool cannot serve the 5 minute lookback.
@@ -46,7 +56,15 @@ contract MockPancakeV3Pool {
     }
 
     function slot0() external view returns (uint160, int24, uint16, uint16, uint16, uint32, bool) {
-        return (sqrtPriceX96, 0, 0, observationCardinality, observationCardinality, 0, unlocked);
+        return (
+            sqrtPriceX96, 0, observationIndex, observationCardinality, observationCardinalityNext, 0, unlocked
+        );
+    }
+
+    /// @dev Only the slot at `observationIndex` holds data; every other slot reads as uninitialized.
+    function observations(uint256 index) external view returns (uint32, int56, uint160, bool) {
+        if (index != observationIndex) return (0, 0, 0, false);
+        return (uint32(block.timestamp - observationAge), cumulativeNow, 0, observationInitialized);
     }
 
     function observe(uint32[] calldata secondsAgos)
@@ -105,6 +123,22 @@ contract MockPancakeV3Pool {
         observationCardinality = cardinality;
     }
 
+    function setObservationCardinalityNext(uint16 next) external {
+        observationCardinalityNext = next;
+    }
+
+    function setObservationAge(uint32 age) external {
+        observationAge = age;
+    }
+
+    function setObservationIndex(uint16 index) external {
+        observationIndex = index;
+    }
+
+    function setObservationInitialized(bool initialized) external {
+        observationInitialized = initialized;
+    }
+
     function setUnlocked(bool unlocked_) external {
         unlocked = unlocked_;
     }
@@ -139,6 +173,7 @@ contract PancakeV3TwapOracleTest is Test {
     PancakeV3TwapOracle internal oracle;
 
     function setUp() public {
+        vm.warp(100 days); // room for the mock to date observations up to 30 days back
         token0 = new MockToken(18);
         token1 = new MockToken(6);
         pool = new MockPancakeV3Pool(address(token0), address(token1));
@@ -316,6 +351,105 @@ contract PancakeV3TwapOracleTest is Test {
         assertGt(
             minimum, _ceilDiv(quoted * (10_000 - MAX_SLIPPAGE_BPS), 10_000), "recent floor still applied"
         );
+    }
+
+    // ---- previewSwapWindows (L-5, cre8-contracts#25) ----
+
+    /// @dev Same `quoted` / `minimum` as `previewSwap`, plus the undiscounted quote at the 5 minute mean.
+    function test_previewSwapWindows_matchesPreviewSwap_andExposesTheRecentQuote() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setRecentMeanTick(1_000);
+
+        (uint256 quoted, uint256 minimum) = oracle.previewSwap(address(token0), address(token1), 1000e18);
+        (uint256 wQuoted, uint256 wRecent, uint256 wMinimum) =
+            oracle.previewSwapWindows(address(token0), address(token1), 1000e18);
+        assertEq(wQuoted, quoted, "same TWAP quote");
+        assertEq(wMinimum, minimum, "same floor");
+        assertEq(wRecent, _quoteAtTick(1_000, address(token0), address(token1), 1000e18), "recent-mean quote");
+        assertEq(minimum, _ceilDiv(wRecent * (10_000 - MAX_SLIPPAGE_BPS), 10_000), "floor is the recent one");
+
+        (, uint256 backRecent,) = oracle.previewSwapWindows(address(token1), address(token0), 1000e6);
+        assertEq(
+            backRecent, _quoteAtTick(1_000, address(token1), address(token0), 1000e6), "reverse direction"
+        );
+    }
+
+    /// @dev Every fail-closed path of `previewSwap` applies to `previewSwapWindows` as well.
+    function test_previewSwapWindows_failsClosedLikePreviewSwap() public {
+        pool.setMeanTick(0, WINDOW);
+        vm.expectRevert(PancakeV3TwapOracle.ZeroAmount.selector);
+        oracle.previewSwapWindows(address(token0), address(token1), 0);
+
+        pool.setObservationAge(MAX_ORACLE_AGE + 1);
+        vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+        oracle.previewSwapWindows(address(token0), address(token1), 1e18);
+
+        pool.setObservationAge(0);
+        pool.setRecentObserveReverts(true);
+        vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+        oracle.previewSwapWindows(address(token0), address(token1), 1e18);
+    }
+
+    // ---- newest observation age (M-1, cre8-contracts#25) ----
+
+    /// @dev A pool whose newest observation is older than `maxOracleAge` has not traded (moved its tick) for
+    /// that long; its TWAP is the last tick extrapolated to now, so the oracle refuses it in both directions.
+    function test_revertsOneSecondPastMaxOracleAge_bothDirections() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationAge(MAX_ORACLE_AGE + 1);
+
+        vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+        oracle.previewSwap(address(token0), address(token1), 1e18);
+        vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+        oracle.previewSwap(address(token1), address(token0), 1e6);
+    }
+
+    function test_quotesAtExactlyMaxOracleAge() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationAge(MAX_ORACLE_AGE);
+
+        (uint256 quoted, uint256 minimum) = oracle.previewSwap(address(token0), address(token1), 1000e18);
+        assertEq(quoted, 1000e18);
+        assertEq(minimum, 995e18);
+    }
+
+    function test_quotesWhenThePoolTradedThisBlock() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationAge(0);
+        (uint256 quoted,) = oracle.previewSwap(address(token0), address(token1), 1e18);
+        assertEq(quoted, 1e18);
+    }
+
+    /// @dev The age is read from the slot `slot0` names, not slot 0: moving the index to 0 makes the mock's
+    /// newest slot 0 again, and an index pointing at an empty slot fails closed.
+    function test_readsTheObservationAtTheCurrentIndex() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationIndex(0);
+        oracle.previewSwap(address(token0), address(token1), 1e18);
+
+        pool.setObservationIndex(1_799);
+        oracle.previewSwap(address(token0), address(token1), 1e18);
+    }
+
+    function test_revertsWhenTheNewestObservationIsUninitialized() public {
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationInitialized(false);
+
+        vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+        oracle.previewSwap(address(token0), address(token1), 1e18);
+    }
+
+    function testFuzz_ageGate(uint32 age) public {
+        age = uint32(bound(age, 0, 30 days));
+        pool.setMeanTick(0, WINDOW);
+        pool.setObservationAge(age);
+        if (age > MAX_ORACLE_AGE) {
+            vm.expectRevert(PancakeV3TwapOracle.TwapUnavailable.selector);
+            oracle.previewSwap(address(token0), address(token1), 1e18);
+        } else {
+            (uint256 quoted,) = oracle.previewSwap(address(token0), address(token1), 1e18);
+            assertEq(quoted, 1e18);
+        }
     }
 
     // ---- fail closed ----

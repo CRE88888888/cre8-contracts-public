@@ -3,9 +3,18 @@
 # 驗證重跑會被擋、模擬 Safe acceptOwnership、確認 operator 與 owner 的權限邊界、報價與 enroll。
 #
 # 不送任何主網交易，也不需要私鑰。先在另一個終端機起 fork（cancun：prague 的 EIP-2935 blockhash 讀取
-# 會 missing trie node）。部署要讀 38 個池子、跑幾分鐘，要用保留較長歷史的 RPC（Blast）；
-# dataseed 不是 archive，只有一兩分鐘的歷史，部署到一半就會 missing trie node：
-#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
+# 會 missing trie node）。anvil 的上游要用 Blast：publicnode 在 anvil 上拿不到交易 receipt（回 403 archive），
+# dataseed 只有一兩分鐘的歷史。固定在最新區塊附近：
+#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun --prune-history --retries 20 \
+#     --fork-block-number $(( $(cast block-number --rpc-url https://bsc-rpc.publicnode.com) - 5 ))
+# --prune-history：不把每個區塊的完整 state 落地到 ~/.foundry/anvil/tmp（cardinality 步驟之後每塊都有上萬個 slot，
+# 不加會寫掉幾十 GB 磁碟）；--retries 20：Blast 偶爾回 429，預設 5 次重試會在部署中途用完。
+# 上線前步驟 IncreaseObservationCardinality 要寫約一萬五千個新 slot，Blast 每讀一個約 1 秒，所以腳本先用
+# scripts/warm-observation-slots.sh 從 publicnode（READ_RPC）批次讀出這些 slot 的真實值放進 anvil；要在 fork
+# 區塊之後約一小時內跑（publicnode 只留這麼久的歷史）。
+# 腳本會把 fork 的時間凍結在 fork 當下（anvil_setBlockTimestampInterval 0，結束時解除）：fork 上 Chainlink
+# feed 不會更新、池子也沒有其他交易者，時間一往前走，feed（maxAge 最短 81 秒）與閒置池子（maxOracleAge
+# 1 小時）就會照設計 fail closed，量到的就不是部署當下的狀態（cre8-contracts#25）。
 # 再執行（部署者、operator 必須是不同地址；Safe 由本腳本在 fork 上新建）：
 #   DEPLOYER=0x… OPERATOR=0x… scripts/rehearse-mainnet-fork.sh
 set -euo pipefail
@@ -32,6 +41,10 @@ S1=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 S2=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 S3=0x90F79bf6EB2c4f870365E785982E1f101E93b906
 
+cast rpc anvil_nodeInfo >/dev/null 2>&1 || { echo "$ETH_RPC_URL is not an anvil fork"; exit 1; }
+cast rpc anvil_setBlockTimestampInterval 0 >/dev/null
+trap 'cast rpc anvil_removeBlockTimestampInterval >/dev/null 2>&1 || true' EXIT
+
 ok()   { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*"; exit 1; }
 expect_revert() { # $1 = label, rest = cast send args
@@ -48,7 +61,21 @@ cast send -q $SAFE_FACTORY "createProxyWithNonce(address,bytes,uint256)" $SAFE_S
 [ "$(cast call "$SAFE" 'getThreshold()(uint256)')" = "2" ] || fail "Safe threshold"
 ok "Safe $SAFE"
 
-echo "== 部署（impersonate $DEPLOYER）"
+echo "== 上線前步驟（#25 M-2）：IncreaseObservationCardinality，用任何有 BNB 的錢包（這裡是 anvil #1，不動部署者 nonce）"
+# fork 專用：先把這一步會寫到的 observation slot 從快速 RPC 讀進 anvil（值相同，只是先讀好，見該腳本說明）
+FORK_RPC="$ETH_RPC_URL" bash scripts/warm-observation-slots.sh | tail -1
+forge script script/IncreaseObservationCardinality.s.sol --rpc-url "$ETH_RPC_URL" --unlocked --sender $S1 \
+  --broadcast --slow > /tmp/atp-rehearsal-cardinality.log 2>&1 || { tail -30 /tmp/atp-rehearsal-cardinality.log; fail "IncreaseObservationCardinality"; }
+ok "$(grep -o 'transactions [0-9]*, new observation slots [0-9]*; every pool now has observationCardinalityNext >= [0-9]*' /tmp/atp-rehearsal-cardinality.log)"
+# receipts 的 gasUsed 是十六進位字串（jq 的 tonumber 讀不了），用 shell 算術加總
+CARD_RUN=broadcast/IncreaseObservationCardinality.s.sol/56/run-latest.json
+CARD_GAS=0
+for g in $(jq -r '.receipts[].gasUsed' "$CARD_RUN") ; do CARD_GAS=$(( CARD_GAS + g )); done
+[ "$(jq '.receipts | length' "$CARD_RUN")" = "$(grep -o 'transactions [0-9]*' /tmp/atp-rehearsal-cardinality.log | grep -o '[0-9]*$')" ] \
+  || fail "$CARD_RUN 的 receipt 數與送出的交易數不符"
+ok "gas 合計 ${CARD_GAS}（主網以 0.1 gwei 計約 $(cast from-wei $(( CARD_GAS * 100000000 ))) BNB）"
+
+echo "== 部署（impersonate ${DEPLOYER}）"
 cast rpc anvil_impersonateAccount "$DEPLOYER" >/dev/null
 NONCE=$(cast nonce "$DEPLOYER")
 BAL_BEFORE=$(cast balance "$DEPLOYER")
@@ -62,6 +89,7 @@ EX=$(jq -r '[.transactions[]|select(.contractName=="AtpExecutor")][0].contractAd
 SPENT=$(cast from-wei $(( BAL_BEFORE - $(cast balance "$DEPLOYER") )))
 ok "registry $REG / router $RT / executor $EX"
 ok "交易數 $(( $(cast nonce "$DEPLOYER") - NONCE ))，花費 $SPENT BNB（fork 的 gas price）"
+grep -E "fail-closed now:|oracles quoting now:" /tmp/atp-rehearsal-deploy.log | sed 's/^ */  · _verify：/'
 
 echo "== 防呆"
 if ATP_SAFE=$SAFE ATP_TREASURY=$SAFE ATP_OPERATOR=$OPERATOR EXPECTED_DEPLOYER_NONCE=$NONCE \
@@ -163,28 +191,51 @@ N_SEC=$(grep -c . <<<"$SECONDARIES" || true)
 sym() { cast call "$1" 'symbol()(string)' | tr -d '"'; }
 has_sec() { grep -qix "$1" <<<"$SECONDARIES"; }
 
-echo "== 第二價格來源（#15）：$N_SEC／$N_ASSETS 個資產掛上 Chainlink（不是 bStock、有新鮮的標準 feed）"
+echo "== 第二價格來源（#15）：${N_SEC}／$N_ASSETS 個資產掛上 Chainlink（不是 bStock、有新鮮的標準 feed）"
 for a in $ASSETS; do
   src=$(cast call $RT 'secondaryOf(address)(address,uint16)' "$a")
   if has_sec "$a"; then
     [ "$(head -1 <<<"$src")" != "$ZERO" ] && [ "$(sed -n 2p <<<"$src" | awk '{print $1}')" = "200" ] \
-      && ok "$(sym $a) secondary（maxAge $(cast call "$(head -1 <<<"$src")" 'maxAge()(uint32)') 秒、差距上限 200 bps）" || fail "$(sym $a) secondary"
+      && ok "$(sym $a) secondary（feed maxAge $(cast call "$(head -1 <<<"$src")" 'maxAge()(uint32)') 秒、USDT/USD $(cast call "$(head -1 <<<"$src")" 'numeraireMaxAge()(uint32)') 秒、差距上限 200 bps）" || fail "$(sym $a) secondary"
   else
     [ "$(head -1 <<<"$src")" = "$ZERO" ] || fail "$(sym $a) 不該有 secondary"
   fi
 done
 ok "其餘 $(( N_ASSETS - N_SEC )) 個資產沒有 secondary（只用池子 TWAP）"
 
-echo "== 報價：全部 $N_ASSETS 個資產，100 USDT 買入、再把買到的數量賣回"
+# 池子此刻報不出價的原因，直接讀池子判斷（與 oracle 無關）：空字串 = 應該報得出價
+closed_reason() { # $1 = asset
+  local oracle pool idx obs now age
+  oracle=$(cast call $RT 'oracleOf(address)(address)' "$1"); pool=$(cast call "$oracle" 'pool()(address)')
+  idx=$(cast call "$pool" 'slot0()(uint160,int24,uint16,uint16,uint16,uint32,bool)' | sed -n 3p | awk '{print $1}')
+  obs=$(cast call "$pool" 'observations(uint256)(uint32,int56,uint160,bool)' "$idx" | head -1 | awk '{print $1}')
+  now=$(cast block latest -f timestamp); age=$(( now - obs ))
+  if [ "$age" -gt "$(cast call "$oracle" 'maxOracleAge()(uint32)')" ]; then echo "池子閒置 $age 秒 > maxOracleAge"; return; fi
+  cast call "$pool" 'observe(uint32[])' '[1800,0]' >/dev/null 2>&1 || { echo "池子歷史不足 30 分鐘（cardinality $(cast call "$pool" 'slot0()(uint160,int24,uint16,uint16,uint16,uint32,bool)' | sed -n 4p | awk '{print $1}')）"; return; }
+  cast call "$pool" 'observe(uint32[])' '[300,0]' >/dev/null 2>&1 || { echo "池子歷史不足 5 分鐘"; return; }
+}
+TWAP_UNAVAILABLE=$(cast sig 'TwapUnavailable()')
+N_CLOSED=0
+echo "== 報價：全部 $N_ASSETS 個資產，100 USDT 買入、再把買到的數量賣回（池子此刻不能報價的要 fail closed）"
 for a in $ASSETS; do
+  WHY=$(closed_reason "$a")
+  if [ -n "$WHY" ]; then
+    OUT=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT "$a" 100000000000000000000 2>&1) && fail "$(sym $a)：${WHY}，卻照樣報價"
+    grep -qi "${TWAP_UNAVAILABLE#0x}\|TwapUnavailable" <<<"$OUT" || fail "$(sym $a)：${WHY}，但 revert 原因不是 TwapUnavailable：$OUT"
+    N_CLOSED=$(( N_CLOSED + 1 ))
+    ok "$(sym $a)：$WHY → TwapUnavailable（fail closed）"
+    continue
+  fi
   BUY=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT "$a" 100000000000000000000) || fail "$(sym $a) 買入報價 revert"
   QB=$(head -1 <<<"$BUY" | awk '{print $1}'); MB=$(sed -n 2p <<<"$BUY" | awk '{print $1}')
   SELL=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' "$a" $USDT "$QB") || fail "$(sym $a) 賣出報價 revert"
   QS=$(head -1 <<<"$SELL" | awk '{print $1}'); MS=$(sed -n 2p <<<"$SELL" | awk '{print $1}')
   [ "$QB" != "0" ] && [ "$MB" != "0" ] && [ "$QS" != "0" ] && [ "$MS" != "0" ] \
-    && ok "$(sym $a)$(has_sec "$a" && echo '＋CL')：買 100 USDT → $QB（地板 $MB）；賣回 → $(cast from-wei $QS) USDT（地板 $(cast from-wei $MS)）" \
+    && ok "$(sym $a)$(has_sec "$a" && echo '＋CL')：買 100 USDT → ${QB}（地板 ${MB}）；賣回 → $(cast from-wei $QS) USDT（地板 $(cast from-wei $MS)）" \
     || fail "$(sym $a) 報價為 0"
 done
+
+ok "可報價 $(( N_ASSETS - N_CLOSED ))／${N_ASSETS}；fail closed ${N_CLOSED}（原因都由池子狀態獨立確認）"
 
 echo
 echo "預演全部通過。"

@@ -3,7 +3,8 @@ pragma solidity ^0.8.26;
 
 /// @title TestnetAssets
 /// @notice The 38 launch assets as testnet mocks (cre8-contracts#30): the list, order, `maxSlippageBps` and
-/// secondary-feed choice (with its max age) of `DeployAtpMainnet`; symbol, decimals, Pancake V3 fee tier and
+/// secondary-feed choice (with its max age) of `DeployAtpMainnet` as deployed on chain 97, i.e. before
+/// cre8-contracts#25 changed the mainnet tiers and feed ages (`AtpMainnetSpecs`); symbol, decimals, Pancake V3 fee tier and
 /// bStock `uiMultiplier` of the mainnet token and pool; and a fixed starting price.
 /// @dev Generated from BSC mainnet, read-only, at block 133542361 (2026-11-14): `decimals()`, `name()`,
 /// `uiMultiplier()` of each token and `fee()` / `slot0()` of each `DeployAtpMainnet` pool. Prices are the pool

@@ -40,6 +40,23 @@ interface IPancakeV3Pool {
     /// @notice Active in-range liquidity.
     function liquidity() external view returns (uint128);
 
+    /// @notice One slot of the pool's observation ring buffer.
+    /// @dev The oracle reads the slot at `slot0().observationIndex`, i.e. the newest observation, to learn
+    /// when the pool last wrote one (a swap that moved the tick, or an in-range liquidity change).
+    /// @return blockTimestamp Timestamp of the observation, truncated to 32 bits like the pool stores it.
+    /// @return tickCumulative Accumulated tick at that timestamp.
+    /// @return secondsPerLiquidityCumulativeX128 Accumulated seconds-per-liquidity at that timestamp.
+    /// @return initialized False for a slot that has never been written.
+    function observations(uint256 index)
+        external
+        view
+        returns (
+            uint32 blockTimestamp,
+            int56 tickCumulative,
+            uint160 secondsPerLiquidityCumulativeX128,
+            bool initialized
+        );
+
     /// @notice Cumulative tick values for each requested lookback.
     /// @dev Reverts when the pool cannot look back far enough (for example when
     /// `observationCardinality` is too small for the requested window), which is what the adapter relies

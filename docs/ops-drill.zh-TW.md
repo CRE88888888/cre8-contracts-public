@@ -9,23 +9,28 @@
 
 使用者的帳戶本人（用自己錢包簽的交易）也能暫停、恢復自己，換策略或換版本只能由帳戶本人做。
 
-出事時要記住六件事：
+出事時要記住七件事：
 
 1. **Safe 暫停的帳戶，operator 解除不了。** 暫停會記下是誰暫停的（Safe、operator、帳戶本人）。operator 只能解除自己暫停的；Safe 可以解除自己和 operator 的；帳戶本人可以解除全部。懷疑 operator 私鑰外洩時，仍然建議先撤掉 operator（它還能幫新帳戶第一次加入策略）。
 2. **使用者自己恢復或重新加入策略，會清掉所有暫停。** 帳戶是使用者自己的，Safe 的暫停只能擋住平台這一側，擋不住帳戶本人；反過來，使用者自己暫停的，Safe 也解除不了。
 3. **出大事（價格來源或交易合約本身有問題）時，Safe 一筆交易就能停掉全部交易，一筆就能恢復。** 停的期間所有再平衡都會失敗，包括賣出；使用者仍然可以用自己的錢包把資金直接轉出。operator 碰不到這個開關。
 4. **每個帳戶每 24 小時最多買入「帳戶總值 × 100%」，賣成 USDT 不受限制。** 外洩的 session key 就算繞過後端，自己反覆來回換幣，每一輪都要買回，買到額度就停。Safe 可以把額度調成 0，變成「只准賣出」模式：所有人都只能賣、不能買。operator 碰不到這個設定。
 5. **交易只能走 Safe 允許的「成交管道」（venue）。** 部署時只有 PancakeSwap；聚合器（KyberSwap、OpenOcean）要由 Safe 一筆加入，懷疑某個管道出問題時，Safe 一筆移除就立刻停用。就算某個管道被駭，每一步最多被吃掉「這一步的金額 − 這一步的最低成交量」：最低成交量（`amountOutMin`）由後端依報價填，合約要求它不低於價格地板，並以實際入帳量檢查它（#24），所以最壞也只到價格地板，碰不到帳戶裡其他的錢。
-6. **有 Chainlink 價格的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、XRP、TRX、LTC、USDC、DAI）用兩個價格來源互相檢查。** 池子的 30 分鐘均價和 Chainlink 差超過 2%，或 Chainlink 超過時限沒更新（AVAX 的 feed 一天才固定更新一次，時限 1 天；其他 1 小時），這個資產就停止交易，直到恢復；地板取兩者中比較嚴的。bStock 和 SGOVon、TLTon、XAUt 沒有能直接用的外部價格，只用池子均價。部署時依 docs#32 的准入清單設定 38 個資產。換掉或拿掉第二來源只有 Safe 能做。
+6. **有 Chainlink 價格的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、XRP、TRX、LTC、USDC、DAI）用兩個價格來源互相檢查。** 池子的 30 分鐘均價**和** 5 分鐘均價都和 Chainlink 差超過 2%（任一個在 2% 內就算一致，行情快時 30 分鐘均價會落後，#25），或 Chainlink 超過時限沒更新（時限約為各 feed 固定更新間隔的 3 倍：BNB 81 秒、DOGE 141 秒、BTC／ETH 180 秒、SOL／TRX／XRP 30 分鐘、USDC／DAI／LTC 45 分鐘；AVAX 一天才更新一次，時限 1 天；換算用的 USDT/USD 自己的時限 45 分鐘），這個資產就停止交易，直到恢復；地板取兩者中比較嚴的。bStock 和 SGOVon、TLTon、XAUt 沒有能直接用的外部價格，只用池子均價。部署時依 docs#32 的准入清單設定 38 個資產。換掉或拿掉第二來源只有 Safe 能做。
+
+7. **池子超過 1 小時沒有成交（tick 沒動），這個資產就停止交易**（#25 M-1）。池子閒置時，它給的「均價」其實是最後一筆成交的價格，真實價格可能早就變了（週末、財報、休市的 bStock）。這時報價會 revert `TwapUnavailable`：買不了、也賣不了這個資產，直到池子再有成交。這是刻意的「休市就不交易」，不是故障；後端碰到時要把這個資產排除在這一輪之外（見下面「後端碰到 TwapUnavailable」）。上線前還要先跑一次 `script/IncreaseObservationCardinality.s.sol`（任何有 BNB 的錢包都能送，#25 M-2），讓每個池子能存 2,400 筆價格紀錄，否則有人用不到 1 USDT 的小額交易就能讓 TRX、LTC 這類池子的價格停擺 30 分鐘；沒做這一步，`DeployAtpMainnet` 會拒絕部署。
 
 以下六個情境都在本機 BSC 主網 fork 上演過，腳本是 [`scripts/drill-ops-fork.sh`](../scripts/drill-ops-fork.sh)，全部 ✓。
 
 ## 怎麼重跑
 
 ```bash
-# 終端機 1：全新的 fork。要用保留較長歷史的 RPC（Blast）：部署要讀 38 個池子、跑好幾分鐘，
-# dataseed 不是 archive，只有一兩分鐘的歷史，會 missing trie node
-anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
+# 終端機 1：全新的 fork。上游用 Blast（publicnode 在 anvil 上拿不到交易 receipt；dataseed 歷史只有一兩分鐘）。
+# 上線前步驟 IncreaseObservationCardinality 要寫約一萬五千個新 slot，腳本會先用 scripts/warm-observation-slots.sh
+# 從 publicnode 批次讀出這些 slot 的真實值放進 anvil，所以要在 fork 區塊之後約一小時內跑完。
+# --prune-history：不把每個區塊的完整 state 落地到 ~/.foundry/anvil/tmp（這一步之後每塊都有上萬個 slot，不加會寫掉幾十 GB 磁碟）；--retries 20：Blast 偶爾回 429，預設 5 次重試會在部署中途用完
+anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun --prune-history --retries 20 \
+  --fork-block-number $(( $(cast block-number --rpc-url https://bsc-rpc.publicnode.com) - 5 ))
 # 終端機 2
 scripts/drill-ops-fork.sh
 ```
@@ -149,7 +154,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 | 4-9 | （任何人） | router `previewSwap(USDT, WBNB, …)` | revert `OracleNotSet(address)` |
 | 4-10 | Safe | router `setOracle(WBNB, 池子, 1800, 100, 3600)` | 部署一個**新的** oracle，報價恢復 |
 
-**注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `DeployAtpMainnet` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
+**注意：** `clearOracle` 不是暫停開關。恢復時 `setOracle` 會部署新的 oracle 合約（地址會變），參數要照 `script/AtpMainnetSpecs.sol` 的同一組重填（池子、30 分鐘 TWAP、slippage、1 小時 age）。
 
 **第二價格來源（#15）**：38 個上線資產裡，11 個不是 bStock、而且有新鮮的 Chainlink 標準 feed，部署時就掛上（asset/USD 除以 USDT/USD，所以不假設 USDT = 1 美元）；其他 27 個只用池子 TWAP。router 的規則：
 - 池子報價和 Chainlink 報價差超過 200 bps → revert `SourcesDisagree`；
@@ -161,7 +166,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 | 步驟 | 誰簽 | 呼叫 | 預期結果 |
 | --- | --- | --- | --- |
 | 4-11 | — | router `secondaryOf(WBNB)` | 4-8 的 `clearOracle` 也一併拿掉 secondary：回傳 0 |
-| 4-12 | Safe | router `setSecondary(WBNB, BNB/USD, USDT/USD, 3600, 200)` | 重新掛上；operator 呼叫 `clearSecondary` → `NotOwner()` |
+| 4-12 | Safe | router `setSecondary(WBNB, BNB/USD, USDT/USD, 81, 2700, 200)`（資產 feed 時限、USDT/USD 時限、差距上限） | 重新掛上；operator 呼叫 `clearSecondary` → `NotOwner()` |
 
 **什麼時候拿掉第二來源**：Chainlink 某個 feed 停更或明顯出錯，導致該資產一直 revert、而池子本身沒問題時，Safe 可以 `clearSecondary(資產)`，讓它暫時只用池子均價；feed 恢復後再 `setSecondary`。
 
@@ -206,7 +211,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 | 6-2 | （operator 嘗試） | `setVenue(KyberSwap, 2, KyberSwap)` | revert `NotOwner()` |
 | 6-3 | （帳戶嘗試） | 用 KyberSwap API 拿到的 calldata 成交 | revert `VenueNotAllowed`（還沒加入） |
 | 6-4 | Safe | `setVenue(KyberSwap, 2, KyberSwap)` | kind 2 |
-| 6-5 | 帳戶 | 同一筆 KyberSwap calldata：WBNB → USDT | 成交 ≥ 地板；executor 對 KyberSwap 的額度歸零，沒有殘留 |
+| 6-5 | 帳戶 | 同一筆 KyberSwap calldata：WBNB → USDT（路徑限定 Pancake V3：fork 停在 fork 區塊，live 價來源會因時間差低於 100 bps 地板） | 成交 ≥ 地板；executor 對 KyberSwap 的額度歸零，沒有殘留 |
 | 6-6 | 帳戶 | 包 10 BNB，經 Pancake 賣成 USDT | 準備買 DOGE 的資金（fork 上的假錢） |
 | 6-7 | （只模擬） | 同一筆 1,000 USDT 改走 DOGE/USDT 1% 直接池 | 照實印出能不能過地板，不當驗收條件：docs#26 某個區塊量到過不了，但池子深度會隨時間變 |
 | 6-8 | 帳戶 | 1,000 USDT 經 KyberSwap（API 現拿的 calldata）買 DOGE | 成交 ≥ 地板（DOGE 的地板已經同時參考 Chainlink）（docs#29） |
@@ -220,6 +225,22 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 - 加入聚合器的候選地址：
   - KyberSwap `MetaAggregationRouterV2`：`0x6131B5fae19EA4f9D964eAc0408E4408b66337b5`（[官方文件](https://docs.kyberswap.com/developer-guide/aggregator-api/contracts)，所有鏈同址）；
   - OpenOcean exchange：`0x6352a56caadC4F1E25CD6c75970Fa768A3304e64`（官方 API 回傳的 `to`；這是 proxy，可以升級）。
+
+## 後端碰到 TwapUnavailable（#25）
+
+`previewSwap` revert `TwapUnavailable()` 有三種原因，後端分不出來時一律當「這個資產此刻不能交易」，**不是錯誤、不重送同一批**：
+
+1. **池子閒置超過 `maxOracleAge`（1 小時）**：讀 `pool.slot0().observationIndex`，再讀 `pool.observations(index).blockTimestamp`，和最新區塊時間差超過 3600 秒就是這種。bStock 休市、週末最常見；等池子再有成交就自動恢復。
+2. **池子的價格紀錄不足 30 分鐘或 5 分鐘**：`pool.observe([1800, 0])` 或 `observe([300, 0])` 會 revert。剛跑完 `IncreaseObservationCardinality` 的池子（例如 TRX、LTC）在紀錄累積滿 30 分鐘前是這種。
+3. 池子被鎖住（同一筆交易內的回呼）或其他極少見情況。
+
+建議的處理（實作由後端 issue 決定）：
+
+- **規劃**：整批再平衡只要有一步碰到報不出價的資產，整筆會 revert，所以規劃時先對每個資產問一次 `previewSwap`，報不出價的資產這一輪**不買也不賣**，權重差額留到下一輪，其他資產照常交易。
+- **提領**：這個資產這一刻賣不掉。提領要嘛等它恢復，要嘛先把其他資產換成 USDT 交付、這部分標記為「待恢復後再賣」，並告訴使用者原因（休市）。
+- **買入額度**：合約算帳戶總值時，報不出價的資產算 0（只會讓買入額度變小，fail closed）。
+- **警示**：bStock 在美股休市時段閒置是預期的，不發警示；加密貨幣、穩定幣池子連續閒置超過幾個小時，或「紀錄不足」持續超過 1 小時，才發警示（可能是池子壞了、流動性撤走，或 cardinality 步驟沒做）。
+- 不要在後端自己用 spot 價格補位；合約不收沒有地板的步驟（`NoFloor`），補了也送不出去。
 
 ## 演練輸出（2026-11-13，Blast fork block 133358010，8 分 21 秒）
 

@@ -10,7 +10,8 @@ import { IPancakeV3Pool } from "./interfaces/IPancakeV3Pool.sol";
 /// @notice `IOracleFloor` adapter that prices an exact-input swap from one PancakeSwap V3 pool's
 /// time-weighted average tick over a fixed 30-90 minute window, floored additionally by the pool's
 /// recent mean so a sale cannot be sandwiched below it.
-/// @dev Price source: `pool.observe([window, 0])` only. Spot is never quoted; the current `slot0` price is
+/// @dev Price source: `pool.observe([window, 0])` only, and only while the pool's newest observation is at most
+/// `maxOracleAge` old. Spot is never quoted; the current `slot0` price is
 /// read for sanity gates (pool unlocked, spot inside the valid sqrt-price range) and then discarded, so a
 /// single swapped tick cannot move the quote. `quoted` is the TWAP quote; `minimum` is the max of two
 /// floors, each discounting its own quote by `maxSlippageBps` and rounding up: the TWAP floor over
@@ -35,10 +36,10 @@ import { IPancakeV3Pool } from "./interfaces/IPancakeV3Pool.sol";
 /// quote, and the pool's observation cardinality must be able to serve both lookbacks; if it cannot, the
 /// second read fails closed with `TwapUnavailable` rather than silently dropping to the TWAP floor alone.
 ///
-/// TODO(v1.2) gas/size: `previewSwap` now does two `slot0` + two `observe` reads. Hoist the shared `slot0`
-/// sanity gate out of `_meanSqrtPrice` (one read for both windows) and consider caching the pool's
-/// cardinality per bucket, but only after measuring the real keeper path; the duplication is deliberate for
-/// v1.1 so each window keeps its own fail-closed check.
+/// TODO(v1.2) gas/size: `previewSwap` now does three `slot0` + one `observations` + two `observe` reads.
+/// Hoist the shared `slot0` sanity gate out of `_meanSqrtPrice` (one read for both windows) and consider
+/// caching the pool's cardinality per bucket, but only after measuring the real keeper path; the duplication
+/// is deliberate for v1.1 so each window keeps its own fail-closed check.
 contract PancakeV3TwapOracle is IOracleFloor {
     // ---- constants ----
 
@@ -85,7 +86,12 @@ contract PancakeV3TwapOracle is IOracleFloor {
     uint32 public immutable twapWindow;
     /// @notice Discount applied to the oracle quote to form `minimum`, in basis points.
     uint16 public immutable maxSlippageBps;
-    /// @notice Oldest price data this adapter is allowed to use; `twapWindow` must not exceed it.
+    /// @notice Longest the pool may go without writing an observation (a swap that moved the tick, or an
+    /// in-range liquidity change) before this adapter stops quoting it; `twapWindow` must not exceed it.
+    /// @dev Enforced on every quote (cre8-contracts#25, review M-1): V3 `observe` extrapolates the last tick to
+    /// now, so an idle pool (a bStock outside market hours, a pool nobody arbitrages) would otherwise keep
+    /// returning a normal-looking mean long after the real price moved. Past this age the quote fails closed
+    /// with `TwapUnavailable`, which is the "market closed" behaviour #15 asked for.
     uint32 public immutable maxOracleAge;
 
     // ---- errors ----
@@ -146,9 +152,10 @@ contract PancakeV3TwapOracle is IOracleFloor {
     // ---- IOracleFloor ----
 
     /// @inheritdoc IOracleFloor
-    /// @dev Fails closed: zero input, an unsupported pair, an immature pool oracle (either window), a pool
-    /// outside the valid price range, a mean tick outside the valid tick range, or a quote that rounds to zero
-    /// all revert instead of returning a floor of zero.
+    /// @dev Fails closed: zero input, an unsupported pair, a pool whose newest observation is older than
+    /// `maxOracleAge`, an immature pool oracle (either window), a pool outside the valid price range, a mean
+    /// tick outside the valid tick range, or a quote that rounds to zero all revert instead of returning a
+    /// floor of zero.
     ///
     /// `quoted` is the TWAP quote. `minimum` is the max of two independently discounted floors, matching
     /// `MandateScopeSwapAdapter._saleFloor`: the TWAP floor over `twapWindow` and the recent-mean floor over
@@ -158,6 +165,29 @@ contract PancakeV3TwapOracle is IOracleFloor {
         external
         view
         returns (uint256 quoted, uint256 minimum)
+    {
+        (quoted,, minimum) = _preview(tokenIn, tokenOut, amountIn);
+    }
+
+    /// @notice `previewSwap` plus the undiscounted quote at the recent (5 minute) mean.
+    /// @dev Same checks, same `quoted` and `minimum` as `previewSwap`. `AtpMultiPoolOracle` compares a secondary
+    /// source against both means (cre8-contracts#25, review L-5): in a fast market the 30 minute mean trails a
+    /// live feed by more than the deviation bound while the 5 minute mean does not.
+    /// @return quoted TWAP quote over `twapWindow` (identical to `previewSwap`).
+    /// @return recentQuoted Quote at the `RECENT_WINDOW` mean, rounded up like `quoted`.
+    /// @return minimum Floor (identical to `previewSwap`).
+    function previewSwapWindows(address tokenIn, address tokenOut, uint256 amountIn)
+        external
+        view
+        returns (uint256 quoted, uint256 recentQuoted, uint256 minimum)
+    {
+        return _preview(tokenIn, tokenOut, amountIn);
+    }
+
+    function _preview(address tokenIn, address tokenOut, uint256 amountIn)
+        private
+        view
+        returns (uint256 quoted, uint256 recentQuoted, uint256 minimum)
     {
         if (amountIn == 0) revert ZeroAmount();
         if (tokenIn == tokenOut) revert UnsupportedPair();
@@ -170,6 +200,8 @@ contract PancakeV3TwapOracle is IOracleFloor {
         if (!inIsToken0 && !inIsToken1) revert UnsupportedPair();
         if (inIsToken0 ? tokenOut != token1 : tokenOut != token0) revert UnsupportedPair();
 
+        _requireRecentObservation();
+
         // TWAP floor over the configured 30-90 minute window.
         uint160 sqrtPriceX96 = _meanSqrtPrice(inIsToken0, twapWindow);
         quoted = _quote(amountIn, sqrtPriceX96, inIsToken0);
@@ -181,7 +213,7 @@ contract PancakeV3TwapOracle is IOracleFloor {
         // means a sale can never be floored below either mean: a sandwich that only moves the last few
         // minutes lifts the recent floor, and a crash that only moves them leaves the TWAP floor in force.
         uint160 recentSqrtPrice = _meanSqrtPrice(inIsToken0, RECENT_WINDOW);
-        uint256 recentQuoted = _quote(amountIn, recentSqrtPrice, inIsToken0);
+        recentQuoted = _quote(amountIn, recentSqrtPrice, inIsToken0);
         uint256 recentFloor =
             Math.mulDiv(recentQuoted, BPS_DENOMINATOR - maxSlippageBps, BPS_DENOMINATOR, Math.Rounding.Ceil);
         if (recentFloor > minimum) minimum = recentFloor;
@@ -190,6 +222,19 @@ contract PancakeV3TwapOracle is IOracleFloor {
     }
 
     // ---- price ----
+
+    /// @dev Reverts `TwapUnavailable` unless the pool's newest observation is at most `maxOracleAge` old.
+    /// Timestamps are compared in 32 bits with wrapping subtraction, exactly how the pool itself ages them.
+    function _requireRecentObservation() private view {
+        (,, uint16 observationIndex,,,,) = pool.slot0();
+        (uint32 observedAt,,, bool initialized) = pool.observations(observationIndex);
+        if (!initialized) revert TwapUnavailable();
+        uint32 age;
+        unchecked {
+            age = uint32(block.timestamp) - observedAt;
+        }
+        if (age > maxOracleAge) revert TwapUnavailable();
+    }
 
     /// @dev Mean tick over `[window, 0]` converted to a Q64.96 sqrt price.
     /// @param inIsToken0 True when the sold token is `token0`; sets the direction the mean tick is rounded

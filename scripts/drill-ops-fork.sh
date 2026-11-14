@@ -10,9 +10,17 @@
 # 每一步都讀鏈上的值驗證，全部 ✓ 才算過。步驟與注意事項見 docs/ops-drill.zh-TW.md。
 #
 # 不送任何主網交易，也不需要私鑰：所有角色都是 anvil 預設測試地址，用 impersonate 代簽；
-# 「Safe 送出」等同 Safe 多簽湊滿門檻後執行。先在另一個終端機起全新的 fork：
-#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun
-# 要用保留較長歷史的 RPC（Blast）：部署要讀 38 個池子，dataseed 只有一兩分鐘的歷史，會 missing trie node。
+# 「Safe 送出」等同 Safe 多簽湊滿門檻後執行。先在另一個終端機起全新的 fork（上游用 Blast：publicnode 在 anvil 上
+# 拿不到交易 receipt；固定在最新區塊附近）：
+#   anvil --fork-url https://bsc-mainnet.public.blastapi.io --chain-id 56 --port 8547 --hardfork cancun --prune-history --retries 20 \
+#     --fork-block-number $(( $(cast block-number --rpc-url https://bsc-rpc.publicnode.com) - 5 ))
+# --prune-history：不把每個區塊的完整 state 落地到 ~/.foundry/anvil/tmp（cardinality 步驟之後每塊都有上萬個 slot，
+# 不加會寫掉幾十 GB 磁碟）；--retries 20：Blast 偶爾回 429，預設 5 次重試會在部署中途用完。
+# 上線前步驟 IncreaseObservationCardinality 要寫約一萬五千個新 slot，腳本先用 scripts/warm-observation-slots.sh
+# 從 publicnode 批次讀出這些 slot 的真實值放進 anvil（要在 fork 區塊之後約一小時內跑）。
+# 腳本會把 fork 時間凍結在 fork 當下（anvil_setBlockTimestampInterval 0，結束時解除）：fork 上 Chainlink feed 不會
+# 更新、池子沒有其他交易者，時間往前走 feed（maxAge 最短 81 秒）與閒置池子（maxOracleAge 1 小時）就會照設計
+# fail closed（cre8-contracts#25）。
 #   scripts/drill-ops-fork.sh
 set -euo pipefail
 
@@ -22,6 +30,8 @@ cd "$(dirname "$0")/.."
 [ "$(cast chain-id)" = "56" ] || { echo "fork at $ETH_RPC_URL is not chain 56"; exit 1; }
 # 主網也是 chain 56：只有 anvil 會回 anvil_nodeInfo，真節點在這裡就停。
 cast rpc anvil_nodeInfo >/dev/null 2>&1 || { echo "$ETH_RPC_URL is not an anvil fork"; exit 1; }
+cast rpc anvil_setBlockTimestampInterval 0 >/dev/null
+trap 'cast rpc anvil_removeBlockTimestampInterval >/dev/null 2>&1 || true' EXIT
 
 ZERO=0x0000000000000000000000000000000000000000
 SAFE_FACTORY=0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67     # SafeProxyFactory v1.4.1
@@ -30,7 +40,9 @@ SAFE_FALLBACK=0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99    # CompatibilityFallb
 USDT=0x55d398326f99059fF775485246999027B3197955
 WBNB=0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c
 DOGE=0xbA2aE424d960c26247Dd6c32edC70B295c744C43   # 直接池淺，靠聚合器才買得到大單（docs#26、#29）
-WBNB_POOL=0x36696169C63e42cd08ce11f5deeBbCeBae652050          # 與 DeployAtpMainnet 相同
+WBNB_POOL=0x36696169C63e42cd08ce11f5deeBbCeBae652050          # 與 AtpMainnetSpecs 相同
+DOGE_POOL=0x89da4102853C6cf3F4e9979CBb1dC4a166F38E84          # 與 AtpMainnetSpecs 相同（fee 1%）
+V3_SWAP_ROUTER=0x1b81D678ffb9C0263b24A97847620C99d213eB14     # PancakeSwap V3 SwapRouter（只用來模擬市場成交）
 
 # 角色：全部是 anvil 預設測試地址（只存在 fork 上）
 S1=0x70997970C51812dc3A010C7d01b50e0d17dc79C8   # #1 Safe 簽署人
@@ -66,7 +78,7 @@ expect_err() {
   local out sel
   if out=$(cast call "$@" --from "$from" 2>&1); then fail "$label 應該 revert 卻成功了"; fi
   sel=$(cast sig "$err")
-  if grep -qiE "${sel#0x}|${err%%(*}" <<<"$out"; then ok "$label → revert $err"; else fail "$label revert 原因不是 $err：$out"; fi
+  if grep -qiE "${sel#0x}|${err%%(*}" <<<"$out"; then ok "$label → revert $err"; else fail "$label revert 原因不是 ${err}：$out"; fi
 }
 eq() { [ "$(tr '[:upper:]' '[:lower:]' <<<"$2")" = "$(tr '[:upper:]' '[:lower:]' <<<"$3")" ] && ok "$1" || fail "$1：得到 $2，預期 $3"; }
 flags_of() { cast call $REG 'pauseFlags(address)(uint8)' "$1"; }   # 1 = Safe、2 = operator、4 = 帳戶本人
@@ -87,9 +99,16 @@ new_safe() { # $@ = 簽署人；門檻固定 2
 
 for a in $S1 $S2 $S3 $S4 $OP1 $OP2 $DEPLOYER $PROVIDER; do actor "$a"; done
 
+echo "== 準備：上線前步驟 IncreaseObservationCardinality（#25 M-2；任何有 BNB 的錢包，這裡用 #1）"
+# fork 專用：先把這一步會寫到的 observation slot 從快速 RPC 讀進 anvil（值相同，只是先讀好，見該腳本說明）
+FORK_RPC="$ETH_RPC_URL" bash scripts/warm-observation-slots.sh | tail -1
+forge script script/IncreaseObservationCardinality.s.sol --rpc-url "$ETH_RPC_URL" --unlocked --sender $S1 \
+  --broadcast --slow > /tmp/atp-drill-cardinality.log 2>&1 || { tail -30 /tmp/atp-drill-cardinality.log; fail "IncreaseObservationCardinality"; }
+ok "$(grep -o 'transactions [0-9]*, new observation slots [0-9]*; every pool now has observationCardinalityNext >= [0-9]*' /tmp/atp-drill-cardinality.log)"
+
 echo "== 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）"
 SAFE_A=$(new_safe $S1 $S2 $S3)
-ok "Safe A $SAFE_A（2-of-3：#1 #2 #3）"
+ok "Safe A ${SAFE_A}（2-of-3：#1 #2 #3）"
 ATP_SAFE=$SAFE_A ATP_TREASURY=$SAFE_A ATP_OPERATOR=$OP1 EXPECTED_DEPLOYER_NONCE=$(cast nonce $DEPLOYER) \
   forge script script/DeployAtpMainnet.s.sol --rpc-url "$ETH_RPC_URL" --unlocked --sender $DEPLOYER \
   --broadcast --slow > /tmp/atp-drill-deploy.log 2>&1 || { tail -30 /tmp/atp-drill-deploy.log; fail "deploy"; }
@@ -161,7 +180,7 @@ rebalance_noop && ok "2-10 帳戶恢復，executeRebalance 不再 revert" || fai
 echo
 echo "== 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）"
 SAFE_B=$(new_safe $S1 $S2 $S4)
-ok "3-1 Safe B $SAFE_B（2-of-3：#1 #2 #7）"
+ok "3-1 Safe B ${SAFE_B}（2-of-3：#1 #2 #7）"
 send "$SAFE_A" $REG "transferOwnership(address)" "$SAFE_B"
 send "$SAFE_A" $RT "transferOwnership(address)" "$SAFE_B"
 eq "3-2 registry pendingOwner = Safe B" "$(cast call $REG 'pendingOwner()(address)')" "$SAFE_B"
@@ -212,12 +231,12 @@ send "$SAFE_B" $RT "setOracle(address,address,uint32,uint16,uint32)" $WBNB $WBNB
 NEW_ORACLE=$(cast call $RT 'oracleOf(address)(address)' $WBNB)
 [ "$NEW_ORACLE" != "$ZERO" ] || fail "setOracle"
 q=$(cast call $RT 'previewSwap(address,address,uint256)(uint256,uint256)' $USDT $WBNB 100000000000000000000 | head -1 | awk '{print $1}')
-[ "$q" != "0" ] && ok "4-10 Safe B setOracle 恢復（新 oracle $NEW_ORACLE），報價 $q" || fail "恢復後報價為 0"
+[ "$q" != "0" ] && ok "4-10 Safe B setOracle 恢復（新 oracle ${NEW_ORACLE}），報價 $q" || fail "恢復後報價為 0"
 eq "4-11 clearOracle 也一併拿掉 WBNB 的第二價格來源" "$(cast call $RT 'secondaryOf(address)(address,uint16)' $WBNB | head -1)" "$ZERO"
-send "$SAFE_B" $RT "setSecondary(address,address,address,uint32,uint16)" $WBNB 0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE \
-  0xB97Ad0E74fa7d920791E90258A6E2085088b4320 3600 200
+send "$SAFE_B" $RT "setSecondary(address,address,address,uint32,uint32,uint16)" $WBNB 0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE \
+  0xB97Ad0E74fa7d920791E90258A6E2085088b4320 81 2700 200
 [ "$(cast call $RT 'secondaryOf(address)(address,uint16)' $WBNB | head -1)" != "$ZERO" ] \
-  && ok "4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD, USDT/USD, 1h, 200 bps) 恢復" || fail "setSecondary"
+  && ok "4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD 81 秒, USDT/USD 2700 秒, 200 bps) 恢復" || fail "setSecondary"
 expect_err "    operator 拿掉第二價格來源" "NotOwner()" $OP2 $RT "clearSecondary(address)" $WBNB
 
 echo
@@ -245,7 +264,7 @@ eq "5-4 Safe B setMaxBuyBps(0) → 只准賣出" "$(cast call $EX 'maxBuyBps()(u
 expect_err "5-5 買入 USDT→WBNB" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB 1000000000000000000)" 99999999999
 send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000)" 99999999999
 USDT_GOT=$(bal $USDT $ACCOUNT)
-[ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出（USDT $USDT_GOT、WBNB $(bal $WBNB $ACCOUNT)）"
+[ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出（USDT ${USDT_GOT}、WBNB $(bal $WBNB $ACCOUNT)）"
 eq "    賣出不計入額度（買入窗沒有打開）" "$(cast call $EX 'buyWindowOf(address)(uint64,uint192)' $ACCOUNT | head -1)" "0"
 send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 10000
 eq "5-7 Safe B setMaxBuyBps(10000) → 恢復" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "10000"
@@ -268,12 +287,17 @@ eq "    KyberSwap 尚未加入（kind 0）" "$(venue_kind $KYBER)" "0"
 expect_err "6-2 operator 加 venue" "NotOwner()" $OP2 $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER
 SELL=$(( $(bal $WBNB $ACCOUNT) / 2 ))
 MIN=$(floor_of $WBNB $USDT $SELL)
+# KyberSwap 照「現在的主網」算路徑，fork 卻停在 fork 區塊（跑到這裡已過二三十分鐘）。路徑若經過 RFQ／prop AMM
+# 這類照 live 價成交的來源，市場這段時間跌超過 WBNB 的地板折讓（100 bps，#25 L-6）就會 BelowFloor——那是 fork
+# 的時間差，不是合約問題。這一步驗的是 venue 白名單與聚合器 calldata 的轉發，所以只讓 KyberSwap 走 Pancake V3
+# （fork 上照 fork 區塊的池子狀態成交）；滑價容忍放到 300 bps，讓 live 價高於 fork 時 KyberSwap 自己的
+# minReturn 不先擋下。成交仍要 ≥ executor 的價格地板（6-5 照樣檢查）。
 KQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" \
-  "https://aggregator-api.kyberswap.com/bsc/api/v1/routes?tokenIn=$WBNB&tokenOut=$USDT&amountIn=$SELL") || fail "KyberSwap API 無法連線"
-KB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 50}' <<<"$KQ" \
+  "https://aggregator-api.kyberswap.com/bsc/api/v1/routes?tokenIn=$WBNB&tokenOut=$USDT&amountIn=$SELL&includedSources=pancake-v3") || fail "KyberSwap API 無法連線"
+KB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 300}' <<<"$KQ" \
   | curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" -H "content-type: application/json" -d @- \
   "https://aggregator-api.kyberswap.com/bsc/api/v1/route/build") || fail "KyberSwap build 失敗"
-[ "$(jq -r .data.routerAddress <<<"$KB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 $KYBER：$(head -c 300 <<<"$KB")"
+[ "$(jq -r .data.routerAddress <<<"$KB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 ${KYBER}：$(head -c 300 <<<"$KB")"
 KDATA=$(jq -r .data.data <<<"$KB")
 expect_err "6-3 KyberSwap 還沒加入就成交" "VenueNotAllowed(address)" $ACCOUNT $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL,$MIN,$KYBER,$KDATA)]" 99999999999
 send "$SAFE_B" $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER
@@ -289,6 +313,33 @@ cast rpc anvil_setBalance $ACCOUNT 0xA688906BD8B00000 >/dev/null   # 12 BNB（fo
 send $ACCOUNT $WBNB "deposit()" --value 10ether
 send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000000)" 99999999999
 ok "6-6 帳戶包 10 BNB 並經 Pancake 賣成 $(cast from-wei $(bal $USDT $ACCOUNT)) USDT（準備買 DOGE）"
+# fork 上沒有其他交易者。DOGE 池在 fork 區塊可能已閒置超過 maxOracleAge（1 小時）而照設計 fail closed（#25 M-1），
+# 所以先由 #6 在 DOGE 池做一筆小額來回成交，代表「市場最近有人交易」；成交量從 1 USDT 起倍增到 tick 有動為止
+# （池子只在 tick 改變時寫 observation），再全部賣回。
+doge_obs_age() {
+  local idx; idx=$(cast call $DOGE_POOL 'slot0()(uint160,int24,uint16,uint16,uint16,uint32,bool)' | sed -n 3p | awk '{print $1}')
+  echo $(( $(cast block latest -f timestamp) - $(cast call $DOGE_POOL 'observations(uint256)(uint32,int56,uint160,bool)' "$idx" | head -1 | awk '{print $1}') ))
+}
+v3_swap() { # from tokenIn tokenOut fee amountIn
+  send "$1" $V3_SWAP_ROUTER "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))" \
+    "($2,$3,$4,$1,99999999999,$5,0,0)"
+}
+AGE_BEFORE=$(doge_obs_age)
+cast rpc anvil_setBalance $PROVIDER 0x1BC16D674EC80000 >/dev/null   # 2 BNB（fork 上的假錢）
+send $PROVIDER $WBNB "deposit()" --value 1ether
+send $PROVIDER $WBNB "approve(address,uint256)" $V3_SWAP_ROUTER 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+send $PROVIDER $USDT "approve(address,uint256)" $V3_SWAP_ROUTER 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+send $PROVIDER $DOGE "approve(address,uint256)" $V3_SWAP_ROUTER 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+v3_swap $PROVIDER $WBNB $USDT 500 1000000000000000000
+DOGE_TICK0=$(cast call $DOGE_POOL 'slot0()(uint160,int24,uint16,uint16,uint16,uint32,bool)' | sed -n 2p)
+TOUCH=1000000000000000000   # 1 USDT
+while [ "$(cast call $DOGE_POOL 'slot0()(uint160,int24,uint16,uint16,uint16,uint32,bool)' | sed -n 2p)" = "$DOGE_TICK0" ]; do
+  [ "$(echo "$TOUCH > 300000000000000000000" | bc)" = "1" ] && fail "DOGE 池 300 USDT 內 tick 都沒動"
+  v3_swap $PROVIDER $USDT $DOGE 10000 $TOUCH
+  TOUCH=$(echo "$TOUCH * 2" | bc)
+done
+v3_swap $PROVIDER $DOGE $USDT 10000 "$(bal $DOGE $PROVIDER)"
+eq "6-6b DOGE 池 observation 原本 $AGE_BEFORE 秒前，模擬成交後 = 0 秒" "$(doge_obs_age)" "0"
 DIN_AMT=1000000000000000000000   # 1,000 USDT
 DMIN=$(floor_of $USDT $DOGE $DIN_AMT)
 DINPUT=$(cast abi-encode "f(address,uint256,uint256,bytes,bool)" $EX $DIN_AMT 0 "$(cast concat-hex $USDT 0x002710 $DOGE)" true)
@@ -304,7 +355,7 @@ DQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "
 DB=$(jq -c --arg ex "$EX" '{routeSummary: .data.routeSummary, sender: $ex, recipient: $ex, slippageTolerance: 50}' <<<"$DQ" \
   | curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 -H "x-client-id: cre8-fork-drill" -H "content-type: application/json" -d @- \
   "https://aggregator-api.kyberswap.com/bsc/api/v1/route/build") || fail "KyberSwap build 失敗"
-[ "$(jq -r .data.routerAddress <<<"$DB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 $KYBER：$(head -c 300 <<<"$DB")"
+[ "$(jq -r .data.routerAddress <<<"$DB")" = "$KYBER" ] || fail "KyberSwap 回傳的 router 不是 ${KYBER}：$(head -c 300 <<<"$DB")"
 D0=$(bal $DOGE $ACCOUNT)
 send $ACCOUNT $EX "$REB" $ACCOUNT "[($USDT,$DOGE,$DIN_AMT,$DMIN,$KYBER,$(jq -r .data.data <<<"$DB"))]" 99999999999
 DGOT=$(echo "$(bal $DOGE $ACCOUNT) - $D0" | bc)
@@ -314,7 +365,7 @@ SELL2=$(bal $WBNB $ACCOUNT)
 MIN2=$(floor_of $WBNB $USDT $SELL2)
 OQ=$(curl -sS --fail-with-body --retry 5 --retry-all-errors --retry-delay 5 "https://open-api.openocean.finance/v4/bsc/swap?inTokenAddress=$WBNB&outTokenAddress=$USDT&amountDecimals=$SELL2&gasPriceDecimals=50000000&slippage=0.5&account=$EX") \
   || fail "OpenOcean API 無法連線"
-[ "$(jq -r .data.to <<<"$OQ" | tr '[:upper:]' '[:lower:]')" = "$(tr '[:upper:]' '[:lower:]' <<<"$OPENOCEAN")" ] || fail "OpenOcean 回傳的 to 不是 $OPENOCEAN：$(head -c 300 <<<"$OQ")"
+[ "$(jq -r .data.to <<<"$OQ" | tr '[:upper:]' '[:lower:]')" = "$(tr '[:upper:]' '[:lower:]' <<<"$OPENOCEAN")" ] || fail "OpenOcean 回傳的 to 不是 ${OPENOCEAN}：$(head -c 300 <<<"$OQ")"
 ODATA=$(jq -r .data.data <<<"$OQ")
 send "$SAFE_B" $EX "setVenue(address,uint8,address)" $OPENOCEAN 2 $OPENOCEAN
 eq "6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2" "$(venue_kind $OPENOCEAN)" "2"

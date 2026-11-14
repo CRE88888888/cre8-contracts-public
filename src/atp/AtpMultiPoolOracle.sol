@@ -42,9 +42,12 @@ import { PushFeedPriceSource } from "./PushFeedPriceSource.sol";
 ///
 /// Secondary source (cre8-contracts#15 §2): an asset may additionally carry one independent `IPriceSource`
 /// (today `PushFeedPriceSource` over Chainlink / RedStone Push USD feeds), likewise deployed here from feed
-/// addresses, never supplied. When present, every quote must agree with it within `maxDeviationBps` and the
-/// floor becomes the stricter of the two; a stale or unusable secondary reverts the quote instead of being
-/// skipped. Assets without a secondary keep the pool TWAP alone, exactly as before.
+/// addresses, never supplied. When present, the secondary quote must agree within `maxDeviationBps` with the
+/// pool's 30 minute TWAP quote or with its 5 minute recent-mean quote (either is enough, cre8-contracts#25
+/// review L-5: in a fast market the 30 minute mean alone trails a live feed by more than the bound and would
+/// block the exit), and the floor becomes the stricter of the pool's and the secondary's; a stale or unusable
+/// secondary reverts the quote instead of being skipped. Accepting either mean cannot loosen anything: the
+/// floor is never below the secondary's own floor. Assets without a secondary keep the pool alone.
 contract AtpMultiPoolOracle is IOracleFloor {
     // ---- configuration ----
 
@@ -63,8 +66,8 @@ contract AtpMultiPoolOracle is IOracleFloor {
 
     struct Secondary {
         IPriceSource source;
-        /// @notice Largest allowed gap between the pool TWAP quote and the secondary quote, in bps of the
-        /// secondary quote.
+        /// @notice Largest allowed gap between a pool quote (30 minute TWAP or 5 minute recent mean) and the
+        /// secondary quote, in bps of the secondary quote.
         uint16 maxDeviationBps;
     }
 
@@ -101,7 +104,8 @@ contract AtpMultiPoolOracle is IOracleFloor {
     error SecondaryAlreadySet(address asset);
     error SecondaryNotSet(address asset);
     error InvalidDeviation(uint16 maxDeviationBps);
-    /// @dev The pool TWAP and the secondary source differ by more than the asset's `maxDeviationBps`.
+    /// @dev Both pool means (TWAP and recent) differ from the secondary source by more than the asset's
+    /// `maxDeviationBps`. `poolQuote` is the TWAP quote.
     error SourcesDisagree(address asset, uint256 poolQuote, uint256 secondaryQuote);
 
     /// @param numeraire_ Quote asset every registered pair is priced against.
@@ -149,26 +153,38 @@ contract AtpMultiPoolOracle is IOracleFloor {
         PancakeV3TwapOracle oracle = _oracles[asset];
         if (address(oracle) == address(0)) revert OracleNotSet(asset);
 
+        Secondary memory secondary = _secondaries[asset];
         // The pair is re-checked against `tokenIn` / `tokenOut` by the oracle itself; the registration check
         // guarantees that pair is exactly `asset` / `numeraire`, so this forward cannot price a third token.
-        (quoted, minimum) = oracle.previewSwap(tokenIn, tokenOut, amountIn);
+        if (address(secondary.source) == address(0)) return oracle.previewSwap(tokenIn, tokenOut, amountIn);
 
-        Secondary memory secondary = _secondaries[asset];
-        if (address(secondary.source) == address(0)) return (quoted, minimum);
+        uint256 recentQuoted;
+        (quoted, recentQuoted, minimum) = oracle.previewSwapWindows(tokenIn, tokenOut, amountIn);
 
         // Reverts when stale or unusable: no trade rather than a TWAP-only floor.
         uint256 price = secondary.source.price();
         uint256 secondaryQuote = tokenOut == numeraire
             ? Math.mulDiv(amountIn, price, 1e18)  // sale: asset -> numeraire
             : Math.mulDiv(amountIn, 1e18, price); // buy: numeraire -> asset
-        uint256 gap = quoted > secondaryQuote ? quoted - secondaryQuote : secondaryQuote - quoted;
-        if (secondaryQuote == 0 || gap * BPS > secondaryQuote * secondary.maxDeviationBps) {
-            revert SourcesDisagree(asset, quoted, secondaryQuote);
-        }
+        if (
+            secondaryQuote == 0
+                || (!_agrees(quoted, secondaryQuote, secondary.maxDeviationBps)
+                    && !_agrees(recentQuoted, secondaryQuote, secondary.maxDeviationBps))
+        ) revert SourcesDisagree(asset, quoted, secondaryQuote);
         // Same slippage budget as the pool floor, rounded up; the stricter (higher) floor wins.
         uint256 secondaryFloor =
             Math.mulDiv(secondaryQuote, BPS - oracle.maxSlippageBps(), BPS, Math.Rounding.Ceil);
         if (secondaryFloor > minimum) minimum = secondaryFloor;
+    }
+
+    /// @dev True when `poolQuote` is within `maxDeviationBps` of `secondaryQuote` (bound inclusive).
+    function _agrees(uint256 poolQuote, uint256 secondaryQuote, uint16 maxDeviationBps)
+        private
+        pure
+        returns (bool)
+    {
+        uint256 gap = poolQuote > secondaryQuote ? poolQuote - secondaryQuote : secondaryQuote - poolQuote;
+        return gap * BPS <= secondaryQuote * maxDeviationBps;
     }
 
     // ---- registry ----
@@ -225,11 +241,14 @@ contract AtpMultiPoolOracle is IOracleFloor {
     /// @dev The adapter is created here, never supplied. The asset must already have its pool oracle, and an
     /// existing secondary must be cleared first, like `setOracle`. Only for assets whose token is the feed's
     /// underlying: never an equity feed for a bStock (see `PushFeedPriceSource`).
+    /// @param maxAge Max age of the asset feed (about three of its heartbeats).
+    /// @param numeraireMaxAge Max age of the numeraire feed, set from that feed's own heartbeat.
     function setSecondary(
         address asset,
         IAggregatorV3 assetFeed,
         IAggregatorV3 numeraireFeed,
         uint32 maxAge,
+        uint32 numeraireMaxAge,
         uint16 maxDeviationBps
     ) external onlyOwner returns (IPriceSource source) {
         if (address(_oracles[asset]) == address(0)) revert OracleNotSet(asset);
@@ -237,7 +256,7 @@ contract AtpMultiPoolOracle is IOracleFloor {
         if (maxDeviationBps == 0 || maxDeviationBps > MAX_DEVIATION_CEILING_BPS) {
             revert InvalidDeviation(maxDeviationBps);
         }
-        source = new PushFeedPriceSource(assetFeed, numeraireFeed, asset, numeraire, maxAge);
+        source = new PushFeedPriceSource(assetFeed, numeraireFeed, asset, numeraire, maxAge, numeraireMaxAge);
         _secondaries[asset] = Secondary({ source: source, maxDeviationBps: maxDeviationBps });
         emit SecondarySet(asset, address(source), maxDeviationBps);
     }

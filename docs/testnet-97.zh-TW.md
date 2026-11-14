@@ -9,10 +9,12 @@ cre8-contracts#30（測試網 T1）。這份文件說明整套合約怎麼部署
 | 項目 | 內容 |
 | --- | --- |
 | 測試 USDT | `TestnetUSDT`，18 decimals，是計價資產。內建水龍頭：每個地址每 24 小時最多領 10,000（`claim`）；minter 可以代領（`claimFor`），同樣受這個上限；minter 另外可以不限量 `mint`。 |
-| 38 個模擬資產 | 清單、順序與 `maxSlippageBps` 和 `DeployAtpMainnet` 相同。symbol、decimals、Pancake V3 fee tier、bStock 的 `uiMultiplier` 取自主網（`script/testnet/TestnetAssets.sol`，主網區塊 133542361，只讀）。26 個 bStock 用 `TestnetBStock`，讀取介面和主網 bStock 一樣（`uiMultiplier`、`toUIAmount`、`fromUIAmount`、`balanceOfUI`）；池子與 oracle 一律用 raw 價格，倍率只給畫面換算。 |
+| 38 個模擬資產 | 清單、順序與 `maxSlippageBps` 和 #25 之前的 `DeployAtpMainnet` 相同（#25 把主網的穩定幣改 50 bps、深池改 100 bps，測試網沒有跟著改，見下方註）。symbol、decimals、Pancake V3 fee tier、bStock 的 `uiMultiplier` 取自主網（`script/testnet/TestnetAssets.sol`，主網區塊 133542361，只讀）。26 個 bStock 用 `TestnetBStock`，讀取介面和主網 bStock 一樣（`uiMultiplier`、`toUIAmount`、`fromUIAmount`、`balanceOfUI`）；池子與 oracle 一律用 raw 價格，倍率只給畫面換算。 |
 | 38 個 Pancake V3 池 | 每個資產對測試 USDT 各一個池，fee tier 和主網相同。起始價是主網當時的現價取 6 位有效數字（固定基準，不是即時行情）。全區間流動性每邊 500 萬 USDT 等值。`observationCardinalityNext` 設為 600。 |
 | registry／oracle router／executor | 參數和 `DeployAtpMainnet` 相同：TWAP 30 分鐘、近期均值 5 分鐘、`maxOracleAge` 1 小時、`maxBuyBps` 10000、secondary 偏差 200 bps。venue 只有 Pancake V3 Universal Router（建構時登錄）。KyberSwap 不支援 97，所以不加入。 |
-| 模擬價格源（secondary） | `TestnetPriceFeed`，AggregatorV3 介面，8 decimals。用在和主網同樣的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、TRX、XRP、USDC、DAI、LTC），另有一個 USDT/USD。只有 keeper 能推價；`maxAge` 和主網相同（AVAX 1 天，其餘 1 小時）。 |
+| 模擬價格源（secondary） | `TestnetPriceFeed`，AggregatorV3 介面，8 decimals。用在和主網同樣的 11 個資產（WBNB、BTCB、ETH、DOGE、AVAX、SOL、TRX、XRP、USDC、DAI、LTC），另有一個 USDT/USD。只有 keeper 能推價；`maxAge` 是 #25 之前的主網值（AVAX 1 天，其餘 1 小時，USDT/USD 沿用資產的值）。 |
+
+> **註（cre8-contracts#25）：** 主網部署腳本在 #25 改了 oracle：池子超過 `maxOracleAge` 沒成交就 fail closed、feed 時限改為約 3 倍 heartbeat 且 USDT/USD 有自己的時限、穩定幣與深池的 `maxSlippageBps` 收緊。chain 97 上已部署的合約是 #25 之前的版本，`DeployTestnet` 只做編譯需要的最小調整（USDT/USD 時限 = 資產時限），重跑仍驗證現有部署。測試網要換成 #25 的 oracle 時要重新部署 router 與 oracle，而且 keeper 必須讓每個池子至少每小時成交一次，否則閒置資產會照設計停止交易；這件事由總管另外決定。
 | GasPolicy | 補上 ZeroDev `toGasPolicy` 使用的 `0xaeFC5AbC67FfD258abD0A3E54f65E70326F84b23`，見第 5 節。 |
 | 自有 paymaster | eth-infinitism account-abstraction **v0.7.0** 的 `VerifyingPaymaster`，commit `7af70c8993a6f42973f520ae0752386a5032abe7`，原檔照抄在 `src/testnet/aa/`。由 paymaster signer 在鏈下簽代付，部署時存 0.5 tBNB 到 EntryPoint v0.7。不使用 ZeroDev 的付費 bundler／paymaster（docs#48）。 |
 
