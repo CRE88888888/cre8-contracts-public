@@ -1,0 +1,16 @@
+{
+  "name": "cre8-testnet-kernel-smoke",
+  "private": true,
+  "type": "module",
+  "description": "cre8-contracts#30: Kernel v3.3 + session key + own VerifyingPaymaster + alto on a local chain 97 fork. SDK versions pinned to backend's bun.lock.",
+  "scripts": {
+    "smoke": "bun run kernel-smoke.ts"
+  },
+  "dependencies": {
+    "@zerodev/ecdsa-validator": "5.4.9",
+    "@zerodev/permissions": "5.5.11",
+    "@zerodev/sdk": "5.5.12",
+    "viem": "2.57.17",
+    "tslib": "2.9.1"
+  }
+}

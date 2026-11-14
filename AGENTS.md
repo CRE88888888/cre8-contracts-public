@@ -19,6 +19,7 @@ CRE8 ATP（Automated Token Portfolio）的 BSC 智慧合約，Foundry 專案。�
 - `test/atp/`：單元測試；`test/atp/fork/`：BSC mainnet fork 測試（需要 RPC）
 - `script/DeployAtp.s.sol`：部署腳本，內含 fork（chain 56）的位址簿常數，可重複執行
 - `scripts/deploy-fork.sh`：起 anvil fork 並部署、寫 `deployments/fork.json`
+- BSC 測試網（chain 97，#30）：`src/testnet/`（模擬資產、水龍頭、價格源、CREATE2 owner 部署器；`src/testnet/aa/` 是 eth-infinitism v0.7.0 `VerifyingPaymaster` 原檔，GPL-3.0，`forge fmt` 已排除）、`script/DeployTestnet.s.sol`＋`script/testnet/`、`scripts/testnet/`、`deployments/testnet-97.json`，手冊見 `docs/testnet-97.zh-TW.md`。只在 chain 97 執行，`src/atp/` 不引用任何測試網檔案
 - `deployments/`：位址紀錄（見下）
 - `lib/`：`openzeppelin-contracts`（5.4.0）與 `forge-std`，**直接 commit 進來（vendored），不是 git submodule**
 

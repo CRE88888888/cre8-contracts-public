@@ -20,6 +20,8 @@ tab_width = 4
 bracket_spacing = true
 int_types = "long"
 quote_style = "double"
+# Vendored upstream code (eth-infinitism account-abstraction v0.7.0) stays byte-identical to its source.
+ignore = ["src/testnet/aa/**"]
 
 # Fork endpoints. Values come from the environment only: never put a credential-bearing RPC URL in this file.
 [rpc_endpoints]
