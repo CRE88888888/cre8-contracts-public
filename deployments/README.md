@@ -4,6 +4,7 @@
 - 內容由 `broadcast/DeployAtp.s.sol/56/run-latest.json` 對照鏈上 `eth_getCode` 交叉驗證後產生；正常產生器是 `scripts/deploy-fork.sh`（它會重啟 fork，跑之前先確認可以清掉現有狀態）。
 - `fork-state.json` 是同一時間點的可執行狀態快照（owner / version / enrollment / 塊高 / 餘額 / Kernel 基建），供整合驗證當基準線。
 - **若 anvil fork 重啟，這兩份檔案必須重新產生，不可手改。**
+- `DeployAtp` 的位址簿是固定的（registry `0xBe02…72a7`、router `0x4989…0b5E`、executor `0xa1b9…d310`）：全新 fork 上第一次跑會先把 anvil #0 的 nonce 釘回 25543 再部署，所以不管 fork 哪個塊高都落在這三個位址；之後重跑全部 `REUSE`、不送交易（#16）。
 
 ## anvil fork 的保存期限與刷新（重要）
 

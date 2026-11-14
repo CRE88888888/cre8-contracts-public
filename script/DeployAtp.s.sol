@@ -41,13 +41,18 @@ contract DeployAtp is Script {
     // ---- address book for this fork (chain 56) ----
     // An entry is reused when it still has code; otherwise it is deployed again and printed for the record.
     //
-    // v2 (router deploys its own oracles): registry nonce N, router N+1, executor N+4 (N+2, N+3 = setOracle).
-    // Account #0's key is public, so it has real mainnet history: N is its mainnet nonce at the fork block
-    // (25543 at block 133175282, 2026-11-12), not 0. A fork at a later block may see a higher N, in which
-    // case these entries have no code and the script deploys fresh and prints the new addresses.
+    // v2 (router deploys its own oracles): registry nonce N, router N+1, executor N+4 (N+2, N+3 = setOracle),
+    // with N = BOOK_NONCE. Account #0's key is public, so anyone can spend its mainnet nonces and a fresh fork
+    // inherits whatever nonce mainnet has reached (25560 on 2026-11-13). The script therefore pins the nonce
+    // back to BOOK_NONCE before deploying over an empty book (`_pinNonce`, anvil only), so the book holds on a
+    // fork of any block (#16). Mainnet already spent 25543/25544/25547 on plain transfers, so no contract can
+    // ever appear at these addresses there.
     address internal constant REGISTRY = 0xBe02b3db88ff0090eF3e56ac79fD4f4003ae72a7;
     address internal constant MULTI_POOL_ORACLE = 0x4989B5A9ec17ce669663a599FBefA0e414ed0b5E;
     address internal constant EXECUTOR_MULTI_POOL = 0xa1b9DA215e1eFab5a3935BF147009ce0687dd310;
+    uint64 internal constant BOOK_NONCE = 25_543;
+    /// @dev BOOK_NONCE as a JSON-RPC quantity for `anvil_setNonce`.
+    string internal constant BOOK_NONCE_HEX = "0x63c7";
 
     /// @dev Anvil's default account #0. The only broadcaster this script accepts on chain 56.
     address internal constant ANVIL_DEPLOYER = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
@@ -95,6 +100,8 @@ contract DeployAtp is Script {
         d.nvdabUsdtPool = IV3Factory(V3_FACTORY).getPool(NVDAB, USDT, NVDAB_USDT_FEE);
         require(d.nvdabUsdtPool != address(0), "no NVDAB/USDT pool at 2500");
 
+        _pinNonce();
+
         vm.startBroadcast();
         if (block.chainid == 56) {
             require(msg.sender == ANVIL_DEPLOYER, "DeployAtp is fork-only; use DeployAtpMainnet on mainnet");
@@ -125,6 +132,32 @@ contract DeployAtp is Script {
     }
 
     // ---------------------------------------------------------------- idempotent deployment
+
+    /// @dev Over an empty book (a fresh fork), rewinds account #0 to BOOK_NONCE so the deployment lands on the
+    /// book's addresses whatever nonce mainnet has reached. Both the Anvil node (`anvil_setNonce`, which the
+    /// broadcast reads) and this script's simulation (`setNonceUnsafe`) are moved. Skipped once the registry
+    /// is live: a rerun then reuses everything and must not touch the nonce. Only ever runs against Anvil:
+    /// any other chain-56 RPC rejects `anvil_setNonce`, and the script stops before broadcasting.
+    function _pinNonce() internal {
+        if (block.chainid != 56 || msg.sender != ANVIL_DEPLOYER || _live(REGISTRY)) return;
+        require(
+            vm.computeCreateAddress(ANVIL_DEPLOYER, BOOK_NONCE) == REGISTRY
+                && vm.computeCreateAddress(ANVIL_DEPLOYER, BOOK_NONCE + 1) == MULTI_POOL_ORACLE
+                && vm.computeCreateAddress(ANVIL_DEPLOYER, BOOK_NONCE + 4) == EXECUTOR_MULTI_POOL,
+            "address book does not match BOOK_NONCE"
+        );
+        if (vm.getNonce(ANVIL_DEPLOYER) == BOOK_NONCE) return;
+        string memory params =
+            string.concat("[\"", vm.toString(ANVIL_DEPLOYER), "\",\"", BOOK_NONCE_HEX, "\"]");
+        try vm.rpc("anvil_setNonce", params) { }
+        catch {
+            revert("DeployAtp needs an Anvil fork (anvil_setNonce failed); use DeployAtpMainnet on mainnet");
+        }
+        vm.setNonceUnsafe(ANVIL_DEPLOYER, BOOK_NONCE);
+        console.log(
+            string.concat("nonce               PIN   account #0 -> ", vm.toString(uint256(BOOK_NONCE)))
+        );
+    }
 
     /// @dev A recorded address is reusable only if it still has code: after a fork reset the book keeps its
     /// entries while the chain behind them is empty, and reusing a dead address would hand out a deployment

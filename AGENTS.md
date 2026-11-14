@@ -39,10 +39,10 @@ forge fmt --check                # 格式檢查（目前全部通過，未列入
 
 ## 部署與 deployments/
 
-- fork 部署：`bash scripts/deploy-fork.sh`，或手動 `forge script script/DeployAtp.s.sol --rpc-url http://127.0.0.1:8545 --broadcast`。`DeployAtp` 對位址簿常數「有 code 就重用並重新驗證 pin、沒有才重新部署」；`new` 的順序決定 nonce，不可調換。
+- fork 部署：`bash scripts/deploy-fork.sh`，或手動 `forge script script/DeployAtp.s.sol --rpc-url http://127.0.0.1:8545 --broadcast`。`DeployAtp` 對位址簿常數「有 code 就重用並重新驗證 pin、沒有才重新部署」；`new` 的順序決定 nonce，不可調換。anvil #0 的私鑰是公開的、主網 nonce 會被別人推高，所以位址簿空的時候腳本會先用 `anvil_setNonce` 把它釘回 `BOOK_NONCE`（25543）再部署（#16），任何高度的全新 fork 都會落在同一組位址；非 anvil 的 RPC 會拒絕這個呼叫，腳本在廣播前就停下。
 - `deployments/fork.json`：anvil fork 上的權威位址，由 `broadcast/.../run-latest.json` 對照鏈上 `eth_getCode` 產生；`fork-state.json` 是同時間點的狀態快照。**fork 重啟後兩份都要重新產生，不可手改。** 細節（publicnode 約 75 分鐘歷史窗口、刷新方式）見 `deployments/README.md`。
 - `deployments/mainnet.json`：BSC 主網（chain 56）位址、部署者、池子與流動性紀錄，部署後手動寫入，commit 訊息附上位址與 `cast code` 驗證結果（見 `d1f94ff`、`1014063`）。DOGE oracle 是後來單獨部署＋`setOracle` 的。
-- **`DeployAtp` 的位址簿常數是 fork 位址，不是主網位址**（已用 `cast codesize` 確認這些位址在主網沒有 code）。對主網 RPC 重跑它不會重用既有部署，而是整套重新部署出第二個 registry/executor。
+- **`DeployAtp` 的位址簿常數是 fork 位址，不是主網位址**（已用 `cast codesize` 確認這些位址在主網沒有 code）。對主網 RPC 跑它會在 `anvil_setNonce` 失敗、廣播前就停下（主網部署用 `DeployAtpMainnet`）。
 - `broadcast/`、`.env` 被 gitignore，不進版控。
 
 ## 主網部署前的安全注意
