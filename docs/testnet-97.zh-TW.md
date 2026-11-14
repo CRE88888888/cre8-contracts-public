@@ -21,6 +21,10 @@ cre8-contracts#30（測試網 T1）。這份文件說明整套合約怎麼部署
 - 地址只由「deployer、salt、init code」決定。本機 fork 算出的地址就是公開鏈上的地址，`deployments/testnet-97.json` 可以先在 fork 上產生。
 - 腳本可以重跑：第二次跑時已完成的步驟全部略過，印出 `No transactions to broadcast`。
 - 合約程式碼或建構參數一改，地址就會換（新部署會在舊部署旁邊）。要刻意重開一套，就改 `TestnetBook.SALT_NAMESPACE`。
+- **地址只在乾淨的 main 上可重現。** init code 含編譯 metadata，也就是每個原始檔內容的 hash，所以只要工作目錄有任何沒 commit 的改動，或 HEAD 不是 `origin/main`，部署出來的地址就會和 `deployments/testnet-97.json` 不同；就算那些改動是別的 session 留在同一個 clone 裡的半成品也一樣。2026-11-14 X1 複製了主 clone 的工作目錄，裡面有 #25 尚未 commit 的 oracle 改動，結果 router、executor 與 38 個 oracle 的地址都對不上（backend#69）。
+  - 現在 `deploy-97.sh` 遇到這兩種情況都會拒絕部署並說明原因。要部署，請另開一個乾淨的 worktree：`git worktree add <目錄> origin/main`。
+  - 只有 fork 模式可以設 `TESTNET_ALLOW_UNMERGED=1`，在未合併的分支上測試；工作目錄必須乾淨這一條仍然不能跳過。
+  - 原始檔放在哪個目錄不影響地址：metadata 記的是相對路徑。已驗證：在另一個目錄的乾淨 main 上，用全新 fork 部署，157 個地址全部等於 manifest。
 
 ## 2. 角色
 

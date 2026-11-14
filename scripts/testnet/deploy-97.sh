@@ -9,10 +9,38 @@
 #     --retries 15 --fork-retry-backoff 1500 --timeout 90000
 #
 # 腳本是冪等的：第二次跑應該印「No transactions to broadcast」。manifest 裡每個合約地址都用 eth_getCode 核對。
+#
+# 地址只在「乾淨的 origin/main」上可重現：地址是 CREATE2，由 init code 決定，而 init code 含每個原始檔內容的
+# hash。工作目錄有任何未 commit 的改動（包括別的 session 留在同一個 clone 的半成品），或 HEAD 不是
+# origin/main，部署出來的地址都會和 deployments/testnet-97.json 不同（backend#69）。所以兩者都先擋下。
+# 要部署別的版本，請另開 worktree：git worktree add <目錄> origin/main。
+# 只有 fork 模式可以用 TESTNET_ALLOW_UNMERGED=1 跳過「HEAD 必須是 origin/main」（測未合併的分支用；
+# 這時地址可能和 manifest 不同）；工作目錄必須乾淨這一條任何模式都不能跳過。
 set -euo pipefail
 
 MODE="${1:?usage: deploy-97.sh fork|public}"
 cd "$(dirname "$0")/../.."
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || { echo "refusing: not a git checkout. Addresses are only reproducible from a clean origin/main checkout."; exit 1; }
+# The manifest is this script's own output (a rerun rewrites its timestamp), so it is the one file excluded.
+DIRTY="$(git status --porcelain -- . ':(exclude)deployments/testnet-97.json')"
+if [ -n "$DIRTY" ]; then
+  echo "refusing: the working tree has uncommitted changes, which change the CREATE2 addresses:"
+  echo "$DIRTY"
+  echo "Addresses are only reproducible from a clean origin/main checkout (git worktree add <dir> origin/main)."
+  exit 1
+fi
+git fetch -q origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  if [ "$MODE" = fork ] && [ "${TESTNET_ALLOW_UNMERGED:-0}" = 1 ]; then
+    echo "warning: HEAD $(git rev-parse --short HEAD) is not origin/main; addresses may differ from $(git rev-parse --short origin/main)'s manifest"
+  else
+    echo "refusing: HEAD $(git rev-parse --short HEAD) is not origin/main ($(git rev-parse --short origin/main))."
+    echo "Addresses are only reproducible from a clean origin/main checkout (git worktree add <dir> origin/main)."
+    echo "On a fork only, TESTNET_ALLOW_UNMERGED=1 runs an unmerged branch anyway."
+    exit 1
+  fi
+fi
 KEYS="${CRE8_TESTNET_KEYS:-$HOME/.cre8-testnet}"
 DEPLOYER=0x55662B4183fcA1230694D5D57F56E4F2E0e3008a
 OWNER=0x09BBB9A06a0C49Ad24bddB18808944041783054e

@@ -196,7 +196,13 @@ contract SmokeTestnet is Script {
         env.account.execute(target, data);
     }
 
+    /// @dev The executor's `minGross` plus a 0.5% cushion. The floor is read here, during forge's simulation, but
+    /// enforced when the transaction lands a few blocks later; the 5-minute mean moves a little in between (the
+    /// preceding trade shifted the pool), and a step whose `amountOutMin` ends up a hair under the new floor reverts
+    /// `BelowFloor`. Fills land 0.8-3% above the floor, so the cushion never binds on a healthy pool.
     function _minGross(uint256 floor, uint16 feeBps) internal pure returns (uint256) {
-        return Math.mulDiv(floor, BPS, BPS - feeBps, Math.Rounding.Ceil);
+        return Math.mulDiv(
+            Math.mulDiv(floor, BPS, BPS - feeBps, Math.Rounding.Ceil), BPS + 50, BPS, Math.Rounding.Ceil
+        );
     }
 }
