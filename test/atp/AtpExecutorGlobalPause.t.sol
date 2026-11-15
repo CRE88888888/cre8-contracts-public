@@ -37,6 +37,8 @@ contract AtpExecutorGlobalPauseTest is Test {
 
         address[] memory assets = new address[](1);
         assets[0] = address(0xAAA1);
+        // Assets must be contracts since cre8-contracts#47; any code will do here.
+        vm.etch(assets[0], hex"00");
         uint16[] memory weights = new uint16[](1);
         weights[0] = 10_000;
         uint256 id = registry.registerStrategy("index", "global pause", true);

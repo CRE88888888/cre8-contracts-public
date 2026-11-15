@@ -45,6 +45,15 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// becoming a lever: it is at most `MIN_FEE_MAX_BPS` of the batch notional (a leaked session key cannot grind
 /// an account down with dust batches, and a dust exit pays at most that share), and it is capped at what the
 /// account holds and has approved in numeraire, so it never blocks a batch - least of all an exit.
+/// @dev One minimum per account per window (cre8-contracts#47): the backend splits one purchase over several
+/// batches (at most 16 steps each), and a per-batch minimum charged it several times. So the minimum is
+/// accounted per account over a fixed `MIN_FEE_WINDOW`, opened by its first batch with a swap: the window is
+/// treated as one batch of its cumulative notional `c`, and a batch pays only what the window still owes,
+/// `max(0, T(c) - paid)`, where `T(c) = max(0, min(minBatchFee, c x MIN_FEE_MAX_BPS) - c x feeBps)` is the
+/// one-batch top-up and `paid` the top-ups pulled so far in the window. Consequences: a window never pays less
+/// than one batch of its cumulative notional would (a dust batch first cannot use the minimum up), never more
+/// than one `minBatchFee` on top of the proportional fee, and no batch more than it would have paid alone
+/// (T is subadditive) - except a shortfall an earlier batch of the window could not pay, which stays owed.
 contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -59,6 +68,12 @@ contract AtpExecutor is ReentrancyGuard {
     uint16 public constant MAX_BUY_BPS_CEILING = 20_000;
     /// @notice The minimum-fee top-up never exceeds this share of the batch notional (1%).
     uint16 public constant MIN_FEE_MAX_BPS = 100;
+    /// @notice Length of the fixed minimum-fee window: it opens with an account's first batch with a swap and
+    /// resets with the first such batch at or after `start + MIN_FEE_WINDOW`.
+    uint256 public constant MIN_FEE_WINDOW = 1 hours;
+    /// @notice Gas cap for each `balanceOf` read while valuing an account (cre8-contracts#47); a token needing
+    /// more counts as zero. ERC20 and bStock proxy reads take a few thousand to ~30k gas.
+    uint256 public constant BALANCE_OF_GAS = 100_000;
     /// @notice Upper bound for `minBatchFee`: 5 whole numeraire units (5 USDT), read from its decimals.
     uint256 public immutable minBatchFeeCeiling;
 
@@ -97,6 +112,17 @@ contract AtpExecutor is ReentrancyGuard {
     /// @notice Buy-limit window per account; `start == 0` means never opened, and a window is stale (treated as
     /// empty) once `start + BUY_WINDOW` has passed.
     mapping(address => BuyWindow) public buyWindowOf;
+
+    /// @dev `notional` is the numeraire volume of the window's batches, `paid` the minimum-fee top-ups pulled.
+    struct MinFeeWindow {
+        uint64 start;
+        uint192 notional;
+        uint256 paid;
+    }
+
+    /// @notice Minimum-fee window per account; `start == 0` means never opened, and a window is stale (treated
+    /// as empty) once `start + MIN_FEE_WINDOW` has passed.
+    mapping(address => MinFeeWindow) public minFeeWindowOf;
 
     /// @notice How a venue is paid and called.
     /// - `PANCAKE_UR`: Universal Router. `data` = `abi.encode(bytes commands, bytes[] inputs)`; commands are
@@ -359,8 +385,9 @@ contract AtpExecutor is ReentrancyGuard {
     // ---- minimum batch fee ----
 
     /// @notice The minimum-fee top-up a batch of `notional` numeraire volume owes under strategy `strategyId`'s
-    /// fee, on top of the proportional fee split off its steps. 0 for an empty batch or once the proportional
-    /// fee reaches the minimum. The executor pulls at most the account's numeraire balance and allowance.
+    /// fee, on top of the proportional fee split off its steps, when it is the first batch of its account's
+    /// window (`minFeeDue` gives the account-aware figure). 0 for an empty batch or once the proportional fee
+    /// reaches the minimum. The executor pulls at most the account's numeraire balance and allowance.
     function minFeeTopUp(uint256 strategyId, uint256 notional) external view returns (uint256) {
         return _minFeeTopUp(notional, registry.effectiveFeeBps(strategyId));
     }
@@ -374,17 +401,53 @@ contract AtpExecutor is ReentrancyGuard {
         return minimum > proportional ? minimum - proportional : 0;
     }
 
+    /// @notice The minimum-fee top-up `account`'s next batch of `notional` numeraire volume would owe now, under
+    /// its enrolled strategy's fee and its open window (see the contract notes). Before the balance and
+    /// allowance cap; 0 for `notional == 0`.
+    function minFeeDue(address account, uint256 notional) external view returns (uint256) {
+        if (notional == 0) return 0;
+        MinFeeWindow memory window = _currentMinFeeWindow(account);
+        uint16 feeBps = registry.effectiveFeeBps(registry.enrollments(account).strategyId);
+        return _minFeeDue(uint256(window.notional) + notional, window.paid, feeBps);
+    }
+
     /// @dev Pulled after every step has cleared its floor, from the account's own numeraire, never from a swap
     /// output. Capped at the balance and allowance the account has, so the fee can be short but can never
-    /// make a batch revert (an exit whose proceeds are below the minimum still goes through).
+    /// make a batch revert (an exit whose proceeds are below the minimum still goes through); what is short
+    /// stays owed for the rest of the window.
     function _chargeMinFee(address account, uint256 notional, uint16 feeBps) internal {
-        uint256 due = _minFeeTopUp(notional, feeBps);
-        if (due == 0) return;
+        if (notional == 0) return;
+        MinFeeWindow memory window = _currentMinFeeWindow(account);
+        uint256 cumulative = uint256(window.notional) + notional;
+        uint256 due = _minFeeDue(cumulative, window.paid, feeBps);
         IERC20 token = IERC20(numeraire);
-        uint256 charged =
-            Math.min(due, Math.min(token.balanceOf(account), token.allowance(account, address(this))));
+        uint256 charged;
+        if (due != 0) {
+            charged =
+                Math.min(due, Math.min(token.balanceOf(account), token.allowance(account, address(this))));
+        }
+        minFeeWindowOf[account] = MinFeeWindow({
+            start: window.start, notional: SafeCast.toUint192(cumulative), paid: window.paid + charged
+        });
+        if (due == 0) return;
         if (charged > 0) token.safeTransferFrom(account, feeRecipient, charged);
         emit MinFeeCharged(account, notional, due, charged);
+    }
+
+    /// @dev The account's window as of now; an expired (or never opened) one starts afresh at this block.
+    function _currentMinFeeWindow(address account) internal view returns (MinFeeWindow memory window) {
+        window = minFeeWindowOf[account];
+        if (window.start == 0 || block.timestamp >= uint256(window.start) + MIN_FEE_WINDOW) {
+            window.start = SafeCast.toUint64(block.timestamp);
+            window.notional = 0;
+            window.paid = 0;
+        }
+    }
+
+    /// @dev What the window still owes once its cumulative notional is `cumulative`: T(cumulative) - paid.
+    function _minFeeDue(uint256 cumulative, uint256 paid, uint16 feeBps) internal view returns (uint256) {
+        uint256 owed = _minFeeTopUp(cumulative, feeBps);
+        return owed > paid ? owed - paid : 0;
     }
 
     // ---- buy limit ----
@@ -445,7 +508,9 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev Account value in numeraire units: its numeraire balance plus, for every other asset of its pinned
     /// version it holds, the oracle quote (`quoted`, before slippage) for selling the whole balance. An asset
     /// the oracle cannot price (stale, cleared) counts as zero: that only lowers the cap, i.e. fails closed,
-    /// instead of blocking the whole batch. Tokens outside the pinned version are not counted.
+    /// instead of blocking the whole batch. Tokens outside the pinned version are not counted. Likewise an asset
+    /// whose `balanceOf` reverts, answers with less than one word or needs more than `BALANCE_OF_GAS` counts as zero (cre8-contracts#47): a
+    /// provider must not be able to brick every buy of a version with such a token.
     function _accountValue(address account, AtpRegistry.Enrollment memory enrollment)
         internal
         view
@@ -456,12 +521,27 @@ contract AtpExecutor is ReentrancyGuard {
         for (uint256 i; i < assets.length; ++i) {
             address asset = assets[i];
             if (asset == numeraire) continue;
-            uint256 balance = IERC20(asset).balanceOf(account);
+            uint256 balance = _balanceOrZero(asset, account);
             if (balance == 0) continue;
             try oracle.previewSwap(asset, numeraire, balance) returns (uint256 quoted, uint256) {
                 value += quoted;
             } catch { }
         }
+    }
+
+    /// @dev `asset.balanceOf(account)`, or 0 when the call reverts, returns less than one word, or needs more
+    /// than `BALANCE_OF_GAS`. Low-level, not `try`: a call that succeeds with short return data would make a
+    /// `try`'s decoding revert in this frame, which no `catch` clause catches. The gas cap and copying only the
+    /// first return word keep a hostile token from burning the batch's gas (a loop, or a huge return payload).
+    function _balanceOrZero(address asset, address account) internal view returns (uint256 amount) {
+        bytes memory data = abi.encodeCall(IERC20.balanceOf, (account));
+        bool ok;
+        assembly {
+            ok := staticcall(BALANCE_OF_GAS, asset, add(data, 32), mload(data), 0, 32)
+            if lt(returndatasize(), 32) { ok := 0 }
+            amount := mload(0)
+        }
+        if (!ok) amount = 0;
     }
 
     // ---- step checks ----

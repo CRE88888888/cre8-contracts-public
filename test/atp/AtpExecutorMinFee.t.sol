@@ -8,6 +8,23 @@ import { AtpRegistry } from "../../src/atp/AtpRegistry.sol";
 import { MockPermit2, MockUniversalRouter } from "./AtpExecutor.t.sol";
 import { BurnableToken, PricedOracle, PricedRouter } from "./AtpExecutorBuyLimit.t.sol";
 
+/// @dev A second enrolled account (the executor requires `msg.sender == account` and code there).
+contract MinFeeAccount {
+    AtpExecutor internal immutable executor;
+
+    constructor(AtpExecutor executor_) {
+        executor = executor_;
+    }
+
+    function approve(address token) external {
+        BurnableToken(token).approve(address(executor), type(uint256).max);
+    }
+
+    function run(AtpExecutor.SwapStep[] calldata steps, uint256 deadline) external {
+        executor.executeRebalance(address(this), steps, deadline);
+    }
+}
+
 /// @notice Pins the minimum batch fee (cre8-contracts#33, docs P12): a batch with at least one swap pays
 /// `max(notional x feeBps, min(minBatchFee, notional x 1%))` in total. The proportional part is split off each
 /// step's output as before (so every floor check is unchanged); the top-up is pulled in USDT from the account
@@ -402,6 +419,117 @@ contract AtpExecutorMinFeeTest is Test {
         registry.setDefaultFeeBps(0);
         assertEq(executor.minFeeTopUp(strategyId, 299e18), MIN_FEE);
         assertEq(executor.minFeeTopUp(strategyId, 10_000e18), MIN_FEE, "flat 0.30 at any size");
+    }
+
+    // ---- one minimum per account per window (cre8-contracts#47 #2) ----
+
+    /// @dev A 100 USDT purchase the backend splits into four 25 USDT batches inside the window. Per batch the
+    /// top-up would be 0.225 each (0.90 in all, three times the one-batch 0.20); per window it is
+    /// max over the prefixes of (min(0.30, 1% x cumulative) - 0.1% x cumulative): 0.225 (25), 0.25 (50), 0.225
+    /// (75), 0.20 (100), so 0.25 in all - never more than one 0.30 on top of the proportional fee.
+    function test_splitPurchase_withinWindow_paysOneMinimum() public {
+        usdt.mint(address(this), 101e18);
+        for (uint256 i; i < 4; ++i) {
+            _exec(_one(_buy(25e18)));
+            vm.warp(block.timestamp + 10 minutes);
+        }
+        assertEq(_usdt(FEE_RECIPIENT), 0.25e18, "one window, one minimum");
+        uint256 proportional = tokenA.balanceOf(FEE_RECIPIENT) * 2; // A at 2 USDT
+        assertLe(_usdt(FEE_RECIPIENT) + proportional, 0.1e18 + MIN_FEE + 1, "<= proportional + one minimum");
+    }
+
+    /// @dev A dust batch first cannot use up the window's minimum: the window as a whole still pays what one
+    /// batch of its cumulative notional would (100 USDT -> 0.20).
+    function test_dustFirstBatch_cannotDodgeTheMinimum() public {
+        usdt.mint(address(this), 101e18);
+        _exec(_one(_buy(1e18))); // min(0.30, 0.01) - 0.001 = 0.009
+        assertEq(_usdt(FEE_RECIPIENT), 0.009e18);
+        _exec(_one(_buy(99e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0.2e18, "the same as one 100 USDT batch");
+    }
+
+    /// @dev The window is fixed: it opens with the account's first charged batch and a batch at or after
+    /// `start + MIN_FEE_WINDOW` opens the next one, which owes a fresh minimum.
+    function test_minFeeWindow_resetsAtExactlyOneHour() public {
+        usdt.mint(address(this), 200e18);
+        uint256 start = block.timestamp;
+        _exec(_one(_buy(25e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0.225e18);
+
+        vm.warp(start + 1 hours - 1); // still the same window: only up to T(50) = 0.25
+        _exec(_one(_buy(25e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0.25e18, "same window");
+
+        vm.warp(start + 1 hours); // a new window: a fresh 0.225
+        _exec(_one(_buy(25e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0.475e18, "new window");
+    }
+
+    /// @dev What a batch could not pay (no USDT left after the buy) stays owed inside the window: the next batch
+    /// pays the window's deficit, here min(0.30, 2.00) - 0.20 = 0.10 after a 100 buy and a 100 sale.
+    function test_shortfall_isOwedByTheNextBatchInTheWindow() public {
+        usdt.mint(address(this), 100e18);
+        _exec(_one(_buy(100e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0, "nothing left to charge");
+
+        tokenA.mint(address(this), _aForGross(100e18));
+        _exec(_one(_sell(_aForGross(100e18))));
+        assertEq(_usdt(FEE_RECIPIENT), 0.1e18 + 0.1e18, "sale's 0.1% + the window's remaining 0.10");
+    }
+
+    /// @dev Windows are per account: another account's batch neither uses up nor shares this one's minimum.
+    function test_minFeeWindow_isPerAccount() public {
+        usdt.mint(address(this), 26e18);
+        _exec(_one(_buy(25e18)));
+        assertEq(_usdt(FEE_RECIPIENT), 0.225e18);
+
+        MinFeeAccount other = new MinFeeAccount(executor);
+        vm.prank(OPERATOR);
+        registry.enroll(address(other), strategyId);
+        usdt.mint(address(other), 26e18);
+        other.approve(address(usdt));
+        other.approve(address(tokenA));
+        other.run(_one(_buy(25e18)), block.timestamp + 300);
+        assertEq(_usdt(FEE_RECIPIENT), 0.45e18, "its own 0.225");
+    }
+
+    /// @dev `minFeeDue` is what the next batch of the window is charged; 0 for an empty batch.
+    function test_minFeeDue_predictsTheWindowCharge() public {
+        usdt.mint(address(this), 101e18);
+        assertEq(executor.minFeeDue(address(this), 0), 0);
+        assertEq(executor.minFeeDue(address(this), 25e18), 0.225e18, "fresh window = one-batch top-up");
+        _exec(_one(_buy(25e18)));
+        assertEq(executor.minFeeDue(address(this), 25e18), 0.025e18, "T(50) - 0.225");
+        assertEq(executor.minFeeDue(address(this), 50e18), 0, "T(75) < paid");
+        (uint64 start, uint192 notional, uint256 paid) = executor.minFeeWindowOf(address(this));
+        assertEq(start, block.timestamp);
+        assertEq(notional, 25e18);
+        assertEq(paid, 0.225e18);
+        vm.warp(block.timestamp + 1 hours);
+        assertEq(executor.minFeeDue(address(this), 25e18), 0.225e18, "expired window starts afresh");
+    }
+
+    /// @dev Over any sequence of batches inside one window: the top-ups total at least what one batch of the
+    /// cumulative notional owes (no splitting around the minimum), at most one `minBatchFee`, and each batch's
+    /// top-up is at most what it would pay alone, up to 1 wei of rounding (the account holds enough USDT, so
+    /// nothing is carried).
+    function testFuzz_windowTopUps_boundedByOneMinimum(uint64[5] calldata sizes) public {
+        uint256 cumulative;
+        uint256 before;
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 amount = bound(sizes[i], 1e15, 400e18);
+            usdt.mint(address(this), amount + 1e18);
+            uint256 alone = executor.minFeeTopUp(strategyId, amount);
+            before = _usdt(FEE_RECIPIENT);
+            _exec(_one(_buy(amount)));
+            // T is subadditive up to rounding: both terms round down, so a batch may pay 1 wei more than alone.
+            assertLe(_usdt(FEE_RECIPIENT) - before, alone + 1, "no batch pays more than alone");
+            cumulative += amount;
+            assertGe(
+                _usdt(FEE_RECIPIENT), executor.minFeeTopUp(strategyId, cumulative), ">= one batch of the sum"
+            );
+            assertLe(_usdt(FEE_RECIPIENT), MIN_FEE, "<= one minimum per window");
+        }
     }
 
     // ---- the formula ----

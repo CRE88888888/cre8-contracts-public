@@ -8,7 +8,7 @@ cre8-contracts#30（測試網 T1）。這份文件說明整套合約怎麼部署
 
 | 項目 | 內容 |
 | --- | --- |
-| 測試 USDT | `TestnetUSDT`，18 decimals，是計價資產。內建水龍頭：每個地址每 24 小時最多領 10,000（`claim`）；minter 可以代領（`claimFor`），同樣受這個上限；minter 另外可以不限量 `mint`。 |
+| 測試 USDT | `TestnetUSDT`，18 decimals，是計價資產。內建水龍頭只由 faucet 角色（operator）操作（#47）：`claimFor` 每個地址每 24 小時最多 1,000（參數表 §4 的每日領取）；`welcomeFor` 是迎新，每個地址一次 10,000（`WELCOME_AMOUNT`）。沒有任何人可呼叫的 `claim`（全站每日上限與每人每天一次由 backend 控管，公開的 `claim` 會讓任何地址繞過）。faucet 不能 `mint`；不限量的 `mint` 只屬於 minter，部署完成後 USDT 沒有任何 minter，要由 owner 指派。 |
 | 92 個模擬資產 | `script/testnet/TestnetAssets.sol`。**主網仍然只有 38 個**（`AtpMainnetSpecs`、`DeployAtpMainnet` 沒有改）。<br>① 前 38 個是上線資產（#30）：清單、順序、secondary 的選擇與 `maxSlippageBps` 分級和主網的 `AtpMainnetSpecs` 相同（#25：USDC、DAI 50 bps；WBNB、BTCB、ETH、QQQB、XAUt、NVDAB 100 bps；其餘 300 bps；`test_specs_matchMainnetTiersAndFeedChoice` 逐一比對）；symbol、decimals、fee tier、`uiMultiplier` 取自主網區塊 133542361（只讀）。<br>② 40 個是測試網 16 檔展示基金（Leopold Aschenbrenner、Gavin Baker、Ken Griffin、AI Buildout、Ray Dalio、Lyn Alden、David Einhorn、Berkshire、Pelosi、Mag7、Bill Ackman、Druckenmiller、Treasury Reserve、郭明錤、Raoul Pal、Multi-Asset Balanced）用到、但不在上線清單的 token（#39）：cre8-app `funds.json` 這 16 檔 `backtest.targets[]` 中 `weight > 0` 的聯集，主網代幣地址查 `assets.json`。<br>③ 14 個加密貨幣（#39）：ADA、LINK、BCH、NEAR、UNI、ZEC、TONCOIN（CoinGecko 2026-11-15 排除穩定幣的市值前 30 名中，在 BSC 有 Binance-Peg 或官方 BEP20、且還沒上的；BCH、NEAR、UNI 也是目錄 crypto 類還沒上的）；DOT、SHIB、PEPE、AAVE、Cake、FIL、ATOM（issue 點名）。<br>②③ 只在測試網：`maxSlippageBps` 一律 300、沒有 secondary；symbol、名稱、decimals、`uiMultiplier` 取自主網區塊 133693735（只讀；所以 TON 的 symbol 是 `TONCOIN`、9 decimals，CAKE 是 `Cake`）。`test_specs_testnetExtension_exactList` 逐一比對這 54 個 symbol。<br>44 個 bStock（24＋20）用 `TestnetBStock`，讀取介面和主網 bStock 一樣（`uiMultiplier`、`toUIAmount`、`fromUIAmount`、`balanceOfUI`）；池子與 oracle 一律用 raw 價格，倍率只給畫面換算。 |
 | 92 個 Pancake V3 池 | 每個資產對測試 USDT 各一個池。起始價取 6 位有效數字（固定基準，不是即時行情）。①：fee tier 與起始價取自主網池（38 個）。②③：主網對 USDT 的 V3 池在 USDT 那邊有 1,000 USDT 以上的，用 USDT 最多那個池的 fee 與現價（8 個：LLYB、ADA、LINK、NEAR、UNI、ZEC、PEPE、Cake）；其他主網池大多是空池、報價離譜（例如 DOT 有個池報 3.4e38 USDT），不採用，改用 fee 2500，價格用目錄最後收盤（股票／ETF，2026-11-09，USD 每股，bStock 再乘 `uiMultiplier`；Ondo 代幣的累積配息沒加上；39 個）或 CoinGecko 現價（加密貨幣，2026-11-15；7 個：BCH、TONCOIN、DOT、SHIB、AAVE、FIL、ATOM）。每一筆的來源寫在該行註解。全區間流動性每邊 500 萬 USDT 等值。`observationCardinalityNext` 設為 600。 |
 | registry／oracle router／executor | 參數和 `DeployAtpMainnet` 相同：TWAP 30 分鐘、近期均值 5 分鐘、`maxOracleAge` 1 小時、`maxBuyBps` 10000、secondary 偏差 200 bps。venue 只有 Pancake V3 Universal Router（建構時登錄）。KyberSwap 不支援 97，所以不加入。 |
@@ -35,16 +35,18 @@ cre8-contracts#30（測試網 T1）。這份文件說明整套合約怎麼部署
 
 | 角色 | 地址 | 權限 | 部署時分到的 tBNB |
 | --- | --- | --- | --- |
-| deployer | `0x55662B4183fcA1230694D5D57F56E4F2E0e3008a` | 部署全部合約；擁有模擬資產與價格源（可指派 minter 與 keeper）；持有 LP 部位 | 使用者打入 |
-| owner | `0x09BBB9A06a0C49Ad24bddB18808944041783054e` | 代替主網 Safe：registry、router、paymaster 的 owner；也是 executor 的管理者（executor 以 registry owner 為管理者） | 0.01 |
-| operator | `0xd8CE3295e05cA138e0d0d7214C4FD630c43F9d7F` | registry operator（後端 relayer，負責第一次 enroll）；測試 USDT 的 minter（水龍頭 `claimFor`） | 0.05 |
-| keeper | `0xa38dDFB9FDF0043Cf61B00E1a8d12FA1431f92d5` | 唯一能推價的地址；所有模擬資產的 minter（調池用） | 0.3 |
+| deployer | `0x55662B4183fcA1230694D5D57F56E4F2E0e3008a` | 部署全部合約；建市場期間擁有模擬資產與價格源、持有 LP 部位；部署完成後全部移交 owner，自己不留任何權限（#47，見下方） | 使用者打入 |
+| owner | `0x09BBB9A06a0C49Ad24bddB18808944041783054e` | 代替主網 Safe：registry、router、paymaster 的 owner；也是 executor 的管理者（executor 以 registry owner 為管理者）；#47 起也是測試 USDT、92 個模擬資產、12 個價格源的 owner，並持有全部 LP NFT | 0.01 |
+| operator | `0xd8CE3295e05cA138e0d0d7214C4FD630c43F9d7F` | registry operator（後端 relayer，負責第一次 enroll）；測試 USDT 的 faucet（`claimFor`、`welcomeFor`，有上限，不能 `mint`，#47） | 0.05 |
+| keeper | `0xa38dDFB9FDF0043Cf61B00E1a8d12FA1431f92d5` | 唯一能推價的地址；92 個模擬資產的 minter（調池用）；**不是** USDT minter，USDT 庫存由部署時一次撥 2,000,000（`KEEPER_USDT_STOCK`，#47） | 0.3 |
 | paymaster-signer | `0xF5645Ff8Fa773246010F7C9DDDFF8e590e800495` | 鏈下簽 `VerifyingPaymaster` 代付 | 0（不送交易） |
 | fee-recipient | `0x3b5EDE5aF574e7d8f3B72143E09DC242dD1F0462` | 收 executor 手續費 | 0 |
 | bundler-executor | `0xcc0ea01356d75aa5295d364344753f136b77ee28` | alto `--executor-private-keys`，送 `handleOps`，gas 由 EntryPoint 從 paymaster 存款補回 | 0.1 |
 | bundler-utility | `0x6735c14bf84c8cB0d64BF2FB51b7587AdE7b2960` | alto `--utility-private-key` | 0.02 |
 
-registry、router 用兩步移交：deployer 提議、owner 接受，兩步都在同一次部署內完成。paymaster 是 OpenZeppelin `Ownable`，一步移交。移交之後重跑腳本，需要管理權限的設定改由 owner 送出，所以公開鏈上要同時提供 deployer 和 owner 兩把金鑰。分發規則是「餘額低於目標一半才補到目標」，所以重跑不會重複轉帳。paymaster 存款目標可以用 `TESTNET_PAYMASTER_DEPOSIT`（單位 wei）覆寫。
+registry、router 用兩步移交：deployer 提議、owner 接受，兩步都在同一次部署內完成。paymaster 是 OpenZeppelin `Ownable`，一步移交。移交之後重跑腳本，需要管理權限的設定改由 owner 送出，所以公開鏈上要同時提供 deployer 和 owner 兩把金鑰。
+
+deployer 建的東西也全部移交（#47）：先撥 keeper 的 USDT 庫存（deployer 最後一次 mint），再對 USDT 和 92 個模擬資產撤銷自己的 minter、把 owner 移給 owner 角色；12 個價格源的 owner 移給 owner 角色；deployer 持有的全部 LP NFT 轉給 owner 角色。這一步只在「這一輪沒有建池、也沒有對任何池子 mint」時執行，因為補 observation 的 poke mint 需要 deployer 的 mint 權限；否則印 `PENDING_HANDOVER`，`deploy-97.sh` 等幾秒重跑。完成後 `_verify` 會檢查 deployer 沒有任何 minter、owner 或 LP NFT 殘留。移交後要再 mint（例如補 keeper 的 USDT），由 owner 指派 minter。分發規則是「餘額低於目標一半才補到目標」，所以重跑不會重複轉帳。paymaster 存款目標可以用 `TESTNET_PAYMASTER_DEPOSIT`（單位 wei）覆寫。
 
 ## 3. 需要多少 tBNB
 
@@ -71,7 +73,7 @@ registry、router 用兩步移交：deployer 提議、owner 接受，兩步都�
 
 **keeper 的持續成本（#39）：** 每個池子每小時至少要有一筆會動 tick 的成交（見第 6 節第 3 點）。`fork-e2e.sh` 第 4 步量的穩態是每小時 92 筆 swap、10,953,177 gas（平均每筆約 11.9 萬），一天 24 輪約 2.63 億 gas，gas price 0.1 gwei 時**每天約 0.026 tBNB**，在 0.05 以內，所以 `maxOracleAge` 維持 1 小時、不另外加長。keeper 分到的 0.3 tBNB 只算調池（不含推價）大約夠 11 天，之後要補。第一輪另外要 mint 庫存、approve（278 筆、20,243,660 gas，約 0.002 tBNB，只有一次）。
 
-在 fork 上實測的代付成本（#39，2026-11-15）：owner 的 approve UserOp（4 筆）用了 277,473 gas；session key 的 rebalance UserOp（3 筆買入）用了 1,257,325 gas。0.1 gwei 時 0.5 tBNB 的存款約可代付 4,000 筆這樣的 rebalance，或約 3,200 組「approve＋rebalance」。
+在 fork 上實測的代付成本（#39，2026-11-15）：owner 的 approve UserOp（4 筆）用了 277,473 gas；session key 的 rebalance UserOp（3 筆買入）用了 1,257,325 gas。0.1 gwei 時 0.5 tBNB 的存款約可代付 4,000 筆這樣的 rebalance，或約 3,200 組「approve＋rebalance」（`DeployTestnet` 的 `PAYMASTER_DEPOSIT` 註解與參數表 §4 用同一個數字，#47）。
 
 ## 4. 本機 fork 驗收（不碰公開鏈）
 
@@ -96,7 +98,7 @@ fork 不在 8547 時加 `FORK_RPC=http://127.0.0.1:<埠>`；在還沒合併的�
 
 1. 跑兩次 `deploy-97.sh fork`。第二次必須沒有交易，manifest 也不能變。
 2. 把 fork 的時間往前推 30 分鐘做 TWAP 暖機，再由 keeper 推一次價。
-3. `SmokeTestnet`（#45 起）：一個策略版本包含 USDT＋全部 92 個資產（共 93 個），一個新帳戶從水龍頭領 10,000 USDT（每日上限）、enroll，每個資產經 executor 用 100 USDT 買入（合計 9,200，在 executor 每 24 小時「帳戶價值 100%」的買入上限內）、全部賣回，最後把 USDT 領回 EOA。買和賣都照後端的做法分批，每批最多 16 步（`SMOKE_STEPS_PER_BATCH` 可改），每一步都要過 oracle 地板。最後印出發版本、每一批與領出的 gas（見第 8 節）。
+3. `SmokeTestnet`（#45 起）：一個策略版本包含 USDT＋全部 92 個資產（共 93 個），一個新帳戶由 operator 發迎新 10,000 USDT（`welcomeFor`，#47）、enroll，每個資產經 executor 用 100 USDT 買入（合計 9,200，在 executor 每 24 小時「帳戶價值 100%」的買入上限內）、全部賣回，最後把 USDT 領回 EOA。買和賣都照後端的做法分批，每批最多 16 步（`SMOKE_STEPS_PER_BATCH` 可改），每一步都要過 oracle 地板。最後印出發版本、每一批與領出的 gas（見第 8 節）。
 4. `PokePoolsTestnet` 兩輪（#39）：keeper 經 Pancake V3 SwapRouter（和 backend 價格 keeper 同一個）在每個池子做一筆會動 tick 的 swap（1,000 USDT 等值，約 4 bps）。第一輪順便 mint 庫存、approve；第二輪把時間往後推 1 小時再做，就是「每小時每池一筆」的穩定成本，腳本印出總 gas（見第 3 節）。之後再推一次價。
 5. `kernel-smoke`：
    - 在本機起 alto（埠 3047），建立 Kernel v3.3 帳戶；
@@ -125,8 +127,9 @@ session key 的 GasPolicy 要設 `enforcePaymaster: true`、`allowedPaymaster: <
 scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；可用 BSC_TESTNET_RPC_URL 覆寫
 ```
 
-1. 腳本會在本機讀取 deployer 與 owner 的私鑰，並核對它們對應的地址；私鑰不會印出。
-2. 某個池子的第一筆流動性如果和建池落在同一秒，就不會寫入新的 observation（`observationCardinality` 停在 1，TWAP 不能用）。`deploy-97.sh` 會在鏈上檢查，遇到這種池子就等幾秒自動重跑（最多 3 次），重跑時只補一筆很小的 mint。
+1. 腳本會在本機讀取 deployer 與 owner 的私鑰，並核對它們對應的地址；私鑰不會印出，也不出現在任何命令列參數（#47）：`deploy-97.sh` 把 deployer、owner 的私鑰放在 forge 的環境變數 `TESTNET_DEPLOYER_KEY`、`TESTNET_OWNER_KEY`，`DeployTestnet` 用 `vm.rememberKey` 載入，並核對它們推得出 deployer、owner 的地址，不符就停下；`kernel-smoke/run-fork.sh` 的 bundler 金鑰改用 alto 的 `ALTO_EXECUTOR_PRIVATE_KEYS`、`ALTO_UTILITY_PRIVATE_KEY`。forge 的 log 暫存檔在腳本結束時刪除。
+2. 某個池子的第一筆流動性如果和建池落在同一秒，就不會寫入新的 observation（`observationCardinality` 停在 1，TWAP 不能用）。`DeployTestnet` 每一輪都從鏈上讀，遇到這種池子就補一筆很小的 mint，並印 `PENDING_HANDOVER`；`deploy-97.sh` 等幾秒自動重跑（最多 3 次），直到某一輪不必再 mint、完成移交。
+2a. 池子現價要在 spec 起始價 ±1% 以內（#47）：token 地址可以從公開 repo 算出來，別人可以先用任意價格建池。`DeployTestnet` 在加流動性之前、以及 `_verify` 時都會檢查，不符就停下（要換 fee tier 或先由 keeper 把價格推回）。
 3. **TWAP 暖機**：部署完成後至少等 30 分鐘，`previewSwap` 才會有報價；在那之前會回 `TwapUnavailable`，這是 fail-closed 的正常行為。#25 之後還有另一邊的時限：池子最新的 observation 超過 1 小時（`maxOracleAge`），報價也會 `TwapUnavailable`。所以部署完成後的第 30 到 60 分鐘之間，價格 keeper 就要開始讓每個池子成交，之後每個池子至少每小時要有一筆會動到 tick 的成交，否則那個資產會照設計停止交易。
 4. **keeper 要定期推價**：有 secondary 的 11 個資產，價格源超過 1 小時（AVAX 是 1 天）沒更新，就會 `StaleFeed`，那個資產停止交易。在價格重播 keeper（X1，T3）接手之前，可以先用 `PushFeedsTestnet` 推回固定的基準價：
 
@@ -145,7 +148,9 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
 
 ## 8. 一檔基金不設資產數上限（#45）
 
-`AtpRegistry` 原本把一個版本限制在 16 個資產（`MAX_VERSION_ASSETS`），#45 拿掉了（使用者 2026-11-15 決定），常數與 `TooManyAssets` 一起刪除。剩下的檢查不變：至少一個資產、長度相符、沒有重複、權重加總 10000。主網已部署的 registry 不受影響，`AtpMainnetSpecs`、`DeployAtpMainnet` 沒有改。
+`AtpRegistry` 原本把一個版本限制在 16 個資產（`MAX_VERSION_ASSETS`），#45 拿掉了（使用者 2026-11-15 決定），常數與 `TooManyAssets` 一起刪除。剩下的檢查：至少一個資產、長度相符、沒有重複、權重加總 10000；#47 另外要求每個資產地址都有 code、權重 0 只允許 numeraire（見第 9 節）。`AtpMainnetSpecs`、`DeployAtpMainnet` 沒有改。
+
+**主網已部署的 registry 仍有 16 檔上限（#47 #11）**：#45 只影響之後的新部署。`deployments/mainnet.json` 裡那份 registry 是 #45 之前的程式碼，發佈超過 16 個資產的版本會 revert `TooManyAssets`。在主網重新部署 registry 之前，backend 對 chain 56 保留 16 檔上限。
 
 **哪些流程會在一筆交易內走過全部資產：**
 
@@ -174,4 +179,23 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
 
 - **一筆做完全部 92 個不行**：買 2,248 萬、賣 2,146 萬，都超過 BSC 每筆交易 16,777,216 gas 的上限（EIP-7825，測試網 2026-03-24 啟用；anvil 用 cancun 不會擋，所以 fork 上能跑出數字）。一定要分批，executor 本來就支援（步驟由呼叫者決定），合約不用改。
 - **每批 16 步可行**：最貴的買入批次是持有越多時（估值越貴）。持有全部 92 個時再買 16 個，依上表線性推估約 1,060 萬 gas；換成 Kernel UserOp 約 ×1.3（docs `research/2026-11-15-perf-fee-and-asset-cap`）約 1,380 萬，仍在 1,678 萬以內，但餘裕約 18%。只賣出的批次每批約 400 萬。
-- **每日 gas 預算要依資產數放大**：一個帳戶把 92 個資產全部買一次要約 4,190 萬 gas、全部退出約 2,330 萬，都遠超過目前「每帳戶每日 10M gas」的測試網預算（docs `TESTNET_PARAMETERS` §4）。這是後端與參數表的事，合約不處理。
+- **每日 gas 預算要依資產數放大**：一個帳戶把 92 個資產全部買一次要約 4,190 萬 gas、全部退出約 2,330 萬。參數表 §4 已把測試網的每帳戶每日預算改成 100M gas，兩者都在預算內。這是後端與參數表的事，合約不處理。
+
+## 9. 部署前審查修正（#47）
+
+**手續費（#1、#2、#9）**
+- 測試網 registry 的預設換幣費設為 10 bps（`DEFAULT_FEE_BPS`），加上 executor 的 `minBatchFee` 0.30 USDT，就是參數表 §3 的 max(0.1%, 0.30 USDT)；`_verify` 檢查。主網 `DeployAtpMainnet` 沒有改，仍要求預設費率為 0，主網費率由人決定（部署時設或由 Safe 事後設）。
+- **最低費每個帳戶每個時間窗只收一次**：參數表的「批」是使用者同一時間到期的一次投入，不是技術上拆出的 UserOp（後端每批最多 16 步）。executor 對每個帳戶記一個固定 1 小時的時間窗（`MIN_FEE_WINDOW`，由該帳戶第一筆有 swap 的批次開啟），把窗內所有批次當成一批：窗內累計成交量 c 的一批應補 T(c) = max(0, min(0.30, 1%×c) − 0.1%×c)，每一批只補「T(c) − 窗內已補」。所以：
+  - 一筆 100 USDT 拆成 4 批 25：以前補 0.225×4 = 0.90，現在合計 0.25（加上比例費 0.10，共 0.35）；
+  - 先送一筆 1 USDT 的小批次不能把最低費用掉：之後同窗再買 99，窗內合計補到 0.20，和一次買 100 一樣；
+  - 一個時間窗補的錢永遠不超過一個 0.30，也不低於「把整窗當一批」該補的；每一批也不會比它單獨成批時補得多（差 1 wei 的捨入）；
+  - 帳戶 USDT 不夠時少收的部分，同一個窗內的下一批補收；窗過了就不追。
+  - 取捨：拆得很碎時，前幾批先補的 1% 上限部分，之後累計變大也不退，所以可能比「理想的一批」多收（上例多 0.05），但不會超過一個 0.30。同一個小時內兩次不同的投入也只收一次最低費。`minFeeDue(account, notional)` 給後端預估下一批要補多少。
+  - 這是核心合約改動：之後主網新部署的 executor 也是這個行為（`DeployAtpMainnet` 一字未改，但它部署的是 `src/atp/AtpExecutor.sol`）；主網已部署的 executor 不受影響。
+- **最低費上限 1%（#9）**：補收的最低費不超過該批（#47 起是該時間窗累計）成交量的 1%（`MIN_FEE_MAX_BPS`），所以 30 USDT 以下收不到 0.30。例如每個資產最少 1 USDT 的定期定額、零碎的出場。參數表 §3 由 C3 補上。
+
+**資產驗證（#4）**：`publishVersion` 要求每個資產地址有 code（EOA 會讓含買入的批次全部 revert），權重 0 只允許 numeraire。registry 不知道 numeraire 是誰，所以新增 owner 只能設一次的 `setNumeraire`；沒設之前任何資產都不能是權重 0（fail closed）。測試網部署時設為測試 USDT。**主網之後若重新部署 registry，Safe 要呼叫 `setNumeraire(USDT)`，否則後端以權重 0 送 USDT 的版本會 revert**（`DeployAtpMainnet` 不能改，所以這一步不在腳本裡）。executor 估值時對每個資產的 `balanceOf` 改用 staticcall，revert 或回傳不足 32 bytes 都當 0（fail closed，只會降低買入上限）。不設資產數上限（使用者決定）。
+
+**水龍頭與權限（#3、#6、#7）**：見第 1、2 節。
+
+**搶先建池（#8）**：見第 6 節第 2a 點。

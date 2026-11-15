@@ -63,6 +63,9 @@ contract AtpRegistry {
     uint16 public defaultSwapFeeBps;
     /// @notice Per-strategy swap fee override; 0 means "use `defaultSwapFeeBps`".
     mapping(uint256 => uint16) public feeBps;
+    /// @notice The executor's numeraire (USDT), set once by the owner: the only asset a version may list at
+    /// weight 0. Zero (unset) means no asset may have weight 0.
+    address public numeraire;
 
     // ---- strategy / version ----
     mapping(uint256 => StrategyMeta) public strategies;
@@ -87,6 +90,7 @@ contract AtpRegistry {
     event OperatorUpdated(address indexed previousOperator, address indexed newOperator);
     event DefaultFeeBpsUpdated(uint16 bps);
     event FeeBpsUpdated(uint256 indexed id, uint16 bps);
+    event NumeraireSet(address indexed numeraire);
     event StrategyRegistered(uint256 indexed id, address indexed provider, string name);
     event VersionPublished(uint256 indexed id, uint16 version, bytes32 scheduleHash);
     event Enrolled(address indexed account, uint256 id, uint16 version);
@@ -110,6 +114,11 @@ contract AtpRegistry {
     /// @dev The operator may only make an account's first enrollment; changing an enrolled account's
     /// strategy or version is the account's own call.
     error AlreadyEnrolled(address account);
+    /// @dev A version asset (or the numeraire) with no code: every buy would revert valuing it.
+    error NotContract(address asset);
+    /// @dev Weight 0 for an asset other than the numeraire.
+    error ZeroWeight(address asset);
+    error NumeraireAlreadySet();
 
     constructor() {
         owner = msg.sender;
@@ -157,6 +166,15 @@ contract AtpRegistry {
         _checkFee(bps);
         feeBps[id] = bps;
         emit FeeBpsUpdated(id, bps);
+    }
+
+    /// @notice Name the numeraire (the executor's USDT), once: from then on it is the only asset a version may
+    /// list at weight 0. Before it is set no asset may have weight 0.
+    function setNumeraire(address numeraire_) external onlyOwner {
+        if (numeraire != address(0)) revert NumeraireAlreadySet();
+        if (numeraire_.code.length == 0) revert NotContract(numeraire_);
+        numeraire = numeraire_;
+        emit NumeraireSet(numeraire_);
     }
 
     // ---- strategy / version ----
@@ -309,15 +327,20 @@ contract AtpRegistry {
     /// asset-count ceiling (cre8-contracts#45). Swaps are per step, so a large rebalance or exit is split over
     /// several `executeRebalance` batches; only this publish and the executor's account valuation (once per
     /// batch with a buy) walk the whole list in one transaction. docs/testnet-97.zh-TW.md has the gas per
-    /// flow measured for a 93-asset version.
-    function _validateVersion(address[] calldata assets, uint16[] calldata weightsBps) internal pure {
+    /// flow measured for a 93-asset version. Every asset must be a contract and have a positive weight, except
+    /// the numeraire, which may have weight 0 (cre8-contracts#47).
+    function _validateVersion(address[] calldata assets, uint16[] calldata weightsBps) internal view {
         uint256 count = assets.length;
         if (count == 0) revert EmptyAssets();
         if (count != weightsBps.length) revert LengthMismatch();
+        address numeraire_ = numeraire;
         uint256 sum;
         for (uint256 i; i < count; ++i) {
             address asset = assets[i];
             if (asset == address(0)) revert ZeroAddress();
+            if (asset.code.length == 0) revert NotContract(asset);
+            // `asset` is never zero, so an unset numeraire matches no asset.
+            if (weightsBps[i] == 0 && asset != numeraire_) revert ZeroWeight(asset);
             for (uint256 j; j < i; ++j) {
                 if (assets[j] == asset) revert DuplicateAsset(asset);
             }

@@ -107,15 +107,19 @@ contract TestnetBStock is TestnetToken {
 }
 
 /// @title TestnetUSDT
-/// @notice The testnet numeraire (18 decimals, like BSC USDT) with a capped self-service faucet: any address may
-/// claim up to `dailyLimit` per fixed 24-hour window (it opens with the address's first claim, like the
-/// executor's buy window). A minter (the backend's faucet role) may claim on a user's behalf through the same
-/// per-recipient cap, which is how a gasless app grants test money without handing out the minter role.
-/// @dev The cap is per address, so it bounds a careless client, not a determined one creating many addresses;
-/// sybil control belongs to the backend's claim API (login, rate limits). Minters can still `mint` without a cap
-/// for liquidity and keeper work.
+/// @notice The testnet numeraire (18 decimals, like BSC USDT) with a capped faucet run by the backend. Only a
+/// faucet address (the backend operator, appointed by the owner) can hand out test money, and only in two capped
+/// ways: `claimFor` up to `dailyLimit` per recipient per fixed 24-hour window (it opens with the recipient's first
+/// claim, like the executor's buy window), and `welcomeFor`, the one-off welcome grant of `WELCOME_AMOUNT` per
+/// recipient. There is no self-service claim (cre8-contracts#47): the parameter table's per-user and site-wide
+/// limits live in the backend's claim API (login, quotas), which a public `claim` let any address bypass.
+/// @dev Faucet and minter are separate roles (cre8-contracts#47): a faucet cannot `mint`, so a leaked operator key
+/// can only grant capped amounts per address. Uncapped `mint` stays with minters (the deployer while it seeds the
+/// pools; after the hand-over only whom the owner appoints).
 contract TestnetUSDT is TestnetToken {
     uint256 public constant CLAIM_WINDOW = 1 days;
+    /// @notice One-off welcome grant per recipient (parameter table: 10,000 test USDT per new user).
+    uint256 public constant WELCOME_AMOUNT = 10_000e18;
 
     struct ClaimWindow {
         uint64 start;
@@ -124,11 +128,17 @@ contract TestnetUSDT is TestnetToken {
 
     uint256 public dailyLimit;
     mapping(address => ClaimWindow) public claimWindowOf;
+    mapping(address => bool) public isFaucet;
+    mapping(address => bool) public welcomed;
 
     event DailyLimitSet(uint256 limit);
+    event FaucetSet(address indexed faucet, bool allowed);
     event Claimed(address indexed to, uint256 amount, address indexed by);
+    event Welcomed(address indexed to, uint256 amount, address indexed by);
 
+    error NotFaucet();
     error ClaimLimitExceeded(uint256 requested, uint256 remaining);
+    error AlreadyWelcomed(address to);
     error ZeroAmount();
 
     constructor(address owner_, uint256 dailyLimit_) TestnetToken("Testnet USDT", "USDT", 18, owner_) {
@@ -136,9 +146,20 @@ contract TestnetUSDT is TestnetToken {
         emit DailyLimitSet(dailyLimit_);
     }
 
+    modifier onlyFaucet() {
+        if (!isFaucet[msg.sender]) revert NotFaucet();
+        _;
+    }
+
     function setDailyLimit(uint256 limit) external onlyOwner {
         dailyLimit = limit;
         emit DailyLimitSet(limit);
+    }
+
+    function setFaucet(address faucet, bool allowed) external onlyOwner {
+        if (faucet == address(0)) revert ZeroAddress();
+        isFaucet[faucet] = allowed;
+        emit FaucetSet(faucet, allowed);
     }
 
     /// @notice What `account` may still claim now, and when its current window resets (0 = no open window).
@@ -149,17 +170,9 @@ contract TestnetUSDT is TestnetToken {
         windowEndsAt = w.start + CLAIM_WINDOW;
     }
 
-    function claim(uint256 amount) external {
-        _claim(msg.sender, amount);
-    }
-
-    function claimFor(address to, uint256 amount) external {
-        if (!isMinter[msg.sender]) revert NotMinter();
+    /// @notice Daily faucet: grant `to` up to its remaining `dailyLimit` in the current window. Faucet only.
+    function claimFor(address to, uint256 amount) external onlyFaucet {
         if (to == address(0)) revert ZeroAddress();
-        _claim(to, amount);
-    }
-
-    function _claim(address to, uint256 amount) internal {
         if (amount == 0) revert ZeroAmount();
         (uint256 remaining, uint256 windowEndsAt) = claimable(to);
         if (amount > remaining) revert ClaimLimitExceeded(amount, remaining);
@@ -172,5 +185,15 @@ contract TestnetUSDT is TestnetToken {
         }
         _mint(to, amount);
         emit Claimed(to, amount, msg.sender);
+    }
+
+    /// @notice One-off welcome grant of `WELCOME_AMOUNT` to `to`; a second grant to the same address reverts.
+    /// Faucet only; independent of the daily claim window.
+    function welcomeFor(address to) external onlyFaucet {
+        if (to == address(0)) revert ZeroAddress();
+        if (welcomed[to]) revert AlreadyWelcomed(to);
+        welcomed[to] = true;
+        _mint(to, WELCOME_AMOUNT);
+        emit Welcomed(to, WELCOME_AMOUNT, msg.sender);
     }
 }

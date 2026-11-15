@@ -2,7 +2,8 @@
 # cre8-contracts#30 本機 chain 97 fork 整套驗收（不碰公開鏈）：
 #   1. deploy-97.sh fork 兩次：第一次全部部署，第二次必須「No transactions to broadcast」、manifest 不變
 #   2. TWAP 暖機：fork 時間往前推 30 分鐘；keeper 推一次價（PushFeedsTestnet）
-#   3. SmokeTestnet：一個版本含 USDT＋全部資產（#39 起 92 個，#45 起不設上限），一個帳戶經 executor 每個資產用
+#   3. SmokeTestnet：一個版本含 USDT＋全部資產（#39 起 92 個，#45 起不設上限），一個帳戶（#47 起由 operator
+#      發迎新 10,000 USDT）經 executor 每個資產用
 #      100 USDT 買入、全部賣回、領出 USDT；每批最多 16 步，每一步過 oracle 地板；印出發版本、每批、領出的 gas
 #   4. PokePoolsTestnet 兩輪（#39）：keeper 每個池子一筆會動 tick 的 swap；第一輪備庫存與 approve，
 #      第二輪在一小時後，是每小時的穩定成本（印出總 gas）
@@ -32,13 +33,16 @@ forge script script/testnet/PushFeedsTestnet.s.sol --rpc-url "$ETH_RPC_URL" --br
   | grep -E "push |ONCHAIN"
 
 echo "== 3. every-asset smoke through the executor =="
-SK="$(cast wallet new --json | jq -r '.data[0].private_key // .[0].private_key')"
-cast rpc anvil_setBalance "$(cast wallet address --private-key "$SK")" 0x8AC7230489E80000 >/dev/null
+# A fresh address (no key needed on the fork) runs the smoke; OPERATOR, the faucet, sends its welcome grant
+# (cre8-contracts#47 removed the self-service claim). Both impersonated, so no key is on any command line.
+SMOKE_EOA="$(cast wallet new --json | jq -r '.data[0].address // .[0].address')"
+OPERATOR="$(jq -r .roles.operator deployments/testnet-97.json)"
+cast rpc anvil_setBalance "$SMOKE_EOA" 0x8AC7230489E80000 >/dev/null
+for a in "$SMOKE_EOA" "$OPERATOR"; do cast rpc anvil_impersonateAccount "$a" >/dev/null; done
 SMOKE_LOG="$(mktemp -t cre8-smoke.XXXXXX)"
 TESTNET_EXECUTOR="$(jq -r .contracts.executor deployments/testnet-97.json)" \
   forge script script/testnet/SmokeTestnet.s.sol --tc SmokeTestnet --rpc-url "$ETH_RPC_URL" --broadcast --slow \
-  --private-key "$SK" | grep -E "SMOKE|ONCHAIN" | sed -E 's/^ +//' | tee "$SMOKE_LOG"
-unset SK
+  --unlocked --sender "$SMOKE_EOA" | grep -E "SMOKE|ONCHAIN" | sed -E 's/^ +//' | tee "$SMOKE_LOG"
 # Gas of the publish, every batch and the exit (#45), from the receipts of the transactions SmokeTestnet labelled.
 python3 -I -c '
 import json, sys

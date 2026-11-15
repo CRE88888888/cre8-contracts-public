@@ -43,6 +43,8 @@ contract AtpRegistryOperatorBoundsTest is Test {
     }
 
     function _publish(uint256 id, address asset) internal {
+        // Assets must be contracts since cre8-contracts#47; any code will do here.
+        vm.etch(asset, hex"00");
         address[] memory assets = new address[](1);
         assets[0] = asset;
         uint16[] memory weights = new uint16[](1);

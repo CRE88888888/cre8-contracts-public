@@ -3,6 +3,8 @@
 #
 #   scripts/testnet/deploy-97.sh fork     # 本機 chain 97 fork（anvil，預設 http://127.0.0.1:8547），impersonate，不用私鑰
 #   scripts/testnet/deploy-97.sh public   # 公開 chain 97：用 ~/.cre8-testnet/ 的 deployer 與 owner 金鑰（只在本機讀，不印出）
+#                                         # 金鑰只放在 forge 的環境變數（TESTNET_DEPLOYER_KEY／TESTNET_OWNER_KEY），
+#                                         # 不出現在任何命令列參數，`ps` 看不到；地址由 DeployTestnet 自己核對（#47）
 #
 # 先起 fork（要保留較長歷史的上游；data-seed 節點的歷史只有幾分鐘，部署跑到一半就 missing trie node）：
 #   anvil --fork-url https://bsc-testnet.publicnode.com --chain-id 97 --port 8547 --hardfork cancun \
@@ -46,6 +48,7 @@ DEPLOYER=0x55662B4183fcA1230694D5D57F56E4F2E0e3008a
 OWNER=0x09BBB9A06a0C49Ad24bddB18808944041783054e
 MANIFEST=deployments/testnet-97.json
 LOG="$(mktemp -t cre8-deploy-97.XXXXXX)"
+trap 'rm -f "$LOG"' EXIT
 
 case "$MODE" in
   fork)
@@ -55,15 +58,18 @@ case "$MODE" in
     # The fork inherits whatever the real DEPLOYER holds; give it enough for a full run (fork-only tBNB).
     [ "$(cast balance "$DEPLOYER")" -ge 2000000000000000000 ] || cast rpc anvil_setBalance "$DEPLOYER" 0x8AC7230489E80000 >/dev/null # 10 tBNB
     SIGNERS=(--unlocked --sender "$DEPLOYER")
+    KEY_ENV=()
     ;;
   public)
     export ETH_RPC_URL="${BSC_TESTNET_RPC_URL:-https://data-seed-prebsc-1-s1.bnbchain.org:8545}"
     if cast rpc anvil_nodeInfo >/dev/null 2>&1; then echo "$ETH_RPC_URL is an anvil node, use: fork"; exit 1; fi
-    DK="$(jq -r '.data[0].private_key' "$KEYS/deployer.json")"
-    OK="$(jq -r '.data[0].private_key' "$KEYS/owner.json")"
-    [ "$(cast wallet address --private-key "$DK")" = "$DEPLOYER" ] || { echo "deployer key mismatch"; exit 1; }
-    [ "$(cast wallet address --private-key "$OK")" = "$OWNER" ] || { echo "owner key mismatch"; exit 1; }
-    SIGNERS=(--private-keys "$DK" --private-keys "$OK" --sender "$DEPLOYER")
+    # Keys go to forge through its environment only (`env` puts them there, not on forge's command line);
+    # DeployTestnet loads them with vm.rememberKey and stops unless they derive DEPLOYER and OWNER.
+    KEY_ENV=(
+      "TESTNET_DEPLOYER_KEY=$(jq -r '.data[0].private_key' "$KEYS/deployer.json")"
+      "TESTNET_OWNER_KEY=$(jq -r '.data[0].private_key' "$KEYS/owner.json")"
+    )
+    SIGNERS=(--sender "$DEPLOYER")
     ;;
   *) echo "usage: deploy-97.sh fork|public"; exit 1 ;;
 esac
@@ -83,16 +89,19 @@ thin_pools() {
 # A run deploys at most TESTNET_MARKETS_PER_RUN (default 40) unfinished markets and prints PENDING_MARKETS <n>
 # while some are left (cre8-contracts#39: forge simulates a run as one call, which ran out of gas after ~56 of
 # 134 markets in an earlier draft), so the script is rerun until nothing is pending; each rerun must leave fewer
-# pending. Then up to 3 more runs fix thin pools.
+# pending. Then up to 3 more runs poke thin pools and hand DEPLOYER's tokens, feeds and LP NFTs to OWNER
+# (cre8-contracts#47): DeployTestnet only hands over in a run that minted into no pool and prints PENDING_HANDOVER
+# otherwise, so a thin pool is always poked before DEPLOYER gives up its mint.
 run=0
 thin_runs=0
 last_pending=""
 while :; do
   run=$((run + 1))
   echo "== DeployTestnet ($MODE, $ETH_RPC_URL) run $run =="
-  forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow "${SIGNERS[@]}" >"$LOG" 2>&1 \
-    || { tail -40 "$LOG"; echo "deploy failed, full log: $LOG"; exit 1; }
-  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
+  # `env` with an empty KEY_ENV (fork mode) adds nothing.
+  env ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow "${SIGNERS[@]}" >"$LOG" 2>&1 \
+    || { tail -80 "$LOG"; echo "deploy failed (last 80 lines of the forge log above; the log is removed on exit)"; exit 1; }
+  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS|PENDING_HANDOVER" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
   echo "new contracts and pools this run: $(grep -cE "^\s*(pool|deploy) +NEW" "$LOG" || true)"
   # No PENDING_MARKETS line on the last run: grep exits 1, which pipefail + set -e must not turn into an abort.
   PENDING="$(grep -E "^\s*PENDING_MARKETS " "$LOG" | awk '{print $2}' | tail -1 || true)"
@@ -106,15 +115,23 @@ while :; do
     continue
   fi
   last_pending=""
+  if grep -qE "^\s*PENDING_HANDOVER" "$LOG"; then
+    # This run created or poked a pool; the next one (a few seconds later, so a poke lands in a new second)
+    # either pokes a pool still thin on chain or, with nothing left to mint, hands over and verifies.
+    thin_runs=$((thin_runs + 1))
+    [ "$thin_runs" -gt 3 ] && { echo "pools still need a mint after 3 hand-over attempts"; exit 1; }
+    echo "pools minted this run -> hand-over on the next run (attempt $thin_runs of 3)"
+    sleep 4
+    [ "$MODE" = fork ] && cast rpc anvil_mine 1 >/dev/null
+    continue
+  fi
+  # The hand-over run read every pool from chain and minted nothing, so none can be thin; checked anyway,
+  # since DEPLOYER can no longer poke one.
   THIN="$(thin_pools | tr '\n' ' ')"
-  [ -z "$THIN" ] && break
-  thin_runs=$((thin_runs + 1))
-  echo "observationCardinality < 2: $THIN-> rerun after a few seconds"
-  [ "$thin_runs" = 3 ] && { echo "still thin after 3 runs"; exit 1; }
-  sleep 4
-  [ "$MODE" = fork ] && cast rpc anvil_mine 1 >/dev/null
+  [ -z "$THIN" ] || { echo "observationCardinality < 2 after the hand-over: $THIN"; exit 1; }
+  break
 done
-unset DK OK SIGNERS
+unset KEY_ENV SIGNERS
 
 echo "== manifest + eth_getCode =="
 BLOCK="$(cast block-number)"

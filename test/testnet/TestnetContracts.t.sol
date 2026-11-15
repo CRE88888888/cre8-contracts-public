@@ -38,6 +38,14 @@ contract DeployTestnetHarness is DeployTestnet {
     {
         return (TWAP_WINDOW, MAX_ORACLE_AGE, USDT_USD_MAX_AGE, SECONDARY_MAX_DEVIATION_BPS);
     }
+
+    function feeAndFaucetConstants()
+        external
+        pure
+        returns (uint16 defaultFeeBps, uint256 minBatchFee, uint256 faucetDailyLimit, uint256 keeperUsdtStock)
+    {
+        return (DEFAULT_FEE_BPS, MIN_BATCH_FEE, FAUCET_DAILY_LIMIT, KEEPER_USDT_STOCK);
+    }
 }
 
 /// @notice Unit tests for the chain-97-only mocks of cre8-contracts#30 and the deploy script's price math.
@@ -101,23 +109,31 @@ contract TestnetContractsTest is Test {
 
     // ---- TestnetUSDT faucet ----
 
+    address internal constant FAUCET = address(0xFA);
+
+    function _usdtWithFaucet() internal returns (TestnetUSDT usdt) {
+        usdt = new TestnetUSDT(OWNER, 1_000e18);
+        vm.prank(OWNER);
+        usdt.setFaucet(FAUCET, true);
+    }
+
     function test_faucet_capsEachAddressPerWindow() public {
-        TestnetUSDT usdt = new TestnetUSDT(OWNER, 1_000e18);
+        TestnetUSDT usdt = _usdtWithFaucet();
         vm.warp(1_000_000);
 
-        vm.prank(ALICE);
-        usdt.claim(600e18);
-        vm.prank(ALICE);
-        usdt.claim(400e18);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 600e18);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 400e18);
         assertEq(usdt.balanceOf(ALICE), 1_000e18);
 
         vm.expectRevert(abi.encodeWithSelector(TestnetUSDT.ClaimLimitExceeded.selector, 1, 0));
-        vm.prank(ALICE);
-        usdt.claim(1);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 1);
 
         // Another address has its own window.
-        vm.prank(BOB);
-        usdt.claim(1_000e18);
+        vm.prank(FAUCET);
+        usdt.claimFor(BOB, 1_000e18);
 
         // The window resets 24 hours after Alice's first claim, not after her last.
         vm.warp(1_000_000 + 1 days - 1);
@@ -125,39 +141,89 @@ contract TestnetContractsTest is Test {
         assertEq(remaining, 0);
         assertEq(endsAt, 1_000_000 + 1 days);
         vm.warp(1_000_000 + 1 days);
-        vm.prank(ALICE);
-        usdt.claim(1_000e18);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 1_000e18);
         assertEq(usdt.balanceOf(ALICE), 2_000e18);
 
         vm.expectRevert(TestnetUSDT.ZeroAmount.selector);
-        vm.prank(ALICE);
-        usdt.claim(0);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 0);
+        vm.expectRevert(TestnetToken.ZeroAddress.selector);
+        vm.prank(FAUCET);
+        usdt.claimFor(address(0), 1);
     }
 
-    function test_faucet_claimFor_isMinterOnly_andSharesTheRecipientCap() public {
-        TestnetUSDT usdt = new TestnetUSDT(OWNER, 1_000e18);
+    /// @dev cre8-contracts#47 #7: the faucet role and uncapped minting are separate. A minter is not a faucet,
+    /// a faucet cannot mint, and only the owner appoints either.
+    function test_faucet_claimFor_isFaucetOnly_andFaucetCannotMint() public {
+        TestnetUSDT usdt = _usdtWithFaucet();
         vm.prank(OWNER);
         usdt.setMinter(KEEPER, true);
 
-        vm.expectRevert(TestnetToken.NotMinter.selector);
+        vm.expectRevert(TestnetUSDT.NotFaucet.selector);
+        vm.prank(KEEPER);
+        usdt.claimFor(ALICE, 1e18);
+        vm.expectRevert(TestnetUSDT.NotFaucet.selector);
         vm.prank(BOB);
         usdt.claimFor(ALICE, 1e18);
 
-        vm.prank(KEEPER);
-        usdt.claimFor(ALICE, 700e18);
-        vm.expectRevert(abi.encodeWithSelector(TestnetUSDT.ClaimLimitExceeded.selector, 400e18, 300e18));
-        vm.prank(ALICE);
-        usdt.claim(400e18);
+        vm.expectRevert(TestnetToken.NotMinter.selector);
+        vm.prank(FAUCET);
+        usdt.mint(FAUCET, 1);
 
-        // Minting stays uncapped for liquidity and keeper work.
-        vm.prank(KEEPER);
-        usdt.mint(KEEPER, 1_000_000e18);
+        vm.expectRevert(TestnetToken.NotOwner.selector);
+        vm.prank(FAUCET);
+        usdt.setFaucet(BOB, true);
+        vm.expectRevert(TestnetToken.ZeroAddress.selector);
+        vm.prank(OWNER);
+        usdt.setFaucet(address(0), true);
 
         vm.prank(OWNER);
         usdt.setDailyLimit(2_000e18);
-        vm.prank(ALICE);
-        usdt.claim(1_300e18);
+        vm.prank(FAUCET);
+        usdt.claimFor(ALICE, 2_000e18);
         assertEq(usdt.balanceOf(ALICE), 2_000e18);
+
+        vm.prank(OWNER);
+        usdt.setFaucet(FAUCET, false);
+        vm.expectRevert(TestnetUSDT.NotFaucet.selector);
+        vm.prank(FAUCET);
+        usdt.claimFor(BOB, 1);
+    }
+
+    /// @dev The welcome grant: exactly `WELCOME_AMOUNT` once per address, faucet only, outside the daily window.
+    function test_faucet_welcomeFor_oncePerAddress() public {
+        TestnetUSDT usdt = _usdtWithFaucet();
+        assertEq(usdt.WELCOME_AMOUNT(), 10_000e18);
+
+        vm.expectRevert(TestnetUSDT.NotFaucet.selector);
+        vm.prank(ALICE);
+        usdt.welcomeFor(ALICE);
+
+        vm.expectEmit(true, true, false, true, address(usdt));
+        emit TestnetUSDT.Welcomed(ALICE, 10_000e18, FAUCET);
+        vm.prank(FAUCET);
+        usdt.welcomeFor(ALICE);
+        assertEq(usdt.balanceOf(ALICE), 10_000e18);
+        assertTrue(usdt.welcomed(ALICE));
+        (uint256 remaining,) = usdt.claimable(ALICE);
+        assertEq(remaining, 1_000e18, "the daily window is untouched");
+
+        vm.expectRevert(abi.encodeWithSelector(TestnetUSDT.AlreadyWelcomed.selector, ALICE));
+        vm.prank(FAUCET);
+        usdt.welcomeFor(ALICE);
+        vm.expectRevert(TestnetToken.ZeroAddress.selector);
+        vm.prank(FAUCET);
+        usdt.welcomeFor(address(0));
+    }
+
+    /// @dev cre8-contracts#47 #3: there is no self-service `claim` any more; any EOA calling it gets nothing.
+    function test_faucet_hasNoPublicClaim() public {
+        TestnetUSDT usdt = new TestnetUSDT(OWNER, 1_000e18);
+        vm.prank(ALICE);
+        (bool ok,) = address(usdt).call(abi.encodeWithSignature("claim(uint256)", 1_000e18));
+        assertFalse(ok, "public claim must not exist");
+        assertEq(usdt.balanceOf(ALICE), 0);
     }
 
     // ---- TestnetPriceFeed ----
@@ -403,6 +469,57 @@ contract TestnetContractsTest is Test {
             assertEq(t[i].maxFeedAge, avax ? 1 days : 1 hours, t[i].symbol);
         }
         assertEq(withFeed, 11);
+    }
+
+    /// @dev cre8-contracts#47 #1 / #3: the parameter table's max(0.1%, 0.30 USDT) per batch (before #47 the
+    /// default fee stayed 0, so only the 0.30 minimum applied) and 1,000 USDT per recipient per day (was 10,000).
+    /// KEEPER's one-off USDT stock covers `PokePoolsTestnet`'s 20 pokes of 1,000 USDT for every pool.
+    function test_deployConstants_feeAndFaucetMatchTheParameterTable() public {
+        (uint16 defaultFeeBps, uint256 minBatchFee, uint256 faucetDailyLimit, uint256 keeperUsdtStock) =
+            new DeployTestnetHarness().feeAndFaucetConstants();
+        assertEq(defaultFeeBps, 10, "0.1%");
+        assertEq(minBatchFee, 0.3e18, "0.30 USDT");
+        assertEq(faucetDailyLimit, 1_000e18, "1,000 per day");
+        assertGe(keeperUsdtStock, 1_000e18 * 20 * TestnetAssets.COUNT, "keeper stock >= 20 rounds of buys");
+    }
+
+    /// @dev cre8-contracts#47 #8: a pool created by someone else first is only used when its price is within 1%
+    /// of the spec price (compared as prices, i.e. the squared sqrtPriceX96 ratio), in both token orders.
+    function test_poolPriceWithinBounds_onePercentBothWays() public {
+        DeployTestnet script = new DeployTestnet();
+        TestnetAssets.AssetSpec[] memory specs = TestnetAssets.specs();
+        for (uint256 i; i < specs.length; ++i) {
+            for (uint256 order; order < 2; ++order) {
+                uint160 expected = script.sqrtPriceX96(specs[i].priceE18, specs[i].decimals, order == 0);
+                assertTrue(script.poolPriceWithinBounds(expected, expected), specs[i].symbol);
+                // Prices 0.99x / 1.01x (sqrt ratio sqrt(0.99), sqrt(1.01)) shifted one ppm inward: accepted.
+                uint160 low = uint160(Math.mulDiv(expected, Math.sqrt(0.990001e36), 1e18));
+                uint160 high = uint160(Math.mulDiv(expected, Math.sqrt(1.009999e36), 1e18));
+                assertTrue(script.poolPriceWithinBounds(low, expected), specs[i].symbol);
+                assertTrue(script.poolPriceWithinBounds(high, expected), specs[i].symbol);
+                // Just outside 1%: rejected.
+                uint160 tooLow = uint160(Math.mulDiv(expected, Math.sqrt(0.9899e36), 1e18));
+                uint160 tooHigh = uint160(Math.mulDiv(expected, Math.sqrt(1.0101e36), 1e18));
+                assertFalse(script.poolPriceWithinBounds(tooLow, expected), specs[i].symbol);
+                assertFalse(script.poolPriceWithinBounds(tooHigh, expected), specs[i].symbol);
+            }
+        }
+        assertFalse(script.poolPriceWithinBounds(1, 0), "no expectation");
+        assertFalse(script.poolPriceWithinBounds(1 << 96, 2 << 96), "4x");
+    }
+
+    /// @dev cre8-contracts#47 #5: signer keys come from the environment and must derive the expected role
+    /// address; an unset variable loads nothing (fork mode). Anvil's public test key #0 stands in.
+    function test_rememberKey_fromEnvironment_checksTheAddress() public {
+        DeployTestnet script = new DeployTestnet();
+        uint256 key = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+        address derived = vm.addr(key);
+        script.rememberKey("CRE8_TEST_UNSET_KEY_47", derived); // unset: no-op
+
+        vm.setEnv("CRE8_TEST_KEY_47", vm.toString(bytes32(key)));
+        vm.expectRevert(bytes("CRE8_TEST_KEY_47 does not derive the expected address"));
+        script.rememberKey("CRE8_TEST_KEY_47", OWNER);
+        script.rememberKey("CRE8_TEST_KEY_47", derived);
     }
 
     /// @dev Window and pool age as on mainnet; USDT/USD gets its own max age (#25) inside the adapter's bounds.

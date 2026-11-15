@@ -152,8 +152,17 @@ contract AtpExecutorMinFeeForkTest is Test {
         uint256 feeTaken = _usdt(FEE_RECIPIENT) - feeBefore;
         uint256 gross = _usdt(address(account)) + feeTaken;
         assertGt(gross, 95e18, "pool fee + slippage only");
-        assertEq(feeTaken, _expectedTotal(gross), "max(0.1%, min(0.30, 1%)) out of the proceeds");
-        assertEq(feeTaken, MIN_FEE, "~100 USDT exit pays the 0.30 minimum");
+        // cre8-contracts#47: the buy and the exit share one minimum-fee window, which pays as one batch of
+        // ~200 USDT: max(0.1%, min(0.30, 1%)) of the window, i.e. 0.30 in all, less the buy's 0.1% (taken in WBNB).
+        // The exit pays its own 0.1% plus the window's remaining top-up, ~0.20 instead of a fresh 0.30.
+        uint256 windowTopUp = _expectedTotal(100e18 + gross) - (100e18 + gross) * FEE_BPS / BPS;
+        assertEq(
+            feeTaken, gross * FEE_BPS / BPS + windowTopUp, "the exit's 0.1% + the window's remaining top-up"
+        );
+        assertLt(feeTaken, MIN_FEE, "less than a second 0.30 minimum");
+        (, uint192 notional, uint256 paid) = executor.minFeeWindowOf(address(account));
+        assertEq(notional, 100e18 + gross);
+        assertEq(paid, windowTopUp);
     }
 
     function test_fork_dustExit_goesThroughAtOnePercent() public {

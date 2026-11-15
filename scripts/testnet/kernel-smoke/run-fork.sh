@@ -5,6 +5,8 @@
 # alto 用 @pimlico/alto@0.0.18（與 A3 同版本，理由見 docs A3_INTEGRATION §1）；ALTO_DIR 指向裝好它的目錄：
 #   mkdir -p "$ALTO_DIR" && cd "$ALTO_DIR" && npm init -y && npm i @pimlico/alto@0.0.18 --ignore-scripts
 # 執行者金鑰與 utility 金鑰取自 ~/.cre8-testnet（bundler-executor／bundler-utility），只傳給本機 alto，不印出。
+# 金鑰走 alto 的環境變數（ALTO_EXECUTOR_PRIVATE_KEYS、ALTO_UTILITY_PRIVATE_KEY），不放命令列參數，
+# 所以 `ps` 看不到（cre8-contracts#47）。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,16 +21,14 @@ cast rpc anvil_nodeInfo --rpc-url "$FORK_RPC" >/dev/null 2>&1 || { echo "$FORK_R
 # alto finds receipts with eth_getLogs over the last 100 blocks; keep that range local to the fork.
 cast rpc anvil_mine 120 --rpc-url "$FORK_RPC" >/dev/null
 
-EK="$(jq -r '.data[0].private_key' "$KEYS/bundler-executor.json")"
-UK="$(jq -r '.data[0].private_key' "$KEYS/bundler-utility.json")"
+ALTO_EXECUTOR_PRIVATE_KEYS="$(jq -r '.data[0].private_key' "$KEYS/bundler-executor.json")" \
+ALTO_UTILITY_PRIVATE_KEY="$(jq -r '.data[0].private_key' "$KEYS/bundler-utility.json")" \
 node "$ALTO_DIR/node_modules/@pimlico/alto/esm/cli/alto.js" \
   --rpc-url "$FORK_RPC" --entrypoints 0x0000000071727De22E5E9d8BAf0edAc6f37da032 \
-  --executor-private-keys "$EK" --utility-private-key "$UK" \
   --port "$ALTO_PORT" --deploy-simulations-contract --timeout 120000 \
   --min-entity-stake 1 --min-entity-unstake-delay 1 --min-executor-balance 10000000000000000 \
   --max-block-range 100 --safe-mode true >"$LOG" 2>&1 &
 ALTO_PID=$!
-unset EK UK
 trap 'kill "$ALTO_PID" 2>/dev/null || true' EXIT
 for _ in $(seq 1 60); do
   curl -s -X POST -H 'content-type: application/json' \

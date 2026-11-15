@@ -34,19 +34,21 @@ contract SmokeAccount {
 /// @title SmokeTestnet
 /// @notice Chain 97 acceptance run for cre8-contracts#30, after `DeployTestnet` and the 30-minute TWAP
 /// warm-up. Since cre8-contracts#45 (no asset-count ceiling) it uses one strategy whose version holds USDT and
-/// all 92 assets of cre8-contracts#39: one fresh contract account claims testnet USDT from the faucet, enrolls,
+/// all 92 assets of cre8-contracts#39: one fresh contract account gets the faucet's welcome grant (sent by
+/// OPERATOR, the faucet; cre8-contracts#47 removed the self-service claim), enrolls,
 /// buys 100 USDT worth of every asset through the executor and the Pancake Universal Router, sells everything
 /// back and withdraws its USDT. Buys and sales go in batches of `SMOKE_STEPS_PER_BATCH` steps (default 16), the
 /// way the backend splits a large rebalance. The executor enforces the oracle floor (and, since #24,
 /// `amountOutMin`) on every step; this script also prints each fill against its floor, and `SMOKE_TX <label>
 /// <index>` for the transactions whose gas `fork-e2e.sh` reports (index into the broadcast's transactions). On a
 /// public chain it spends real tBNB, so it is meant for the local fork unless a run on 97 is explicitly wanted.
+/// Broadcasts from the run's sender and from OPERATOR (`fork-e2e.sh` impersonates both).
 /// @dev `TESTNET_EXECUTOR` locates everything else: registry, router and USDT from the executor, the tokens
 /// from `TestnetBook` (CREATE2 addresses of DEPLOYER).
 contract SmokeTestnet is Script {
     uint256 internal constant TRADE_USDT = 100e18;
-    /// @dev The faucet's daily limit. 92 buys of 100 USDT (9,200) stay under the executor's buy cap, 100% of the
-    /// account value per 24 hours (about 10,000 less fees and pool fees).
+    /// @dev The faucet's welcome grant (`TestnetUSDT.WELCOME_AMOUNT`). 92 buys of 100 USDT (9,200) stay under the
+    /// executor's buy cap, 100% of the account value per 24 hours (about 10,000 less fees and pool fees).
     uint256 internal constant CLAIM_USDT = 10_000e18;
     uint256 internal constant DEFAULT_STEPS_PER_BATCH = 16;
     uint256 internal constant BPS = 10_000;
@@ -83,7 +85,13 @@ contract SmokeTestnet is Script {
         vm.startBroadcast();
         env.account = new SmokeAccount(msg.sender);
         ++env.txCount;
-        _call(env, address(env.usdt), abi.encodeCall(TestnetUSDT.claim, (CLAIM_USDT)));
+        vm.stopBroadcast();
+        require(env.usdt.WELCOME_AMOUNT() == CLAIM_USDT, "SmokeTestnet: welcome amount");
+        vm.startBroadcast(TestnetBook.OPERATOR);
+        env.usdt.welcomeFor(address(env.account));
+        ++env.txCount;
+        vm.stopBroadcast();
+        vm.startBroadcast();
         _approve(env, address(env.usdt));
         _strategy(env, tokens);
         _call(

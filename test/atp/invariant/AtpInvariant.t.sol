@@ -58,7 +58,8 @@ contract AtpInvariantTest is Test {
 
     /// (2) Accounts trade only allowlisted assets through allowlisted venues; at most `amountIn` (plus the
     /// minimum-fee top-up) leaves; the fee is exactly floor(gross x feeBps) and goes only to `feeRecipient`; the
-    /// top-up never exceeds what is due (<= minBatchFee and <= 1% of the notional) and is short only when the
+    /// top-up never exceeds what the account's window still owes (cre8-contracts#47: the window's one-batch
+    /// top-up, <= minBatchFee and <= 1% of its cumulative notional, less what it paid) and is short only when the
     /// account has no USDT left; nobody else's balance moves.
     function invariant_2_onlyAllowedSwapsAndFeeOnlyToRecipient() public view {
         assertEq(handler.ghostNotAllowedExecuted(), 0, "asset outside the pinned version traded");
@@ -122,11 +123,14 @@ contract AtpInvariantTest is Test {
     function test_handlerSettlesEveryVenueKindAndRejectsTheRest() public {
         AtpHandler h = new AtpHandler();
         for (uint256 venue; venue < 7; ++venue) {
+            h.warp(1 hours); // a fresh minimum-fee window for each swap (cre8-contracts#47)
             h.rebalance(0, true, 0, 100e18, venue, 15, 10_000, 0); // honest buy of A
+            h.warp(1 hours);
             h.rebalance(0, false, 0, 10e18, venue, 15, 10_000, 0); // honest sale of A
         }
         assertEq(h.callsSwapOk(), 14, "UR, ERC20 and Permit2 venues settle both ways");
-        // No proportional fee is set yet, so every one of these swaps (100 USDT buys, ~20 USDT sales) pays a top-up.
+        // No proportional fee is set yet, so every one of these swaps (100 USDT buys, ~20 USDT sales), each in its
+        // own window, pays a top-up.
         assertEq(h.callsMinFeeCharged(), 14, "every settled swap paid a minimum-fee top-up");
         h.rebalance(0, true, 0, 100e18, 7, 15, 10_000, 0); // venue off the allowlist
         assertEq(h.callsSwapReverted(), 1);

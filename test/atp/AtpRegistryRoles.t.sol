@@ -18,6 +18,9 @@ contract AtpRegistryRolesTest is Test {
 
     function setUp() public {
         registry = new AtpRegistry();
+        // Assets must be contracts since cre8-contracts#47; any code will do here.
+        vm.etch(address(0xAAA1), hex"00");
+        vm.etch(address(0xAAA2), hex"00");
         vm.startPrank(PROVIDER);
         strategyId = registry.registerStrategy("bsc-index", "stock index v1", true);
         address[] memory assets = new address[](1);

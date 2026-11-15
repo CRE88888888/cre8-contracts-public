@@ -187,6 +187,9 @@ contract AtpHandler is Test {
         uint256 otherIn;
         uint256 otherOut;
         uint256 cap;
+        /// @dev The account's minimum-fee window before the batch, already reset if it had expired.
+        uint256 windowNotional;
+        uint256 windowPaid;
     }
 
     /// @param modeSeed selects the venue behaviour; `payBps` scales what an honest-ish venue pays vs the quote;
@@ -267,6 +270,12 @@ contract AtpHandler is Test {
         pre.otherIn = tokenIn.balanceOf(address(other));
         pre.otherOut = tokenOut.balanceOf(address(other));
         if (buy) (pre.cap,,) = executor.buyAllowance(address(account));
+        (uint64 windowStart, uint192 windowNotional, uint256 windowPaid) =
+            executor.minFeeWindowOf(address(account));
+        if (windowStart != 0 && block.timestamp < uint256(windowStart) + executor.MIN_FEE_WINDOW()) {
+            pre.windowNotional = windowNotional;
+            pre.windowPaid = windowPaid;
+        }
 
         try account.exec(executor, steps, block.timestamp + 300) {
             _afterSuccess(account, other, tokenIn, tokenOut, amount, buy, mode, pre);
@@ -334,14 +343,20 @@ contract AtpHandler is Test {
         }
     }
 
-    /// @dev The top-up is at most what `minFeeTopUp` says is due, which itself is at most `minBatchFee` and 1% of
-    /// the notional; it is short only when the account ran out of USDT (allowances here are unlimited).
+    /// @dev Per account and window (cre8-contracts#47) the top-up is what the window still owes: the one-batch
+    /// top-up of its cumulative notional (`minFeeTopUp`, at most `minBatchFee` and 1% of it) less what the window
+    /// already paid. It is short only when the account ran out of USDT (allowances here are unlimited), and the
+    /// window records exactly this batch's notional and charge.
     function _checkMinFee(TestAccount account, uint256 notional, uint256 charged, Pre memory pre) internal {
-        uint256 due = executor.minFeeTopUp(pre.strategyId, notional);
+        uint256 cumulative = pre.windowNotional + notional;
+        uint256 owed = executor.minFeeTopUp(pre.strategyId, cumulative);
+        uint256 due = owed > pre.windowPaid ? owed - pre.windowPaid : 0;
         if (charged > 0) ++callsMinFeeCharged;
+        (, uint192 windowNotional, uint256 windowPaid) = executor.minFeeWindowOf(address(account));
         if (
-            charged > due || due > executor.minBatchFee() || due > notional / 100
-                || (charged < due && usdt.balanceOf(address(account)) != 0)
+            charged > due || owed > executor.minBatchFee() || owed > cumulative / 100
+                || (charged < due && usdt.balanceOf(address(account)) != 0) || windowNotional != cumulative
+                || windowPaid != pre.windowPaid + charged
         ) ++ghostMinFeeViolations;
     }
 

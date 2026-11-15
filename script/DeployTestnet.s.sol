@@ -57,6 +57,13 @@ interface IObservationCardinality {
     function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }
 
+/// @dev The position manager's ERC721 (enumerable) side, to hand the LP NFTs over.
+interface ITestnetPositionNft {
+    function balanceOf(address owner) external view returns (uint256);
+    function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256);
+    function transferFrom(address from, address to, uint256 tokenId) external;
+}
+
 /// @title DeployTestnet
 /// @notice BSC TESTNET (chain 97) ONLY (cre8-contracts#30). Deploys the whole CRE8 stack against mock assets:
 /// - testnet USDT (numeraire, capped faucet) and 92 mock assets (`TestnetAssets`: the 38 launch assets and,
@@ -77,14 +84,18 @@ interface IObservationCardinality {
 /// one), which is the intended versioning.
 ///
 /// @dev Roles (`TestnetBook`; new keys in ~/.cre8-testnet/, no Safe on testnet): DEPLOYER deploys, owns the
-/// mocks and LP positions, configures, then hands the registry, router and paymaster to OWNER (the Safe's
-/// stand-in), which accepts in the same run. Configuration on a rerun is sent by whoever owns the contract
-/// then. OPERATOR = registry operator + USDT faucet minter; KEEPER = only feed pusher + mock minter;
-/// PAYMASTER_SIGNER signs sponsorships; FEE_RECIPIENT gets the executor fee; BUNDLER_* run alto.
+/// mocks and LP positions while it builds the markets, configures, then hands the registry, router and paymaster
+/// to OWNER (the Safe's stand-in), which accepts in the same run. Once no pool needs a mint any more it also
+/// hands over what it built (cre8-contracts#47): USDT, every mock token and every feed to OWNER, its own minter
+/// role revoked, every LP NFT to OWNER; DEPLOYER keeps nothing. Configuration on a rerun is sent by whoever owns
+/// the contract then. OPERATOR = registry operator + USDT faucet (capped `claimFor` / `welcomeFor`, no `mint`);
+/// KEEPER = only feed pusher + mock-asset minter, with a USDT stock minted once at the hand-over (no USDT
+/// minter); PAYMASTER_SIGNER signs sponsorships; FEE_RECIPIENT gets the executor fee; BUNDLER_* run alto.
 ///
 /// @dev Run: `scripts/testnet/deploy-97.sh` (fork or public chain 97, writes and checks the manifest); see
 /// docs/testnet-97.zh-TW.md. Broadcasts from DEPLOYER and OWNER, so both must be available as signers
-/// (`--unlocked` on a fork; two `--private-keys` on chain 97).
+/// (`--unlocked` on a fork; on chain 97 the keys come from the environment, `TESTNET_DEPLOYER_KEY` and
+/// `TESTNET_OWNER_KEY`, never from command-line arguments another process could read with `ps`; #47).
 contract DeployTestnet is Script {
     // ---- chain 97 pins (sources in docs/testnet-97.zh-TW.md) ----
     address internal constant V3_FACTORY = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865;
@@ -104,6 +115,9 @@ contract DeployTestnet is Script {
     uint16 internal constant MAX_BUY_BPS = 10_000;
     /// @notice Minimum fee per swap batch (cre8-contracts#33): 0.30 USDT (mock USDT has 18 decimals); settable by the owner.
     uint256 internal constant MIN_BATCH_FEE = 0.3e18;
+    /// @notice Proportional swap fee, the parameter table's 0.1% of max(0.1%, 0.30 USDT) (cre8-contracts#47).
+    /// Testnet only: `DeployAtpMainnet` leaves the default at 0.
+    uint16 internal constant DEFAULT_FEE_BPS = 10;
     uint16 internal constant SECONDARY_MAX_DEVIATION_BPS = 200;
 
     // ---- testnet-only parameters ----
@@ -118,7 +132,14 @@ contract DeployTestnet is Script {
     uint16 internal constant OBSERVATION_CARDINALITY = 600;
     /// @dev The second, tiny mint that makes a pool write its first post-initialization observation.
     uint256 internal constant POKE_LIQUIDITY = 1e18;
-    uint256 internal constant FAUCET_DAILY_LIMIT = 10_000e18;
+    /// @dev Per recipient per 24 hours, the parameter table's daily claim (cre8-contracts#47).
+    uint256 internal constant FAUCET_DAILY_LIMIT = 1_000e18;
+    /// @dev KEEPER's USDT stock, minted once at the hand-over (KEEPER is no USDT minter, cre8-contracts#47):
+    /// `PokePoolsTestnet` keeps 20 pokes of 1,000 USDT for each of the 92 pools (1.84M); the rest is headroom.
+    uint256 internal constant KEEPER_USDT_STOCK = 2_000_000e18;
+    /// @dev A pool's price may sit at most this far from its spec price (cre8-contracts#47): anyone can create
+    /// the pool first, at any price, from the public CREATE2 addresses.
+    uint256 internal constant MAX_POOL_PRICE_DEVIATION_BPS = 100;
     /// @dev Unfinished markets one run deploys (cre8-contracts#39): ~22M gas and ~12 transactions each. forge
     /// simulates the whole `run()` as one call, and on a fresh fork an earlier 134-market draft ran out of gas
     /// there after ~56 markets in one run; 40 keeps a run near the ~500 transactions / ~0.85B gas of the 38-asset deployment.
@@ -133,9 +154,13 @@ contract DeployTestnet is Script {
     uint256 internal constant FLOAT_KEEPER = 0.3 ether;
     uint256 internal constant FLOAT_BUNDLER_EXECUTOR = 0.1 ether;
     uint256 internal constant FLOAT_BUNDLER_UTILITY = 0.02 ether;
-    /// @dev The paymaster's EntryPoint deposit pays every sponsored UserOp; the default covers ~10,000 ops of
-    /// 500k gas at 0.1 gwei. `TESTNET_PAYMASTER_DEPOSIT` (wei) overrides it.
+    /// @dev The paymaster's EntryPoint deposit pays every sponsored UserOp; at 0.1 gwei the default covers about
+    /// 4,000 rebalance UserOps of the size measured on the fork (1,257,325 gas for three buys; docs/testnet-97
+    /// §3, the parameter table's figure). `TESTNET_PAYMASTER_DEPOSIT` (wei) overrides it.
     uint256 internal constant PAYMASTER_DEPOSIT = 0.5 ether;
+
+    /// @dev Set when this run creates a pool or mints into one; the market hand-over then waits for a rerun.
+    bool internal _poolsTouched;
 
     struct Core {
         TestnetOwnedDeployer ownedDeployer;
@@ -157,6 +182,8 @@ contract DeployTestnet is Script {
 
     function run() external {
         require(block.chainid == 97, "DeployTestnet: BSC testnet (97) only");
+        rememberKey("TESTNET_DEPLOYER_KEY", TestnetBook.DEPLOYER);
+        rememberKey("TESTNET_OWNER_KEY", TestnetBook.OWNER);
         require(
             ITestnetPositionManager(POSITION_MANAGER).factory() == V3_FACTORY,
             "position manager / factory mismatch"
@@ -189,6 +216,10 @@ contract DeployTestnet is Script {
         if (core.registry.operator() != TestnetBook.OPERATOR) {
             core.registry.setOperator(TestnetBook.OPERATOR);
         }
+        if (core.registry.defaultSwapFeeBps() != DEFAULT_FEE_BPS) {
+            core.registry.setDefaultFeeBps(DEFAULT_FEE_BPS);
+        }
+        if (core.registry.numeraire() == address(0)) core.registry.setNumeraire(address(core.usdt));
         vm.stopBroadcast();
         vm.startBroadcast(core.router.owner());
         for (uint256 i; i < specs.length; ++i) {
@@ -203,10 +234,14 @@ contract DeployTestnet is Script {
             return;
         }
 
-        // 3. DEPLOYER: tBNB for every role, the paymaster deposit, and the ownership proposals.
+        // 3. DEPLOYER: tBNB for every role, the paymaster deposit, and the ownership proposals. What DEPLOYER
+        // built (tokens, feeds, LP NFTs) goes too, but only in a run that minted into no pool: a pool that still
+        // needs its observation poke needs DEPLOYER's mint. Such a run prints PENDING_HANDOVER and deploy-97.sh
+        // reruns; the run that hands over has read every pool from chain, so none can be left thin.
         vm.startBroadcast(TestnetBook.DEPLOYER);
         _fundRoles(core);
         _handOver(core);
+        if (!_poolsTouched) _handOverMarkets(core, specs, out);
         vm.stopBroadcast();
 
         // 4. OWNER accepts.
@@ -215,8 +250,22 @@ contract DeployTestnet is Script {
         if (core.router.pendingOwner() == TestnetBook.OWNER) core.router.acceptOwnership();
         vm.stopBroadcast();
 
+        if (_poolsTouched) {
+            console.log("PENDING_HANDOVER");
+            return;
+        }
+
         _verify(core, specs, out);
         _report(core, specs, out);
+    }
+
+    /// @notice Loads a signer from the environment variable `name` (cre8-contracts#47: keys never travel as
+    /// command-line arguments), after checking it derives `expected`. Unset (fork mode, `--unlocked`): nothing.
+    function rememberKey(string memory name, address expected) public {
+        uint256 key = vm.envOr(name, uint256(0));
+        if (key == 0) return;
+        require(vm.addr(key) == expected, string.concat(name, " does not derive the expected address"));
+        vm.rememberKey(key);
     }
 
     // ---------------------------------------------------------------- GasPolicy
@@ -293,8 +342,7 @@ contract DeployTestnet is Script {
                     )
                 ))
         );
-        _minter(TestnetToken(address(core.usdt)), TestnetBook.KEEPER);
-        _minter(TestnetToken(address(core.usdt)), TestnetBook.OPERATOR);
+        if (!core.usdt.isFaucet(TestnetBook.OPERATOR)) core.usdt.setFaucet(TestnetBook.OPERATOR, true);
     }
 
     // ---------------------------------------------------------------- per asset
@@ -385,7 +433,10 @@ contract DeployTestnet is Script {
                     token0, token1, spec.fee, sqrtPriceX96(spec.priceE18, spec.decimals, token < usdt)
                 );
             console.log(string.concat("pool                NEW   ", spec.symbol), pool);
+            _poolsTouched = true;
         }
+        // Someone may have created the pool first at another price; never add liquidity to it then.
+        _requirePoolPrice(spec, pool, token < usdt);
 
         // Room first: the pool only grows its observation buffer to `cardinalityNext` on its next observation
         // write, and the first liquidity mint below is that write (an in-range mint writes an observation).
@@ -398,12 +449,37 @@ contract DeployTestnet is Script {
         int24 edge = MAX_TICK / spacing * spacing;
         if (IPancakeV3Pool(pool).liquidity() == 0) {
             _mintFullRange(spec, token, usdt, edge, LIQUIDITY_PER_SIDE);
+            _poolsTouched = true;
         }
         // A pool writes at most one observation per second: if the mint landed in the second the pool was
         // initialized in, nothing grew and the TWAP adapter (which needs >= 2 slots) stays unavailable. A tiny
         // second mint, one block later, is the write that grows it.
         (,,, uint16 cardinality,,,) = IPancakeV3Pool(pool).slot0();
-        if (cardinality < 2) _mintFullRange(spec, token, usdt, edge, POKE_LIQUIDITY);
+        if (cardinality < 2) {
+            _mintFullRange(spec, token, usdt, edge, POKE_LIQUIDITY);
+            _poolsTouched = true;
+        }
+    }
+
+    /// @notice Whether a pool's `actual` sqrtPriceX96 is within `MAX_POOL_PRICE_DEVIATION_BPS` of the `expected`
+    /// one, compared as prices (squares): (actual / expected)^2 in [1 - 1%, 1 + 1%].
+    function poolPriceWithinBounds(uint160 actual, uint160 expected) public pure returns (bool) {
+        if (expected == 0) return false;
+        uint256 ratioE9 = Math.mulDiv(actual, 1e9, expected); // sqrt of the price ratio, 1e9 = 1x
+        uint256 ratioE18 = ratioE9 * ratioE9;
+        return ratioE18 >= (10_000 - MAX_POOL_PRICE_DEVIATION_BPS) * 1e14
+            && ratioE18 <= (10_000 + MAX_POOL_PRICE_DEVIATION_BPS) * 1e14;
+    }
+
+    function _requirePoolPrice(TestnetAssets.AssetSpec memory spec, address pool, bool assetIsToken0)
+        internal
+        view
+    {
+        (uint160 sqrtPrice,,,,,,) = IPancakeV3Pool(pool).slot0();
+        require(
+            poolPriceWithinBounds(sqrtPrice, sqrtPriceX96(spec.priceE18, spec.decimals, assetIsToken0)),
+            string.concat(spec.symbol, ": pool price is more than 1% off the spec price; not using this pool")
+        );
     }
 
     /// @dev Full-range position for DEPLOYER worth `usdtAmount` per side at the spec price.
@@ -518,6 +594,40 @@ contract DeployTestnet is Script {
         if (core.paymaster.owner() == TestnetBook.DEPLOYER) core.paymaster.transferOwnership(owner);
     }
 
+    /// @dev DEPLOYER gives up everything it built (cre8-contracts#47): KEEPER's USDT stock first (the last mint
+    /// DEPLOYER makes), then on USDT and every mock its minter role and the ownership, the ownership of every feed,
+    /// and every LP NFT it holds. Each part is skipped when already done, so a rerun sends nothing.
+    function _handOverMarkets(Core memory core, TestnetAssets.AssetSpec[] memory specs, AssetOut[] memory out)
+        internal
+    {
+        address deployer = TestnetBook.DEPLOYER;
+        if (core.usdt.isMinter(deployer) && core.usdt.balanceOf(TestnetBook.KEEPER) < KEEPER_USDT_STOCK / 2) {
+            core.usdt.mint(TestnetBook.KEEPER, KEEPER_USDT_STOCK - core.usdt.balanceOf(TestnetBook.KEEPER));
+        }
+        _handOverToken(TestnetToken(address(core.usdt)));
+        _handOverFeed(address(core.usdtUsdFeed));
+        for (uint256 i; i < specs.length; ++i) {
+            _handOverToken(TestnetToken(out[i].token));
+            if (out[i].feed != address(0)) _handOverFeed(out[i].feed);
+        }
+        ITestnetPositionNft nft = ITestnetPositionNft(POSITION_MANAGER);
+        for (uint256 held = nft.balanceOf(deployer); held > 0; --held) {
+            nft.transferFrom(deployer, TestnetBook.OWNER, nft.tokenOfOwnerByIndex(deployer, held - 1));
+        }
+    }
+
+    function _handOverToken(TestnetToken token) internal {
+        if (token.owner() != TestnetBook.DEPLOYER) return;
+        if (token.isMinter(TestnetBook.DEPLOYER)) token.setMinter(TestnetBook.DEPLOYER, false);
+        token.transferOwnership(TestnetBook.OWNER);
+    }
+
+    function _handOverFeed(address feed) internal {
+        if (TestnetPriceFeed(feed).owner() == TestnetBook.DEPLOYER) {
+            TestnetPriceFeed(feed).transferOwnership(TestnetBook.OWNER);
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     /// @dev CREATE2 through the deterministic deployer; reuses whatever already sits at the address.
@@ -587,13 +697,23 @@ contract DeployTestnet is Script {
         require(core.executor.feeRecipient() == TestnetBook.FEE_RECIPIENT, "executor fee recipient");
         require(core.executor.maxBuyBps() == MAX_BUY_BPS && !core.executor.globalPaused(), "executor guards");
         require(core.executor.minBatchFee() == MIN_BATCH_FEE, "executor minBatchFee");
+        require(core.registry.defaultSwapFeeBps() == DEFAULT_FEE_BPS, "registry default fee");
+        require(core.registry.numeraire() == address(core.usdt), "registry numeraire");
         (AtpExecutor.VenueKind kind,) = core.executor.venues(V3_UNIVERSAL_ROUTER);
         require(kind == AtpExecutor.VenueKind.PANCAKE_UR, "UR venue");
         require(core.usdt.decimals() == 18 && core.usdt.dailyLimit() == FAUCET_DAILY_LIMIT, "USDT");
+        require(core.usdt.isFaucet(TestnetBook.OPERATOR), "USDT faucet");
         require(
-            core.usdt.isMinter(TestnetBook.OPERATOR) && core.usdt.isMinter(TestnetBook.KEEPER), "USDT minters"
+            !core.usdt.isMinter(TestnetBook.OPERATOR) && !core.usdt.isMinter(TestnetBook.KEEPER)
+                && !core.usdt.isMinter(TestnetBook.DEPLOYER) && core.usdt.owner() == TestnetBook.OWNER,
+            "USDT: no minter left but whom OWNER appoints"
         );
-        require(core.usdtUsdFeed.keeper() == TestnetBook.KEEPER, "USDT/USD keeper");
+        require(core.usdt.balanceOf(TestnetBook.KEEPER) >= KEEPER_USDT_STOCK / 2, "keeper USDT stock");
+        require(
+            core.usdtUsdFeed.keeper() == TestnetBook.KEEPER && core.usdtUsdFeed.owner() == TestnetBook.OWNER,
+            "USDT/USD keeper / owner"
+        );
+        require(ITestnetPositionNft(POSITION_MANAGER).balanceOf(TestnetBook.DEPLOYER) == 0, "LP NFTs left");
         require(GAS_POLICY.codehash == GAS_POLICY_CODEHASH, "GasPolicy");
         require(
             address(core.paymaster.entryPoint()) == ENTRY_POINT_V07
@@ -611,6 +731,10 @@ contract DeployTestnet is Script {
                 string.concat(spec.symbol, ": token")
             );
             require(token.isMinter(TestnetBook.KEEPER), string.concat(spec.symbol, ": keeper minter"));
+            require(
+                token.owner() == TestnetBook.OWNER && !token.isMinter(TestnetBook.DEPLOYER),
+                string.concat(spec.symbol, ": owner / deployer minter")
+            );
             if (spec.uiMultiplier != 0) {
                 require(
                     TestnetBStock(address(token)).uiMultiplier() == spec.uiMultiplier,
@@ -619,6 +743,7 @@ contract DeployTestnet is Script {
             }
             IPancakeV3Pool pool = IPancakeV3Pool(out[i].pool);
             require(pool.fee() == spec.fee && pool.liquidity() > 0, string.concat(spec.symbol, ": pool"));
+            _requirePoolPrice(spec, address(pool), address(token) < address(core.usdt));
             // `observationCardinality >= 2` is checked on chain by deploy-97.sh: the simulation runs every
             // transaction at one timestamp, so a new pool never writes the observation that grows it here.
             (,,,, uint16 cardinalityNext,,) = pool.slot0();
@@ -643,8 +768,9 @@ contract DeployTestnet is Script {
                     string.concat(spec.symbol, ": secondary feeds / max ages")
                 );
                 require(
-                    TestnetPriceFeed(out[i].feed).keeper() == TestnetBook.KEEPER,
-                    string.concat(spec.symbol, ": keeper")
+                    TestnetPriceFeed(out[i].feed).keeper() == TestnetBook.KEEPER
+                        && TestnetPriceFeed(out[i].feed).owner() == TestnetBook.OWNER,
+                    string.concat(spec.symbol, ": keeper / owner")
                 );
             } else {
                 require(address(source) == address(0), string.concat(spec.symbol, ": unexpected secondary"));

@@ -42,6 +42,37 @@ contract BurnableToken {
     }
 }
 
+/// @dev A contract whose `balanceOf` always reverts.
+contract RevertingBalanceToken {
+    function balanceOf(address) external pure returns (uint256) {
+        revert("no balance");
+    }
+}
+
+/// @dev A contract that answers every call (so `balanceOf` too) successfully with no return data.
+contract SilentBalanceToken {
+    fallback() external { }
+}
+
+/// @dev A contract whose `balanceOf` burns all the gas it is given.
+contract GasBurningBalanceToken {
+    function balanceOf(address) external pure returns (uint256 x) {
+        while (true) {
+            ++x;
+        }
+    }
+}
+
+/// @dev A contract whose `balanceOf` answers with a 1 MB payload (a return bomb).
+contract ReturnBombToken {
+    fallback() external {
+        assembly {
+            mstore(0, 1)
+            return(0, 1000000)
+        }
+    }
+}
+
 /// @dev Fixed-price oracle: `price[asset]` numeraire units per 1e18 asset units, no slippage (minimum = quote).
 /// A zero price makes every quote of that asset revert, standing in for a stale or cleared oracle. Pairs
 /// without the numeraire are quoted 1:1 so the executor's own route check is what rejects them.
@@ -378,6 +409,59 @@ contract AtpExecutorBuyLimitTest is Test {
         stray.mint(address(this), 1_000_000e18);
         (uint256 cap,,) = executor.buyAllowance(address(this));
         assertEq(cap, 1_000e18, "only the pinned version's assets are valued");
+    }
+
+    /// @dev cre8-contracts#47 #4: a version asset whose `balanceOf` reverts, or answers with no data, counts as
+    /// zero (fails closed: it only lowers the cap) instead of reverting every batch with a buy. Before the fix
+    /// a provider could brick every buy of the version with such an asset.
+    function test_assetWithBrokenBalanceOf_countsAsZero_andBuysGoThrough() public {
+        address reverting = address(new RevertingBalanceToken());
+        address silent = address(new SilentBalanceToken());
+        address[] memory assets = new address[](4);
+        assets[0] = address(usdt);
+        assets[1] = address(tokenA);
+        assets[2] = reverting;
+        assets[3] = silent;
+        uint16[] memory weights = new uint16[](4);
+        weights[0] = 2_500;
+        weights[1] = 2_500;
+        weights[2] = 2_500;
+        weights[3] = 2_500;
+        uint256 id = registry.registerStrategy("broken", "balanceOf reverts", true);
+        registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
+        registry.enroll(address(this), id);
+
+        (uint256 cap,,) = executor.buyAllowance(address(this));
+        assertEq(cap, 1_000e18, "only the USDT counts");
+        _run(_buy(tokenA, 100e18));
+        assertEq(tokenA.balanceOf(address(this)), 50e18, "the buy went through");
+    }
+
+    /// @dev A token that burns all gas, or returns a 1 MB payload, from `balanceOf` cannot make the buy run out of
+    /// gas: the read is capped at `BALANCE_OF_GAS` and only one word is copied, and the asset counts as zero.
+    function test_assetWithHostileBalanceOf_cannotBurnTheBatchGas() public {
+        address burner = address(new GasBurningBalanceToken());
+        address bomb = address(new ReturnBombToken());
+        address[] memory assets = new address[](4);
+        assets[0] = address(usdt);
+        assets[1] = address(tokenA);
+        assets[2] = burner;
+        assets[3] = bomb;
+        uint16[] memory weights = new uint16[](4);
+        weights[0] = 2_500;
+        weights[1] = 2_500;
+        weights[2] = 2_500;
+        weights[3] = 2_500;
+        uint256 id = registry.registerStrategy("hostile", "gas griefing", true);
+        registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
+        registry.enroll(address(this), id);
+
+        AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](1);
+        steps[0] = _buy(tokenA, 100e18);
+        uint256 gasBefore = gasleft();
+        executor.executeRebalance{ gas: 1_500_000 }(address(this), steps, block.timestamp + 300);
+        assertLt(gasBefore - gasleft(), 1_000_000, "bounded valuation cost");
+        assertEq(tokenA.balanceOf(address(this)), 50e18, "the buy went through");
     }
 
     // ---- misc ----
