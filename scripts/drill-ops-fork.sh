@@ -255,6 +255,9 @@ steps_of() { # tokenIn tokenOut amountIn
 bal() { cast call "$1" 'balanceOf(address)(uint256)' "$2" | awk '{print $1}'; }
 eq "5-1 部署後 maxBuyBps = 10000、numeraire = USDT" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')/$(cast call $EX 'numeraire()(address)')" "10000/$USDT"
 expect_err "5-2 operator 改買入額度" "NotOwner()" $OP2 $EX "setMaxBuyBps(uint16)" 20000
+eq "5-2b 部署後 minBatchFee = 0.30 USDT（#33）" "$(cast call $EX 'minBatchFee()(uint256)' | awk '{print $1}')" "300000000000000000"
+expect_err "    operator 改最低費" "NotOwner()" $OP2 $EX "setMinBatchFee(uint256)" 0
+expect_err "    Safe B 設超過上限（5 USDT + 1 wei）" "MinBatchFeeTooHigh(uint256)" "$SAFE_B" $EX "setMinBatchFee(uint256)" 5000000000000000001
 send $ACCOUNT $WBNB "deposit()" --value 0.01ether
 send $ACCOUNT $WBNB "approve(address,uint256)" $EX 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 send $ACCOUNT $USDT "approve(address,uint256)" $EX 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -262,9 +265,13 @@ eq "5-3 帳戶持有 0.01 WBNB" "$(bal $WBNB $ACCOUNT)" "10000000000000000"
 send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 0
 eq "5-4 Safe B setMaxBuyBps(0) → 只准賣出" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "0"
 expect_err "5-5 買入 USDT→WBNB" "BuyLimitExceeded(uint256,uint256)" $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $USDT $WBNB 1000000000000000000)" 99999999999
+FEE0=$(bal $USDT "$SAFE_B")   # 3-6 之後 feeRecipient = Safe B
 send $ACCOUNT $EX "$REB" $ACCOUNT "$(steps_of $WBNB $USDT 10000000000000000)" 99999999999
 USDT_GOT=$(bal $USDT $ACCOUNT)
 [ "$USDT_GOT" != "0" ] && [ "$(bal $WBNB $ACCOUNT)" = "0" ] && ok "5-6 賣出 WBNB→USDT 照常成交（得到 $(cast from-wei $USDT_GOT) USDT）" || fail "賣出（USDT ${USDT_GOT}、WBNB $(bal $WBNB $ACCOUNT)）"
+# 比例費 0（部署預設），最低費 = min(0.30, 成交額 1%)，從帳戶拿到的 USDT 裡補收，不從 swap 輸出扣
+SALE_GROSS=$(echo "$USDT_GOT + $(bal $USDT "$SAFE_B") - $FEE0" | bc)
+eq "    最低費：全額退出這筆（成交 $(cast from-wei $SALE_GROSS) USDT）收 1%，不是 0.30" "$(echo "$(bal $USDT "$SAFE_B") - $FEE0" | bc)" "$(cast call $EX 'minFeeTopUp(uint256,uint256)(uint256)' 1 "$SALE_GROSS" | awk '{print $1}')"
 eq "    賣出不計入額度（買入窗沒有打開）" "$(cast call $EX 'buyWindowOf(address)(uint64,uint192)' $ACCOUNT | head -1)" "0"
 send "$SAFE_B" $EX "setMaxBuyBps(uint16)" 10000
 eq "5-7 Safe B setMaxBuyBps(10000) → 恢復" "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" "10000"
@@ -303,9 +310,11 @@ expect_err "6-3 KyberSwap 還沒加入就成交" "VenueNotAllowed(address)" $ACC
 send "$SAFE_B" $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER
 eq "6-4 Safe B setVenue(KyberSwap, ERC20_APPROVE) → kind 2" "$(venue_kind $KYBER)" "2"
 U0=$(bal $USDT $ACCOUNT)
+F0=$(bal $USDT "$SAFE_B")
 send $ACCOUNT $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL,$MIN,$KYBER,$KDATA)]" 99999999999
-GOT=$(echo "$(bal $USDT $ACCOUNT) - $U0" | bc)
-[ "$(echo "$GOT >= $MIN" | bc)" = "1" ] && ok "6-5 經 KyberSwap 賣 $(cast from-wei $SELL) WBNB → $(cast from-wei $GOT) USDT（地板 $(cast from-wei $MIN)）" || fail "KyberSwap 成交低於地板"
+# 成交額 = 帳戶拿到的 + feeRecipient 拿到的（比例費 0，feeRecipient 這邊只有批次結束後補收的最低費）
+GOT=$(echo "$(bal $USDT $ACCOUNT) - $U0 + $(bal $USDT "$SAFE_B") - $F0" | bc)
+[ "$(echo "$GOT >= $MIN" | bc)" = "1" ] && ok "6-5 經 KyberSwap 賣 $(cast from-wei $SELL) WBNB → $(cast from-wei $GOT) USDT（地板 $(cast from-wei $MIN)；最低費另收 $(cast from-wei $(echo "$(bal $USDT "$SAFE_B") - $F0" | bc))）" || fail "KyberSwap 成交低於地板"
 eq "    executor 對 KyberSwap 的 allowance 歸零" "$(cast call $WBNB 'allowance(address,address)(uint256)' $EX $KYBER | awk '{print $1}')" "0"
 eq "    executor 沒有留下任何 WBNB／USDT" "$(bal $WBNB $EX)/$(bal $USDT $EX)" "0/0"
 echo "  -- DOGE：1,000 USDT 經 KyberSwap（docs#26 量到直接池過不了地板）"
@@ -370,11 +379,12 @@ ODATA=$(jq -r .data.data <<<"$OQ")
 send "$SAFE_B" $EX "setVenue(address,uint8,address)" $OPENOCEAN 2 $OPENOCEAN
 eq "6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2" "$(venue_kind $OPENOCEAN)" "2"
 U1=$(bal $USDT $ACCOUNT)
+F1=$(bal $USDT "$SAFE_B")
 # OpenOcean 的 route 是照「現在的主網」算的，fork 落後一兩分鐘時，某些來源會在 OpenOcean 內部 revert。
 # 成交就驗地板；revert 就驗「整筆退回、帳戶與 executor 餘額不變」——venue 失敗不能動到任何資金。
 OOUT=$(cast send --json --gas-limit 5000000 $EX "$REB" $ACCOUNT "[($WBNB,$USDT,$SELL2,$MIN2,$OPENOCEAN,$ODATA)]" 99999999999 --unlocked --from $ACCOUNT 2>&1 || true)
 if [ "$(jq -r .status <<<"$OOUT" 2>/dev/null)" = "0x1" ]; then
-  GOT2=$(echo "$(bal $USDT $ACCOUNT) - $U1" | bc)
+  GOT2=$(echo "$(bal $USDT $ACCOUNT) - $U1 + $(bal $USDT "$SAFE_B") - $F1" | bc)   # 同 6-5：含最低費
   [ "$(echo "$GOT2 >= $MIN2" | bc)" = "1" ] && ok "6-10 經 OpenOcean 賣 $(cast from-wei $SELL2) WBNB → $(cast from-wei $GOT2) USDT（地板 $(cast from-wei $MIN2)）" || fail "OpenOcean 成交低於地板"
 else
   echo "  ⚠ 6-10 OpenOcean 的 calldata 在 fork 上 revert：$(grep -o 'OpenOcean[^"\\]*' <<<"$OOUT" | head -1)"

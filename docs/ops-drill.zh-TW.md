@@ -184,10 +184,11 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 | --- | --- | --- | --- |
 | 5-1 | — | executor `maxBuyBps()`、`numeraire()` | 10000、USDT |
 | 5-2 | （operator 嘗試） | executor `setMaxBuyBps(20000)` | revert `NotOwner()` |
+| 5-2b | — ／（operator 嘗試）／ Safe | executor `minBatchFee()`；operator `setMinBatchFee(0)`；Safe `setMinBatchFee(5 USDT + 1 wei)` | 0.30 USDT；revert `NotOwner()`；revert `MinBatchFeeTooHigh` |
 | 5-3 | 帳戶 | WBNB `deposit()`、approve executor | 帳戶持有 0.01 WBNB |
 | 5-4 | Safe | executor `setMaxBuyBps(0)` | 只准賣出 |
 | 5-5 | （帳戶嘗試） | `executeRebalance`：USDT→WBNB | revert `BuyLimitExceeded` |
-| 5-6 | 帳戶 | `executeRebalance`：WBNB→USDT（全部） | 成交；買入窗沒有打開（賣出不計入） |
+| 5-6 | 帳戶 | `executeRebalance`：WBNB→USDT（全部） | 成交；買入窗沒有打開（賣出不計入）；feeRecipient 收到的最低費 = `minFeeTopUp(策略, 成交額)`（這筆約 6 USDT，收 1%，不是 0.30） |
 | 5-7 | Safe | executor `setMaxBuyBps(10000)` | 恢復 |
 | 5-8 | 帳戶 | `executeRebalance`：USDT→WBNB（一半） | 成交；`buyAllowance(帳戶)` 的已用 = 買入金額，額度 = 帳戶總值 |
 | 5-9 | （帳戶嘗試） | `executeRebalance`：USDT→WBNB（一整個額度） | revert `BuyLimitExceeded` |
@@ -196,6 +197,7 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 - 後端排程前要讀 `buyAllowance(帳戶)`（額度、已用、窗口結束時間），把這一批的買入縮到「額度 − 已用」以內，留 1–2% 餘裕（讀值和上鏈之間總值會小幅變動）。額度用完就等到窗口結束。
 - 使用者退出（redeem、close 都是賣成 USDT）和 owner 自己轉出不受額度影響。
 - 額度跟著「目前」總值算，所以同一天加碼存入後，額度也跟著變大。
+- 最低費（#33）：每個有換幣的批次合計收 `max(成交額 × 比例費, min(minBatchFee, 成交額 × 1%))`，差額在批次最後從帳戶的 USDT 補收，不超過帳戶當下的 USDT 餘額與 allowance，所以不會讓批次 revert（包括退出）。後端排程買入時，要替 `minFeeTopUp(策略, 這批成交額)` 留 USDT，否則這筆會少收（事件 `MinFeeCharged` 的 `due` 與 `charged` 會不同）。只有 Safe 能改 `setMinBatchFee`，上限 5 USDT；設 0 就只收比例費。
 
 ## 情境 6：venue 白名單（聚合器，#15）
 
@@ -242,18 +244,20 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
 - **警示**：bStock 在美股休市時段閒置是預期的，不發警示；加密貨幣、穩定幣池子連續閒置超過幾個小時，或「紀錄不足」持續超過 1 小時，才發警示（可能是池子壞了、流動性撤走，或 cardinality 步驟沒做）。
 - 不要在後端自己用 spot 價格補位；合約不收沒有地板的步驟（`NoFloor`），補了也送不出去。
 
-## 演練輸出（2026-11-13，Blast fork block 133358010，8 分 21 秒）
+## 演練輸出（2026-11-15，Blast fork block 133658789，含 #33 最低費）
 
 ```
+== 準備：上線前步驟 IncreaseObservationCardinality（#25 M-2；任何有 BNB 的錢包，這裡用 #1）
+  ✓ 預熱 14360 個 observation slot（fork 區塊 133658789）
+  ✓ transactions 23, new observation slots 14360; every pool now has observationCardinalityNext >= 2400
 == 準備：部署 v2 並交給 Safe A（與主網同一支 DeployAtpMainnet）
-  ✓ Safe A 0x802381df98074f1b5BC6f25741ba0698B4f8eBF4（2-of-3：#1 #2 #3）
+  ✓ Safe A 0xc20Aeb15fA27eC3eaB67D1d07831eD5c340D6b04（2-of-3：#1 #2 #3）
   ✓ registry 0x891d13a0a03bb7c435bc7b7c2242f2c2982b6733 / router 0x61df85c020f21e320b9889f9afd71a7176551818 / executor 0xa5d9d8a6e06b482f03deaf33f103b8f4ad60e92a
   ✓ registry owner = Safe A
   ✓ router owner = Safe A
   ✓ operator = OP1
   ✓ 帳戶已 enroll、未暫停
   ✓ 帳戶可以呼叫 executeRebalance（空步驟）
-
 == 情境 1：緊急暫停單一帳戶（建議順序：先撤 operator，再暫停）
   ✓ 1-1 Safe A setOperator(0) → operator = 0
   ✓ 1-2 Safe A setPaused(帳戶, true) → paused = true
@@ -269,7 +273,6 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓     paused = true
   ✓ 1-10 帳戶自己解除 → pauseFlags = 0
   ✓ 1-11 Safe A 再暫停一次 → pauseFlags = 1
-
 == 情境 2：撤銷並更換 operator（OP1 私鑰外洩）
   ✓ 2-1 Safe A setOperator(OP2) → operator = OP2
   ✓ 2-2 舊 operator enroll → revert Unauthorized()
@@ -281,9 +284,8 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 2-8 新 operator 解除自己的 → pauseFlags = 1
   ✓ 2-9 Safe A 解除 → paused = false
   ✓ 2-10 帳戶恢復，executeRebalance 不再 revert
-
 == 情境 3：Safe 交接（Safe A → Safe B，簽署人 #3 換成 #7）
-  ✓ 3-1 Safe B 0x060D2CC3BC8515AA2268D683FBda60b14c432092（2-of-3：#1 #2 #7）
+  ✓ 3-1 Safe B 0x8B2aE6F1cc775460bA52Fb7b5478b8B337DDdbc2（2-of-3：#1 #2 #7）
   ✓ 3-2 registry pendingOwner = Safe B
   ✓     router pendingOwner = Safe B
   ✓     接受前 registry owner 仍是 Safe A
@@ -301,7 +303,6 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓     Safe A registry transferOwnership → revert NotOwner()
   ✓ 3-6 Safe B setFeeRecipient（executor 跟著 registry owner，不用另外交接）
   ✓     Safe B setOperator
-
 == 情境 4：全域暫停（Safe 一筆停全部、一筆恢復）
   ✓ 4-1 部署後 globalPaused = false
   ✓ 4-2 operator 啟動全域暫停 → revert NotOwner()
@@ -311,41 +312,43 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓ 4-5 operator 解除全域暫停 → revert NotOwner()
   ✓ 4-6 Safe B setGlobalPaused(false) → globalPaused = false
   ✓ 4-7 恢復後 executeRebalance 不再 revert
-
 == 情境 4 備案：逐資產拔價格來源（只停單一資產）
   ✓ 4-8 Safe B clearOracle(WBNB) → oracleOf(WBNB) = 0
   ✓ 4-9 USDT→WBNB 報價（所有帳戶的 WBNB swap 都停） → revert OracleNotSet(address)
-  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xd679387C9579477fEC149F44cdaB9840C120BfDf），報價 156092469278864030
+  ✓ 4-10 Safe B setOracle 恢復（新 oracle 0xd679387C9579477fEC149F44cdaB9840C120BfDf），報價 169532466915879836
   ✓ 4-11 clearOracle 也一併拿掉 WBNB 的第二價格來源
-  ✓ 4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD, USDT/USD, 1h, 200 bps) 恢復
+  ✓ 4-12 Safe B setSecondary(WBNB, Chainlink BNB/USD 81 秒, USDT/USD 2700 秒, 200 bps) 恢復
   ✓     operator 拿掉第二價格來源 → revert NotOwner()
-
 == 情境 5：買入額度與只准賣出模式（真的在 fork 上 swap）
   ✓ 5-1 部署後 maxBuyBps = 10000、numeraire = USDT
   ✓ 5-2 operator 改買入額度 → revert NotOwner()
+  ✓ 5-2b 部署後 minBatchFee = 0.30 USDT（#33）
+  ✓     operator 改最低費 → revert NotOwner()
+  ✓     Safe B 設超過上限（5 USDT + 1 wei） → revert MinBatchFeeTooHigh(uint256)
   ✓ 5-3 帳戶持有 0.01 WBNB
   ✓ 5-4 Safe B setMaxBuyBps(0) → 只准賣出
   ✓ 5-5 買入 USDT→WBNB → revert BuyLimitExceeded(uint256,uint256)
-  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 6.403043165469122009 USDT）
+  ✓ 5-6 賣出 WBNB→USDT 照常成交（得到 5.849337137003443587 USDT）
+  ✓     最低費：全額退出這筆（成交 5.908421350508528875 USDT）收 1%，不是 0.30
   ✓     賣出不計入額度（買入窗沒有打開）
   ✓ 5-7 Safe B setMaxBuyBps(10000) → 恢復
   ✓ 5-8 買入一半 USDT → 成交，buyAllowance 已用 = 買入金額
-  ✓     額度 = 帳戶總值 6.401548770770989744 USDT，窗口到 1794662488
+  ✓     額度 = 帳戶總值 5.812589508998625007 USDT，窗口到 1794797500
   ✓ 5-9 再買入一整個額度（超過） → revert BuyLimitExceeded(uint256,uint256)
-
 == 情境 6：venue 白名單（聚合器，用 API 現拿的 calldata 在 fork 上成交）
   ✓ 6-1 Universal Router 是建構時登錄的 PANCAKE_UR venue（kind 1）
   ✓     KyberSwap 尚未加入（kind 0）
   ✓ 6-2 operator 加 venue → revert NotOwner()
   ✓ 6-3 KyberSwap 還沒加入就成交 → revert VenueNotAllowed(address)
   ✓ 6-4 Safe B setVenue(KyberSwap, ERC20_APPROVE) → kind 2
-  ✓ 6-5 經 KyberSwap 賣 0.002497500727700529 WBNB → 1.600197485906213888 USDT（地板 1.584409351205608192）
+  ✓ 6-5 經 KyberSwap 賣 0.002472525867782032 WBNB → 1.460921140736973974 USDT（地板 1.448770800471091497；最低費另收 0.014609211407369739）
   ✓     executor 對 KyberSwap 的 allowance 歸零
   ✓     executor 沒有留下任何 WBNB／USDT
   -- DOGE：1,000 USDT 經 KyberSwap（docs#26 量到直接池過不了地板）
-  ✓ 6-6 帳戶包 10 BNB 並經 Pancake 賣成 6407.318587494241238195 USDT（準備買 DOGE）
+  ✓ 6-6 帳戶包 10 BNB 並經 Pancake 賣成 5911.285462226465626855 USDT（準備買 DOGE）
+  ✓ 6-6b DOGE 池 observation 原本 2004 秒前，模擬成交後 = 0 秒
   · 6-7 對照：同一筆走 DOGE/USDT 1% 直接池，這個區塊模擬可以成交（池子深度隨時間變）
-  ✓ 6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → 15281.42 DOGE（地板 14927.51）
+  ✓ 6-8 經 KyberSwap 買 1,000 USDT 的 DOGE → 16915.58 DOGE（地板 16745.01）
   ✓     executor 沒有留下任何 USDT／DOGE、對 KyberSwap 的 allowance 歸零
   ✓ 6-9 Safe B setVenue(OpenOcean, ERC20_APPROVE) → kind 2
   ⚠ 6-10 OpenOcean 的 calldata 在 fork 上 revert：OpenOcean external call failed: Unknown(), data: 
@@ -353,8 +356,8 @@ executor 有一個 `globalPaused` 開關，只有 registry 的 owner（Safe）�
   ✓     executor 對 OpenOcean 的 allowance 為 0、沒有留下任何 WBNB／USDT
   ✓ 6-11 Safe B removeVenue(KyberSwap) → kind 0
   ✓     移除後同一筆 KyberSwap 交易 → revert VenueNotAllowed(address)
-
 演練全部通過。
+FORK_RPC=http://127.0.0.1:8549 bash scripts/drill-ops-fork.sh  17.37s user 15.37s system 2% cpu 19:59.94 total
 ```
 
 ## 這次沒演到

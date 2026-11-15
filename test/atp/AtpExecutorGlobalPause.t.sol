@@ -30,7 +30,8 @@ contract AtpExecutorGlobalPauseTest is Test {
             address(new MockPermit2()),
             FEE_RECIPIENT,
             address(new MockERC20()),
-            10_000
+            10_000,
+            0
         );
         registry.setOperator(OPERATOR);
 

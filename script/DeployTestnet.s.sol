@@ -98,6 +98,8 @@ contract DeployTestnet is Script {
     uint32 internal constant TWAP_WINDOW = 30 minutes;
     uint32 internal constant MAX_ORACLE_AGE = 1 hours;
     uint16 internal constant MAX_BUY_BPS = 10_000;
+    /// @notice Minimum fee per swap batch (cre8-contracts#33): 0.30 USDT (mock USDT has 18 decimals); settable by the owner.
+    uint256 internal constant MIN_BATCH_FEE = 0.3e18;
     uint16 internal constant SECONDARY_MAX_DEVIATION_BPS = 200;
 
     // ---- testnet-only parameters ----
@@ -245,7 +247,8 @@ contract DeployTestnet is Script {
                         PERMIT2,
                         TestnetBook.FEE_RECIPIENT,
                         address(core.usdt),
-                        MAX_BUY_BPS
+                        MAX_BUY_BPS,
+                        MIN_BATCH_FEE
                     )
                 )
             )
@@ -534,6 +537,7 @@ contract DeployTestnet is Script {
         require(core.executor.numeraire() == address(core.usdt), "executor numeraire");
         require(core.executor.feeRecipient() == TestnetBook.FEE_RECIPIENT, "executor fee recipient");
         require(core.executor.maxBuyBps() == MAX_BUY_BPS && !core.executor.globalPaused(), "executor guards");
+        require(core.executor.minBatchFee() == MIN_BATCH_FEE, "executor minBatchFee");
         (AtpExecutor.VenueKind kind,) = core.executor.venues(V3_UNIVERSAL_ROUTER);
         require(kind == AtpExecutor.VenueKind.PANCAKE_UR, "UR venue");
         require(core.usdt.decimals() == 18 && core.usdt.dailyLimit() == FAUCET_DAILY_LIMIT, "USDT");

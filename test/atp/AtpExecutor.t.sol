@@ -47,6 +47,7 @@ contract MockPermit2 {
 
 /// @dev Minimal ERC20 with mint, enough for `SafeERC20` (which reads the boolean return value).
 contract MockERC20 {
+    uint8 public constant decimals = 18;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -124,9 +125,9 @@ contract AtpExecutorHarness is AtpExecutor {
         address permit2_,
         address feeRecipient_
     )
-        // The numeraire only drives the buy limit (covered in AtpExecutorBuyLimit.t.sol); any contract will do
-        // for the decoder / swap-leg tests here.
-        AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_, address(registry_), 10_000)
+        // The numeraire only drives the buy limit (AtpExecutorBuyLimit.t.sol) and the minimum batch fee
+        // (AtpExecutorMinFee.t.sol, off here); any token with decimals will do for the decoder / swap-leg tests.
+        AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_, address(new MockERC20()), 10_000, 0)
     { }
 
     function checkCommands(bytes calldata commands, bytes[] calldata inputs) external view {

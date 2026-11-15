@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
@@ -35,6 +36,15 @@ import { AtpRegistry } from "./AtpRegistry.sol";
 /// call; and the `tokenOut` that actually landed here must clear the step's `amountOutMin` (never below the
 /// oracle floor) or the whole batch reverts. A venue can therefore take at most (step amount - amountOutMin)
 /// per step, and never more than (step amount - floor), the same bound as a sandwich today.
+/// @dev Minimum batch fee (cre8-contracts#33, docs P12): a batch with at least one swap pays
+/// `max(notional x feeBps, min(minBatchFee, notional x MIN_FEE_MAX_BPS))`, where `notional` is the batch's
+/// numeraire volume (a buy's `amountIn` plus a sale's gross output). The proportional part is still split off
+/// each step's output exactly as before, so every step's floor check is unchanged; only the difference up to
+/// the minimum (the top-up) is pulled in numeraire from the account after the last step. Because the top-up
+/// never comes out of a swap's output, it neither enters nor loosens any floor. Two bounds keep it from
+/// becoming a lever: it is at most `MIN_FEE_MAX_BPS` of the batch notional (a leaked session key cannot grind
+/// an account down with dust batches, and a dust exit pays at most that share), and it is capped at what the
+/// account holds and has approved in numeraire, so it never blocks a batch - least of all an exit.
 contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -47,6 +57,10 @@ contract AtpExecutor is ReentrancyGuard {
     uint256 public constant BUY_WINDOW = 1 days;
     /// @notice Upper bound for `maxBuyBps` (2x the account value per window).
     uint16 public constant MAX_BUY_BPS_CEILING = 20_000;
+    /// @notice The minimum-fee top-up never exceeds this share of the batch notional (1%).
+    uint16 public constant MIN_FEE_MAX_BPS = 100;
+    /// @notice Upper bound for `minBatchFee`: 5 whole numeraire units (5 USDT), read from its decimals.
+    uint256 public immutable minBatchFeeCeiling;
 
     /// @notice Strategy/enrollment/fee record. Also the admin for `feeRecipient`.
     AtpRegistry public immutable registry;
@@ -71,6 +85,8 @@ contract AtpExecutor is ReentrancyGuard {
     bool public globalPaused;
     /// @notice Per-window buy cap in bps of the account's current value (registry owner only; 0 = sales only).
     uint16 public maxBuyBps;
+    /// @notice Minimum fee per swap batch in numeraire units (registry owner only; 0 = proportional fee only).
+    uint256 public minBatchFee;
 
     /// @dev One slot per account. `bought` is the numeraire spent on buys since `start`.
     struct BuyWindow {
@@ -133,6 +149,10 @@ contract AtpExecutor is ReentrancyGuard {
     event FeeRecipientUpdated(address indexed previousRecipient, address indexed newRecipient);
     event GlobalPausedSet(bool paused);
     event MaxBuyBpsSet(uint16 bps);
+    event MinBatchFeeSet(uint256 amount);
+    /// @dev `due` is the top-up the batch owed over its proportional fee; `charged` is what was pulled (less only
+    /// when the account held or had approved less numeraire).
+    event MinFeeCharged(address indexed account, uint256 notional, uint256 due, uint256 charged);
     event VenueSet(address indexed target, VenueKind kind, address spender);
     event VenueRemoved(address indexed target);
 
@@ -163,6 +183,7 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev This batch would take the window's buys to `bought`, above `cap` (value x `maxBuyBps`).
     error BuyLimitExceeded(uint256 bought, uint256 cap);
     error BuyBpsTooHigh(uint16 bps);
+    error MinBatchFeeTooHigh(uint256 amount);
     /// @dev Neither leg is the numeraire, so the step is neither a sale nor a countable buy. The oracle router
     /// rejects such a pair as well; this keeps the buy limit fail-closed on its own.
     error NotNumeraireRoute(address tokenIn, address tokenOut);
@@ -177,7 +198,8 @@ contract AtpExecutor is ReentrancyGuard {
         address permit2_,
         address feeRecipient_,
         address numeraire_,
-        uint16 maxBuyBps_
+        uint16 maxBuyBps_,
+        uint256 minBatchFee_
     ) {
         if (
             address(registry_).code.length == 0 || address(universalRouter_).code.length == 0
@@ -185,6 +207,8 @@ contract AtpExecutor is ReentrancyGuard {
                 || feeRecipient_ == address(0) || numeraire_.code.length == 0
         ) revert InvalidConfig();
         if (maxBuyBps_ > MAX_BUY_BPS_CEILING) revert BuyBpsTooHigh(maxBuyBps_);
+        uint256 ceiling = 5 * 10 ** IERC20Metadata(numeraire_).decimals();
+        if (minBatchFee_ > ceiling) revert MinBatchFeeTooHigh(minBatchFee_);
 
         // v1 hardening: on the chains this protocol actually serves, pin Permit2 to the canonical Uniswap
         // deployment. The code-length check above accepts any contract, so a mis-wired `permit2_` on BSC
@@ -207,6 +231,9 @@ contract AtpExecutor is ReentrancyGuard {
         numeraire = numeraire_;
         maxBuyBps = maxBuyBps_;
         emit MaxBuyBpsSet(maxBuyBps_);
+        minBatchFeeCeiling = ceiling;
+        minBatchFee = minBatchFee_;
+        emit MinBatchFeeSet(minBatchFee_);
         _setVenue(address(universalRouter_), VenueKind.PANCAKE_UR, address(0));
     }
 
@@ -235,6 +262,15 @@ contract AtpExecutor is ReentrancyGuard {
         if (bps > MAX_BUY_BPS_CEILING) revert BuyBpsTooHigh(bps);
         maxBuyBps = bps;
         emit MaxBuyBpsSet(bps);
+    }
+
+    /// @notice Set the minimum fee per swap batch, at most `minBatchFeeCeiling`. `0` leaves only the proportional
+    /// fee. Registry owner only; the operator has no access.
+    function setMinBatchFee(uint256 amount) external {
+        if (msg.sender != registry.owner()) revert NotOwner();
+        if (amount > minBatchFeeCeiling) revert MinBatchFeeTooHigh(amount);
+        minBatchFee = amount;
+        emit MinBatchFeeSet(amount);
     }
 
     /// @notice Allow (or reconfigure) `target` as a venue. Registry owner only; the operator has no access.
@@ -293,10 +329,14 @@ contract AtpExecutor is ReentrancyGuard {
         (bool hasBuy, uint256 cap, BuyWindow memory window) = _openBuyWindow(account, enrollment, steps);
 
         uint256 count = steps.length;
+        // Numeraire volume of the batch: a buy's input plus a sale's gross output (every step has exactly one
+        // numeraire leg, see NotNumeraireRoute).
+        uint256 notional;
         for (uint256 i; i < count; ++i) {
             SwapStep calldata step = steps[i];
             uint256 floor = _checkStep(account, step, enrollment, feeBps);
-            if (step.tokenOut != numeraire) {
+            bool isBuy = step.tokenOut != numeraire;
+            if (isBuy) {
                 // A buy: counted against the window, before any token moves.
                 if (step.tokenIn != numeraire) revert NotNumeraireRoute(step.tokenIn, step.tokenOut);
                 uint256 bought = window.bought + step.amountIn;
@@ -306,12 +346,45 @@ contract AtpExecutor is ReentrancyGuard {
             uint256 gross = _swap(account, step, deadline);
             // `_checkStep` already required amountOutMin >= floor, so this bound also covers the oracle floor.
             if (gross < step.amountOutMin) revert BelowFloor(gross, step.amountOutMin);
+            notional += isBuy ? step.amountIn : gross;
             uint256 fee = _splitFee(step.tokenOut, gross, feeBps, account);
             emit SwapExecuted(
                 account, step.tokenIn, step.tokenOut, step.amountIn, gross, fee, gross - fee, floor
             );
         }
         if (hasBuy) buyWindowOf[account] = window;
+        _chargeMinFee(account, notional, feeBps);
+    }
+
+    // ---- minimum batch fee ----
+
+    /// @notice The minimum-fee top-up a batch of `notional` numeraire volume owes under strategy `strategyId`'s
+    /// fee, on top of the proportional fee split off its steps. 0 for an empty batch or once the proportional
+    /// fee reaches the minimum. The executor pulls at most the account's numeraire balance and allowance.
+    function minFeeTopUp(uint256 strategyId, uint256 notional) external view returns (uint256) {
+        return _minFeeTopUp(notional, registry.effectiveFeeBps(strategyId));
+    }
+
+    /// @dev topUp = max(0, min(minBatchFee, notional x MIN_FEE_MAX_BPS) - notional x feeBps), both rounded
+    /// down; so proportional + topUp = max(proportional, minimum). The proportional part is credited at the
+    /// notional value, which is what each step's fee (taken in its output token) is worth at execution.
+    function _minFeeTopUp(uint256 notional, uint16 feeBps) internal view returns (uint256) {
+        uint256 minimum = Math.min(minBatchFee, Math.mulDiv(notional, MIN_FEE_MAX_BPS, BPS_DENOMINATOR));
+        uint256 proportional = Math.mulDiv(notional, feeBps, BPS_DENOMINATOR);
+        return minimum > proportional ? minimum - proportional : 0;
+    }
+
+    /// @dev Pulled after every step has cleared its floor, from the account's own numeraire, never from a swap
+    /// output. Capped at the balance and allowance the account has, so the fee can be short but can never
+    /// make a batch revert (an exit whose proceeds are below the minimum still goes through).
+    function _chargeMinFee(address account, uint256 notional, uint16 feeBps) internal {
+        uint256 due = _minFeeTopUp(notional, feeBps);
+        if (due == 0) return;
+        IERC20 token = IERC20(numeraire);
+        uint256 charged =
+            Math.min(due, Math.min(token.balanceOf(account), token.allowance(account, address(this))));
+        if (charged > 0) token.safeTransferFrom(account, feeRecipient, charged);
+        emit MinFeeCharged(account, notional, due, charged);
     }
 
     // ---- buy limit ----

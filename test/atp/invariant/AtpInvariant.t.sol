@@ -56,23 +56,27 @@ contract AtpInvariantTest is Test {
         }
     }
 
-    /// (2) Accounts trade only allowlisted assets through allowlisted venues; at most `amountIn` leaves; the fee
-    /// is exactly floor(gross x feeBps) and goes only to `feeRecipient`; nobody else's balance moves.
+    /// (2) Accounts trade only allowlisted assets through allowlisted venues; at most `amountIn` (plus the
+    /// minimum-fee top-up) leaves; the fee is exactly floor(gross x feeBps) and goes only to `feeRecipient`; the
+    /// top-up never exceeds what is due (<= minBatchFee and <= 1% of the notional) and is short only when the
+    /// account has no USDT left; nobody else's balance moves.
     function invariant_2_onlyAllowedSwapsAndFeeOnlyToRecipient() public view {
         assertEq(handler.ghostNotAllowedExecuted(), 0, "asset outside the pinned version traded");
         assertEq(handler.ghostUnlistedVenueExecuted(), 0, "venue off the allowlist used");
         assertEq(handler.ghostInOverspend(), 0, "more than amountIn left the account");
         assertEq(handler.ghostFeeViolations(), 0, "fee wrong or elsewhere");
+        assertEq(handler.ghostMinFeeViolations(), 0, "minimum-fee top-up wrong");
         assertEq(handler.ghostLeaks(), 0, "another account's balance moved");
     }
 
-    /// (3) No caller but the Safe changes venues, oracles, secondaries, fees, the operator, maxBuyBps, the global
-    /// pause, strategy versions or ownership.
+    /// (3) No caller but the Safe changes venues, oracles, secondaries, fees, the minimum batch fee, the
+    /// operator, maxBuyBps, the global pause, strategy versions or ownership.
     function invariant_3_onlyTheSafeAdministers() public view {
         assertEq(handler.ghostUnauthorizedAdmin(), 0, "non-Safe admin call succeeded");
         assertEq(handler.registry().owner(), address(handler), "registry owner");
         assertEq(handler.router().owner(), address(handler), "router owner");
         assertEq(handler.executor().feeRecipient(), address(0xFEE), "fee recipient");
+        assertLe(handler.executor().minBatchFee(), handler.executor().minBatchFeeCeiling(), "min fee ceiling");
     }
 
     /// (4) The operator only makes first enrollments and only lifts its own pause; the account lifts every pause;
@@ -122,6 +126,8 @@ contract AtpInvariantTest is Test {
             h.rebalance(0, false, 0, 10e18, venue, 15, 10_000, 0); // honest sale of A
         }
         assertEq(h.callsSwapOk(), 14, "UR, ERC20 and Permit2 venues settle both ways");
+        // No proportional fee is set yet, so every one of these swaps (100 USDT buys, ~20 USDT sales) pays a top-up.
+        assertEq(h.callsMinFeeCharged(), 14, "every settled swap paid a minimum-fee top-up");
         h.rebalance(0, true, 0, 100e18, 7, 15, 10_000, 0); // venue off the allowlist
         assertEq(h.callsSwapReverted(), 1);
 
@@ -143,7 +149,9 @@ contract AtpInvariantTest is Test {
         h.rebalance(0, true, 0, 100e18, 2, 15, 10_000, 10_000); // pays exactly amountOutMin
         assertEq(h.callsSwapOk(), 17, "a payout equal to amountOutMin settles");
         assertEq(
-            h.ghostFloorViolations() + h.ghostMinOutViolations() + h.ghostFeeViolations() + h.ghostLeaks(), 0
+            h.ghostFloorViolations() + h.ghostMinOutViolations() + h.ghostFeeViolations()
+                + h.ghostMinFeeViolations() + h.ghostLeaks(),
+            0
         );
     }
 
@@ -151,6 +159,7 @@ contract AtpInvariantTest is Test {
         console.log("swaps ok / reverted:", handler.callsSwapOk(), handler.callsSwapReverted());
         console.log("  buys ok / sales ok:", handler.callsBuyOk(), handler.callsSellOk());
         console.log("  malicious-mode swaps that still settled:", handler.callsMaliciousOk());
+        console.log("  swaps that paid a minimum-fee top-up:", handler.callsMinFeeCharged());
         console.log(
             "admin attempts / enroll / pause calls:",
             handler.callsAdminAttempts(),

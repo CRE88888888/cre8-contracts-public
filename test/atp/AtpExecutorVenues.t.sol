@@ -124,7 +124,7 @@ contract AtpExecutorVenuesTest is Test {
         registry = new AtpRegistry();
         registry.setOperator(OPERATOR);
         executor =
-            new AtpExecutor(registry, ur, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 20_000);
+            new AtpExecutor(registry, ur, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 20_000, 0);
 
         address[] memory assets = new address[](2);
         assets[0] = address(usdt);

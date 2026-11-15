@@ -7,7 +7,9 @@ CRE8 ATP（Automated Token Portfolio）智慧合約。獨立 repo，自 bnb-agen
 
 - 第一版策略：**股票指數**（目標權重 ＋ 排程/漂移再平衡 ＋ swap），標的為 BSC bStock（ERC-20）。
 - 聚合器：PancakeSwap（Unified Swap API ＋ Universal Router）。
-- 收費：pool fee（swap 內）＋ swap fee（輸出側，admin-only）。infra fee／訂閱走 x402（暫緩）。
+- 收費：pool fee（swap 內）＋ swap fee（輸出側，admin-only）＋每批次最低費（#33）。infra fee／訂閱走 x402（暫緩）。
+  每個有換幣的批次合計收 `max(成交額 × swapFeeBps, min(minBatchFee, 成交額 × 1%))`；比例費照舊從每一步輸出抽，
+  不足最低費的差額在批次最後從帳戶的 USDT 補收（上限為帳戶當下的 USDT 餘額與 allowance），不從 swap 輸出扣，所以不進地板計算。
 
 ## 合約
 
@@ -21,7 +23,7 @@ CRE8 ATP（Automated Token Portfolio）智慧合約。獨立 repo，自 bnb-agen
 ## 核心不變式
 
 `minGross = ceil(oracleFloor / (1 - swapFeeBps/10000))`：fee 併進 minOut 反推，保證扣費後使用者實得
-仍 ≥ oracle 地板。詳見 `docs/atp-pivot-executor-spec.zh-TW.md`（在 bnb-agent-vaults repo）。
+仍 ≥ oracle 地板。最低費的補收不從 swap 輸出扣，不改變這條式子（#33）。詳見 `docs/atp-pivot-executor-spec.zh-TW.md`（在 bnb-agent-vaults repo）。
 
 ## 工具鏈
 

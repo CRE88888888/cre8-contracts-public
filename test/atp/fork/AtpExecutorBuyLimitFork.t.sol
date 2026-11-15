@@ -17,7 +17,8 @@ import { IV3Factory, MockSmartAccount } from "./AtpExecutorFork.t.sol";
 /// (A3), per the #10 decision.
 /// @dev Covered: an A -> USDT -> A round trip is stopped once the window's buys reach the cap; a buy above the
 /// cap reverts; sales to USDT still go through with the cap spent and are not counted; the cap is back in the
-/// next 24-hour window. Swap fee is 0 so each step only has to clear the oracle floor (1% slippage on WBNB).
+/// next 24-hour window. Swap fee and minimum batch fee are 0 so each step only has to clear the oracle floor (1%
+/// slippage on WBNB); the minimum fee on the fork is AtpExecutorMinFeeFork.t.sol.
 /// @dev Without `BSC_RPC_URL` the suite is skipped, never passed.
 contract AtpExecutorBuyLimitForkTest is ForkPoolHelpers {
     address internal constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
@@ -62,7 +63,8 @@ contract AtpExecutorBuyLimitForkTest is ForkPoolHelpers {
             PERMIT2,
             FEE_RECIPIENT,
             USDT,
-            10_000
+            10_000,
+            0
         );
 
         account = new MockSmartAccount();

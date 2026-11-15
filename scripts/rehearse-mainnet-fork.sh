@@ -135,6 +135,7 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
   expect_revert "router clearSecondary"      $RT "clearSecondary(address)" 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c --unlocked --from "$WHO"
   expect_revert "executor setGlobalPaused"   $EX "setGlobalPaused(bool)" true --unlocked --from "$WHO"
   expect_revert "executor setMaxBuyBps"      $EX "setMaxBuyBps(uint16)" 20000 --unlocked --from "$WHO"
+  expect_revert "executor setMinBatchFee"    $EX "setMinBatchFee(uint256)" 0 --unlocked --from "$WHO"
   expect_revert "executor setVenue"          $EX "setVenue(address,uint8,address)" $KYBER 2 $KYBER --unlocked --from "$WHO"
   expect_revert "executor removeVenue"       $EX "removeVenue(address)" $UR --unlocked --from "$WHO"
 done
@@ -175,6 +176,14 @@ cast send -q $EX "setMaxBuyBps(uint16)" 0 --unlocked --from "$SAFE" >/dev/null
 [ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "0" ] && ok "Safe setMaxBuyBps(0) → 只准賣出" || fail "setMaxBuyBps 0"
 cast send -q $EX "setMaxBuyBps(uint16)" 10000 --unlocked --from "$SAFE" >/dev/null
 [ "$(cast call $EX 'maxBuyBps()(uint16)' | awk '{print $1}')" = "10000" ] && ok "Safe setMaxBuyBps(10000) → 恢復" || fail "setMaxBuyBps 10000"
+min_fee() { cast call $EX 'minBatchFee()(uint256)' | awk '{print $1}'; }
+[ "$(min_fee)" = "300000000000000000" ] && ok "部署後 minBatchFee = 0.30 USDT（#33）" || fail "minBatchFee $(min_fee)"
+[ "$(cast call $EX 'minBatchFeeCeiling()(uint256)' | awk '{print $1}')" = "5000000000000000000" ] && ok "minBatchFee 上限 = 5 USDT" || fail "minBatchFeeCeiling"
+expect_revert "Safe setMinBatchFee(5 USDT + 1 wei) 超過上限" $EX "setMinBatchFee(uint256)" 5000000000000000001 --unlocked --from "$SAFE"
+cast send -q $EX "setMinBatchFee(uint256)" 0 --unlocked --from "$SAFE" >/dev/null
+[ "$(min_fee)" = "0" ] && ok "Safe setMinBatchFee(0) → 只收比例費" || fail "setMinBatchFee 0"
+cast send -q $EX "setMinBatchFee(uint256)" 300000000000000000 --unlocked --from "$SAFE" >/dev/null
+[ "$(min_fee)" = "300000000000000000" ] && ok "Safe setMinBatchFee(0.30 USDT) → 恢復" || fail "setMinBatchFee 0.30"
 venue_kind() { cast call $EX 'venues(address)(uint8,address)' "$1" | head -1; }
 [ "$(venue_kind $UR)" = "1" ] && ok "部署後唯一的 venue：Universal Router（PANCAKE_UR）" || fail "UR venue"
 [ "$(venue_kind $KYBER)" = "0" ] || fail "部署後不該有 KyberSwap venue"

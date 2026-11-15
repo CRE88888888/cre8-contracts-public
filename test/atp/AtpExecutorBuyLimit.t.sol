@@ -10,6 +10,7 @@ import { MockPermit2 } from "./AtpExecutor.t.sol";
 
 /// @dev ERC20 with free mint/burn so the router stub can really consume the input and pay the output.
 contract BurnableToken {
+    uint8 public constant decimals = 18;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
@@ -95,7 +96,8 @@ contract PricedRouter is IUniversalRouter {
 /// @notice Pins A10-1 (cre8-contracts#10): per account and fixed 24-hour window, buys (numeraire -> asset)
 /// total at most `maxBuyBps` of the account's current value; sales to the numeraire are never limited nor
 /// counted; only the registry owner sets the cap. This test contract is the registry owner and the enrolled
-/// account (it has code), with A priced at 2 and B at 0.5 numeraire units and no swap fee.
+/// account (it has code), with A priced at 2 and B at 0.5 numeraire units and no swap fee (no minimum batch fee
+/// either; that is AtpExecutorMinFee.t.sol).
 contract AtpExecutorBuyLimitTest is Test {
     address internal constant OPERATOR = address(0x0FE7);
     address internal constant OUTSIDER = address(0xCAFE);
@@ -122,7 +124,7 @@ contract AtpExecutorBuyLimitTest is Test {
         registry = new AtpRegistry();
         registry.setOperator(OPERATOR);
         executor = new AtpExecutor(
-            registry, router, oracle, address(new MockPermit2()), FEE_RECIPIENT, address(usdt), 10_000
+            registry, router, oracle, address(new MockPermit2()), FEE_RECIPIENT, address(usdt), 10_000, 0
         );
 
         address[] memory assets = new address[](3);
@@ -233,13 +235,13 @@ contract AtpExecutorBuyLimitTest is Test {
     function test_constructor_rejectsCapAboveCeiling() public {
         MockPermit2 permit2 = new MockPermit2();
         vm.expectRevert(abi.encodeWithSelector(AtpExecutor.BuyBpsTooHigh.selector, uint16(20_001)));
-        new AtpExecutor(registry, router, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 20_001);
+        new AtpExecutor(registry, router, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 20_001, 0);
     }
 
     function test_constructor_rejectsNumeraireWithoutCode() public {
         MockPermit2 permit2 = new MockPermit2();
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutor(registry, router, oracle, address(permit2), FEE_RECIPIENT, address(0xDEAD), 10_000);
+        new AtpExecutor(registry, router, oracle, address(permit2), FEE_RECIPIENT, address(0xDEAD), 10_000, 0);
     }
 
     function test_setMaxBuyBps_onlyRegistryOwnerAndBounded() public {

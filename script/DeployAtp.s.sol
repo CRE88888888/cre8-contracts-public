@@ -75,6 +75,8 @@ contract DeployAtp is Script {
     uint32 internal constant MAX_ORACLE_AGE = 3600;
     /// @dev A10-1 buy limit, same value as `DeployAtpMainnet`.
     uint16 internal constant MAX_BUY_BPS = 10_000;
+    /// @notice Minimum fee per swap batch (cre8-contracts#33): 0.30 USDT (18 decimals on BSC); settable by the Safe.
+    uint256 internal constant MIN_BATCH_FEE = 0.3e18;
 
     struct Deployment {
         AtpRegistry registry;
@@ -204,11 +206,17 @@ contract DeployAtp is Script {
 
     /// @dev An executor deployed before the venue allowlist (#15; still alive on a long-running fork) has the
     /// old `SwapStep` ABI and no venues (and, if older still, no buy limit or global pause). The allowlist
-    /// shipped after A10-1 and A10-3, so `venues` vouches for all three.
+    /// shipped after A10-1 and A10-3, so `venues` vouches for all three. One deployed before the minimum batch
+    /// fee (#33) has no `minBatchFee` and would silently charge only the proportional fee.
     function _hasVenues(address candidate) internal view returns (bool) {
         (bool ok, bytes memory ret) =
             candidate.staticcall(abi.encodeWithSignature("venues(address)", V3_UNIVERSAL_ROUTER));
         return ok && ret.length == 64;
+    }
+
+    function _hasMinBatchFee(address candidate) internal view returns (bool) {
+        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("minBatchFee()"));
+        return ok && ret.length == 32;
     }
 
     function _reuseExecutor(address recorded, AtpRegistry registry, AtpMultiPoolOracle multiPool)
@@ -228,6 +236,10 @@ contract DeployAtp is Script {
                     _hasVenues(recorded),
                     "recorded executor predates the venue allowlist (#15): restart the fork"
                 );
+                require(
+                    _hasMinBatchFee(recorded),
+                    "recorded executor predates the minimum batch fee (#33): restart the fork"
+                );
                 return (candidate, false);
             }
         }
@@ -239,7 +251,8 @@ contract DeployAtp is Script {
                 PERMIT2,
                 msg.sender,
                 USDT,
-                MAX_BUY_BPS
+                MAX_BUY_BPS,
+                MIN_BATCH_FEE
             ),
             true
         );

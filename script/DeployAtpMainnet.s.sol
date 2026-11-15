@@ -47,6 +47,8 @@ contract DeployAtpMainnet is Script, AtpMainnetSpecs {
 
     /// @dev A10-1 buy limit: per account, buys within 24 hours may total at most 100% of its current value.
     uint16 internal constant MAX_BUY_BPS = 10_000;
+    /// @notice Minimum fee per swap batch (cre8-contracts#33): 0.30 USDT (18 decimals on BSC); settable by the Safe.
+    uint256 internal constant MIN_BATCH_FEE = 0.3e18;
 
     function run() external {
         require(block.chainid == 56, "DeployAtpMainnet: BSC mainnet (56) only");
@@ -98,7 +100,8 @@ contract DeployAtpMainnet is Script, AtpMainnetSpecs {
             PERMIT2,
             treasury,
             USDT,
-            MAX_BUY_BPS
+            MAX_BUY_BPS,
+            MIN_BATCH_FEE
         );
         registry.setOperator(operator);
         registry.transferOwnership(safe);
@@ -165,6 +168,7 @@ contract DeployAtpMainnet is Script, AtpMainnetSpecs {
             executor.numeraire() == USDT && executor.numeraire() == router.numeraire(), "executor numeraire"
         );
         require(executor.maxBuyBps() == MAX_BUY_BPS, "executor maxBuyBps");
+        require(executor.minBatchFee() == MIN_BATCH_FEE, "executor minBatchFee");
         // The only venue at deployment is the Universal Router, registered by the constructor. Aggregators
         // (KyberSwap, OpenOcean) are added by the Safe with `setVenue` after it has taken ownership.
         (AtpExecutor.VenueKind urKind, address urSpender) = executor.venues(V3_UNIVERSAL_ROUTER);
@@ -332,6 +336,7 @@ contract DeployAtpMainnet is Script, AtpMainnetSpecs {
         console.log(string.concat("operator           ", vm.toString(operator)));
         console.log(string.concat("feeRecipient       ", vm.toString(treasury)));
         console.log(string.concat("maxBuyBps          ", vm.toString(uint256(MAX_BUY_BPS))));
+        console.log(string.concat("minBatchFee        ", vm.toString(MIN_BATCH_FEE)));
         console.log(
             string.concat("pendingOwner       ", vm.toString(safe), "  (Safe must acceptOwnership x2)")
         );

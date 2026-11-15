@@ -22,6 +22,8 @@ contract AtpHandler is Test {
     address internal constant FEE_RECIPIENT = address(0xFEE);
     uint16 internal constant SLIPPAGE_BPS = 300;
     uint256 internal constant BPS = 10_000;
+    /// @dev The production default (0.30 USDT), so small swaps pay a top-up and large ones do not.
+    uint256 internal constant MIN_FEE = 0.3e18;
 
     AtpRegistry public registry;
     AtpExecutor public executor;
@@ -62,6 +64,7 @@ contract AtpHandler is Test {
     uint256 public ghostMinOutViolations; // (7) a step settled with gross output below its amountOutMin
     uint256 public ghostInOverspend; // (2) more tokenIn left the account than amountIn
     uint256 public ghostFeeViolations; // (2) fee != floor(gross x feeBps) or went elsewhere
+    uint256 public ghostMinFeeViolations; // (2) min-fee top-up above what was due, or short while USDT was left
     uint256 public ghostLeaks; // (2) the other account's balances moved
     uint256 public ghostNotAllowedExecuted; // (2) a token outside the pinned version was traded
     uint256 public ghostUnlistedVenueExecuted; // (2) a venue off the allowlist was used
@@ -75,6 +78,7 @@ contract AtpHandler is Test {
     // ---- coverage ----
     uint256 public callsSwapOk;
     uint256 public callsSwapReverted;
+    uint256 public callsMinFeeCharged; // swaps that paid a non-zero minimum-fee top-up
     uint256 public callsBuyOk;
     uint256 public callsSellOk;
     uint256 public callsMaliciousOk; // a non-Pay mode that still went through (only PullHalf / DonateStray can)
@@ -98,8 +102,9 @@ contract AtpHandler is Test {
         permit2 = new FunctionalPermit2();
         registry = new AtpRegistry();
         registry.setOperator(OPERATOR);
-        executor =
-            new AtpExecutor(registry, ur, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 10_000);
+        executor = new AtpExecutor(
+            registry, ur, oracle, address(permit2), FEE_RECIPIENT, address(usdt), 10_000, MIN_FEE
+        );
         erc20Venue = new RandomVenue(FunctionalPermit2(address(0)), stray);
         permit2Venue = new RandomVenue(permit2, stray);
         unlistedVenue = new RandomVenue(FunctionalPermit2(address(0)), stray);
@@ -172,11 +177,13 @@ contract AtpHandler is Test {
         bool allowed;
         bool listed;
         uint16 feeBps;
+        uint256 strategyId;
         uint256 minimum;
         uint256 amountOutMin;
         uint256 accIn;
         uint256 accOut;
         uint256 feeOut;
+        uint256 feeUsdt;
         uint256 otherIn;
         uint256 otherOut;
         uint256 cap;
@@ -213,6 +220,7 @@ contract AtpHandler is Test {
         // the quote, so payouts land below, between and above the two bounds.
         AtpRegistry.Enrollment memory enrollment = registry.enrollments(address(account));
         pre.feeBps = registry.effectiveFeeBps(enrollment.strategyId);
+        pre.strategyId = enrollment.strategyId;
         uint256 minGross = Math.mulDiv(pre.minimum, BPS, BPS - pre.feeBps, Math.Rounding.Ceil);
         pre.amountOutMin = Math.max(minGross, quote * _bound(minBps, 9_000, 10_300) / BPS);
 
@@ -255,6 +263,7 @@ contract AtpHandler is Test {
         pre.accIn = tokenIn.balanceOf(address(account));
         pre.accOut = tokenOut.balanceOf(address(account));
         pre.feeOut = tokenOut.balanceOf(FEE_RECIPIENT);
+        pre.feeUsdt = usdt.balanceOf(FEE_RECIPIENT);
         pre.otherIn = tokenIn.balanceOf(address(other));
         pre.otherOut = tokenOut.balanceOf(address(other));
         if (buy) (pre.cap,,) = executor.buyAllowance(address(account));
@@ -289,14 +298,31 @@ contract AtpHandler is Test {
         if (!pre.allowed) ++ghostNotAllowedExecuted;
         if (!pre.listed) ++ghostUnlistedVenueExecuted;
 
-        uint256 accIn = tokenIn.balanceOf(address(account));
+        // Everything the fee recipient got in USDT beyond a sale's proportional fee is the minimum-fee top-up,
+        // pulled from the account after the swap; the swap itself (gross, proportional fee, floor) is checked
+        // without it, since the top-up never comes out of a swap's output.
+        uint256 usdtFee = usdt.balanceOf(FEE_RECIPIENT) - pre.feeUsdt;
         uint256 accOut = tokenOut.balanceOf(address(account));
-        if (accIn + amount < pre.accIn) ++ghostInOverspend;
-        uint256 net = accOut - pre.accOut;
-        uint256 fee = tokenOut.balanceOf(FEE_RECIPIENT) - pre.feeOut;
-        if (net < pre.minimum) ++ghostFloorViolations;
-        if (net + fee < pre.amountOutMin) ++ghostMinOutViolations;
-        if (fee != (net + fee) * pre.feeBps / BPS) ++ghostFeeViolations;
+        uint256 gross;
+        uint256 fee;
+        uint256 charged;
+        if (buy) {
+            fee = tokenOut.balanceOf(FEE_RECIPIENT) - pre.feeOut;
+            gross = accOut - pre.accOut + fee;
+            charged = usdtFee;
+        } else {
+            gross = accOut + usdtFee - pre.accOut;
+            fee = gross * pre.feeBps / BPS;
+            if (usdtFee < fee) ++ghostFeeViolations;
+            else charged = usdtFee - fee;
+        }
+        if (tokenIn.balanceOf(address(account)) + amount + (buy ? charged : 0) < pre.accIn) {
+            ++ghostInOverspend;
+        }
+        if (gross - fee < pre.minimum) ++ghostFloorViolations;
+        if (gross < pre.amountOutMin) ++ghostMinOutViolations;
+        if (fee != gross * pre.feeBps / BPS) ++ghostFeeViolations;
+        _checkMinFee(account, buy ? amount : gross, charged, pre);
         if (
             tokenIn.balanceOf(address(other)) != pre.otherIn
                 || tokenOut.balanceOf(address(other)) != pre.otherOut
@@ -306,6 +332,17 @@ contract AtpHandler is Test {
             (, uint192 bought) = executor.buyWindowOf(address(account));
             if (bought > pre.cap) ++ghostBuyLimitViolations;
         }
+    }
+
+    /// @dev The top-up is at most what `minFeeTopUp` says is due, which itself is at most `minBatchFee` and 1% of
+    /// the notional; it is short only when the account ran out of USDT (allowances here are unlimited).
+    function _checkMinFee(TestAccount account, uint256 notional, uint256 charged, Pre memory pre) internal {
+        uint256 due = executor.minFeeTopUp(pre.strategyId, notional);
+        if (charged > 0) ++callsMinFeeCharged;
+        if (
+            charged > due || due > executor.minBatchFee() || due > notional / 100
+                || (charged < due && usdt.balanceOf(address(account)) != 0)
+        ) ++ghostMinFeeViolations;
     }
 
     // =========================================================== market / time / funds
@@ -337,7 +374,7 @@ contract AtpHandler is Test {
     // =========================================================== Safe administration
 
     function safeAdmin(uint256 actionSeed, uint256 valueSeed) external {
-        uint256 action = actionSeed % 6;
+        uint256 action = actionSeed % 7;
         if (action == 0) {
             executor.setGlobalPaused(!executor.globalPaused());
         } else if (action == 1) {
@@ -358,6 +395,8 @@ contract AtpHandler is Test {
             }
         } else if (action == 4) {
             registry.setOperator(registry.operator() == address(0) ? OPERATOR : address(0));
+        } else if (action == 5) {
+            executor.setMinBatchFee(_bound(valueSeed, 0, executor.minBatchFeeCeiling()));
         } else {
             registry.setStrategyFeeBps(
                 valueSeed % 2 == 0 ? strategyAB : strategyAC, uint16(_bound(valueSeed, 0, 300))
@@ -371,7 +410,7 @@ contract AtpHandler is Test {
             OPERATOR, OUTSIDER, address(accounts[0]), address(accounts[1]), address(erc20Venue)
         ][callerSeed % 5];
         ++callsAdminAttempts;
-        uint256 action = actionSeed % 15;
+        uint256 action = actionSeed % 16;
         address target;
         bytes memory data;
         if (action == 0) {
@@ -446,8 +485,11 @@ contract AtpHandler is Test {
                     (routerAssetNoSecondary, spareFeedA, spareFeedB, 1 hours, 1 hours, 200)
                 )
             );
-        } else {
+        } else if (action == 14) {
             (target, data) = (address(router), abi.encodeCall(AtpMultiPoolOracle.transferOwnership, (caller)));
+        } else {
+            (target, data) =
+            (address(executor), abi.encodeCall(AtpExecutor.setMinBatchFee, (valueSeed % 5e18)));
         }
         vm.prank(caller);
         (bool ok,) = target.call(data);
