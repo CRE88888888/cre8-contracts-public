@@ -107,13 +107,22 @@ contract SmokeTestnet is Script {
 
         (uint256 buyQuote, uint256 buyFloor) = env.router.previewSwap(address(env.usdt), token, TRADE_USDT);
         uint256 before = asset.balanceOf(address(env.account));
-        _swap(env, address(env.usdt), token, spec.fee, TRADE_USDT, _minGross(buyFloor, feeBps));
+        _swap(
+            env,
+            address(env.usdt),
+            token,
+            spec.fee,
+            TRADE_USDT,
+            _minGross(buyFloor, feeBps, spec.maxSlippageBps)
+        );
         uint256 bought = asset.balanceOf(address(env.account)) - before;
         require(bought >= buyFloor, string.concat(spec.symbol, ": buy below floor"));
 
         (uint256 sellQuote, uint256 sellFloor) = env.router.previewSwap(token, address(env.usdt), bought);
         before = env.usdt.balanceOf(address(env.account));
-        _swap(env, token, address(env.usdt), spec.fee, bought, _minGross(sellFloor, feeBps));
+        _swap(
+            env, token, address(env.usdt), spec.fee, bought, _minGross(sellFloor, feeBps, spec.maxSlippageBps)
+        );
         uint256 sold = env.usdt.balanceOf(address(env.account)) - before;
         require(sold >= sellFloor, string.concat(spec.symbol, ": sale below floor"));
         require(asset.balanceOf(address(env.account)) == 0, string.concat(spec.symbol, ": not fully sold"));
@@ -196,13 +205,18 @@ contract SmokeTestnet is Script {
         env.account.execute(target, data);
     }
 
-    /// @dev The executor's `minGross` plus a 0.5% cushion. The floor is read here, during forge's simulation, but
-    /// enforced when the transaction lands a few blocks later; the 5-minute mean moves a little in between (the
-    /// preceding trade shifted the pool), and a step whose `amountOutMin` ends up a hair under the new floor reverts
-    /// `BelowFloor`. Fills land 0.8-3% above the floor, so the cushion never binds on a healthy pool.
-    function _minGross(uint256 floor, uint16 feeBps) internal pure returns (uint256) {
+    /// @dev The executor's `minGross` plus a cushion of a sixth of the asset's slippage budget (tier B 300 bps ->
+    /// 50 bps, A 100 -> 16, S 50 -> 8). The floor is read here, during forge's simulation, but enforced when the
+    /// transaction lands a few blocks later; the 5-minute mean moves a little in between (the preceding trade
+    /// shifted the pool), and a step whose `amountOutMin` ends up a hair under the new floor reverts `BelowFloor`.
+    /// The cushion has to stay well inside the budget: the floor sits `maxSlippageBps` under the quote, so a flat
+    /// 50 bps on a 50 bps stablecoin floor would ask for more than the quote itself (`V3TooLittleReceived`).
+    function _minGross(uint256 floor, uint16 feeBps, uint16 maxSlippageBps) internal pure returns (uint256) {
         return Math.mulDiv(
-            Math.mulDiv(floor, BPS, BPS - feeBps, Math.Rounding.Ceil), BPS + 50, BPS, Math.Rounding.Ceil
+            Math.mulDiv(floor, BPS, BPS - feeBps, Math.Rounding.Ceil),
+            BPS + maxSlippageBps / 6,
+            BPS,
+            Math.Rounding.Ceil
         );
     }
 }

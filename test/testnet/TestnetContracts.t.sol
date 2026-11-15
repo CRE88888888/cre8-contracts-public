@@ -12,6 +12,25 @@ import { TestnetPriceFeed } from "../../src/testnet/TestnetPriceFeed.sol";
 import { TestnetOwnedDeployer } from "../../src/testnet/TestnetOwnedDeployer.sol";
 import { DeployTestnet } from "../../script/DeployTestnet.s.sol";
 import { TestnetAssets } from "../../script/testnet/TestnetAssets.sol";
+import { AtpMainnetSpecs } from "../../script/AtpMainnetSpecs.sol";
+
+/// @dev Exposes the mainnet oracle book so the testnet list can be checked against it.
+contract MainnetSpecsHarness is AtpMainnetSpecs {
+    function specs() external pure returns (OracleSpec[] memory) {
+        return _oracleSpecs();
+    }
+}
+
+/// @dev Exposes the deploy script's oracle constants.
+contract DeployTestnetHarness is DeployTestnet {
+    function oracleConstants()
+        external
+        pure
+        returns (uint32 twapWindow, uint32 maxOracleAge, uint32 usdtUsdMaxAge, uint16 deviationBps)
+    {
+        return (TWAP_WINDOW, MAX_ORACLE_AGE, USDT_USD_MAX_AGE, SECONDARY_MAX_DEVIATION_BPS);
+    }
+}
 
 /// @notice Unit tests for the chain-97-only mocks of cre8-contracts#30 and the deploy script's price math.
 contract TestnetContractsTest is Test {
@@ -268,5 +287,91 @@ contract TestnetContractsTest is Test {
                 assertApproxEqRel(usdtOut, specs[i].priceE18, 1e12, specs[i].symbol);
             }
         }
+    }
+
+    // ---- oracle book vs mainnet (cre8-contracts#25) ----
+
+    /// @dev Same assets in the same order as the mainnet book, with the mainnet `maxSlippageBps` tier (S 50 /
+    /// A 100 / B 300) and a secondary feed on exactly the assets that have one on mainnet.
+    function test_specs_matchMainnetTiersAndFeedChoice() public {
+        TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
+        AtpMainnetSpecs.OracleSpec[] memory m = new MainnetSpecsHarness().specs();
+        assertEq(t.length, m.length, "asset count");
+        uint256 tierS;
+        uint256 tierA;
+        for (uint256 i; i < t.length; ++i) {
+            assertEq(t[i].symbol, m[i].symbol, "order");
+            assertEq(t[i].maxSlippageBps, m[i].maxSlippageBps, t[i].symbol);
+            assertEq(t[i].hasFeed, m[i].usdFeed != address(0), t[i].symbol);
+            if (t[i].maxSlippageBps == 50) ++tierS;
+            if (t[i].maxSlippageBps == 100) ++tierA;
+        }
+        assertEq(tierS, 2, "tier S: USDC, DAI");
+        assertEq(tierA, 6, "tier A: WBNB, BTCB, ETH, QQQB, XAUt, NVDAB");
+    }
+
+    /// @dev Feed max ages deliberately stay at the testnet keeper's cadence (1 hour, AVAX 1 day), not mainnet's
+    /// 3 x Chainlink heartbeat: the mock feeds have no heartbeat but the keeper's push interval. Every age is
+    /// inside the adapter's bounds; an asset without a feed has none.
+    function test_specs_feedAgesFitTheAdapterAndTheKeeper() public pure {
+        TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
+        uint256 withFeed;
+        for (uint256 i; i < t.length; ++i) {
+            if (!t[i].hasFeed) {
+                assertEq(t[i].maxFeedAge, 0, t[i].symbol);
+                continue;
+            }
+            ++withFeed;
+            bool avax = keccak256(bytes(t[i].symbol)) == keccak256("AVAX");
+            assertEq(t[i].maxFeedAge, avax ? 1 days : 1 hours, t[i].symbol);
+        }
+        assertEq(withFeed, 11);
+    }
+
+    /// @dev Window and pool age as on mainnet; USDT/USD gets its own max age (#25) inside the adapter's bounds.
+    function test_deployConstants_matchMainnetWindowsAndOwnUsdtUsdAge() public {
+        (uint32 twapWindow, uint32 maxOracleAge, uint32 usdtUsdMaxAge, uint16 deviationBps) =
+            new DeployTestnetHarness().oracleConstants();
+        assertEq(twapWindow, 30 minutes);
+        assertEq(maxOracleAge, 1 hours);
+        assertEq(deviationBps, 200);
+        assertEq(usdtUsdMaxAge, 1 hours);
+        assertGe(usdtUsdMaxAge, 1 minutes, "adapter floor");
+        assertLe(usdtUsdMaxAge, 1 days, "adapter ceiling");
+    }
+
+    /// @dev As the router wires it for AVAX: asset feed 1 day, USDT/USD 1 hour. A day-old AVAX answer still
+    /// prices; a USDT/USD answer older than an hour stops it (before #25 it borrowed AVAX's day); exactly at
+    /// the bound is still fresh.
+    function test_secondary_usdtUsdAgeIsIndependentOfTheAssetAge() public {
+        vm.warp(1_000_000);
+        TestnetToken usdt = new TestnetToken("Testnet USDT", "USDT", 18, OWNER);
+        TestnetToken avax = new TestnetToken("Avalanche (testnet)", "AVAX", 18, OWNER);
+        TestnetPriceFeed avaxUsd = new TestnetPriceFeed(8, "AVAX / USD", OWNER, KEEPER, 8e8);
+        TestnetPriceFeed usdtUsd = new TestnetPriceFeed(8, "USDT / USD", OWNER, KEEPER, 1e8);
+        (,, uint32 usdtUsdMaxAge,) = new DeployTestnetHarness().oracleConstants();
+        PushFeedPriceSource source = new PushFeedPriceSource(
+            IAggregatorV3(address(avaxUsd)),
+            IAggregatorV3(address(usdtUsd)),
+            address(avax),
+            address(usdt),
+            1 days,
+            usdtUsdMaxAge
+        );
+
+        vm.warp(1_000_000 + usdtUsdMaxAge);
+        assertEq(source.price(), 8e18, "both at or inside their bounds");
+
+        vm.warp(1_000_000 + usdtUsdMaxAge + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                PushFeedPriceSource.StaleFeed.selector, address(usdtUsd), uint256(1_000_000)
+            )
+        );
+        source.price();
+
+        vm.prank(KEEPER);
+        usdtUsd.push(1e8);
+        assertEq(source.price(), 8e18, "fresh USDT/USD, AVAX one hour old");
     }
 }

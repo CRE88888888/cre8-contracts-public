@@ -10,6 +10,7 @@ import { PancakeV3TwapOracle } from "../src/atp/PancakeV3TwapOracle.sol";
 import { IAggregatorV3 } from "../src/atp/interfaces/IAggregatorV3.sol";
 import { IPancakeV3Pool } from "../src/atp/interfaces/IPancakeV3Pool.sol";
 import { IPriceSource } from "../src/atp/interfaces/IPriceSource.sol";
+import { PushFeedPriceSource } from "../src/atp/PushFeedPriceSource.sol";
 import { TestnetToken, TestnetBStock, TestnetUSDT } from "../src/testnet/TestnetToken.sol";
 import { TestnetPriceFeed } from "../src/testnet/TestnetPriceFeed.sol";
 import { TestnetOwnedDeployer } from "../src/testnet/TestnetOwnedDeployer.sol";
@@ -103,6 +104,9 @@ contract DeployTestnet is Script {
     uint16 internal constant SECONDARY_MAX_DEVIATION_BPS = 200;
 
     // ---- testnet-only parameters ----
+    /// @dev USDT/USD has its own max age (cre8-contracts#25), like mainnet's `USDT_USD_MAX_AGE`, but sized to the
+    /// testnet keeper (the mock feed has no Chainlink heartbeat): the keeper pushes it with every price step.
+    uint32 internal constant USDT_USD_MAX_AGE = 1 hours;
     /// @dev Full-range liquidity per side, in USDT: 100 USDT moves a pool ~0.004%, 10,000 USDT ~0.4%.
     uint256 internal constant LIQUIDITY_PER_SIDE = 5_000_000e18;
     /// @dev Observation slots per pool. A TWAP read needs the oldest kept observation to be at least 30 minutes
@@ -312,9 +316,7 @@ contract DeployTestnet is Script {
                     IAggregatorV3(out.feed),
                     IAggregatorV3(address(core.usdtUsdFeed)),
                     spec.maxFeedAge,
-                    // The testnet keeps one max age for both feeds (its pre-#25 behaviour): the deployed
-                    // chain-97 stack was built that way and this script re-verifies it as is.
-                    spec.maxFeedAge,
+                    USDT_USD_MAX_AGE,
                     SECONDARY_MAX_DEVIATION_BPS
                 );
         }
@@ -585,6 +587,13 @@ contract DeployTestnet is Script {
                 require(
                     address(source) == out[i].source && deviation == SECONDARY_MAX_DEVIATION_BPS,
                     string.concat(spec.symbol, ": secondary")
+                );
+                PushFeedPriceSource push = PushFeedPriceSource(address(source));
+                require(
+                    address(push.assetFeed()) == out[i].feed
+                        && address(push.numeraireFeed()) == address(core.usdtUsdFeed)
+                        && push.maxAge() == spec.maxFeedAge && push.numeraireMaxAge() == USDT_USD_MAX_AGE,
+                    string.concat(spec.symbol, ": secondary feeds / max ages")
                 );
                 require(
                     TestnetPriceFeed(out[i].feed).keeper() == TestnetBook.KEEPER,

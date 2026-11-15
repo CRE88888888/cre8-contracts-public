@@ -2,10 +2,13 @@
 pragma solidity ^0.8.26;
 
 /// @title TestnetAssets
-/// @notice The 38 launch assets as testnet mocks (cre8-contracts#30): the list, order, `maxSlippageBps` and
-/// secondary-feed choice (with its max age) of `DeployAtpMainnet` as deployed on chain 97, i.e. before
-/// cre8-contracts#25 changed the mainnet tiers and feed ages (`AtpMainnetSpecs`); symbol, decimals, Pancake V3 fee tier and
-/// bStock `uiMultiplier` of the mainnet token and pool; and a fixed starting price.
+/// @notice The 38 launch assets as testnet mocks (cre8-contracts#30): the list, order, `maxSlippageBps` tier
+/// (cre8-contracts#25: S 50 / A 100 / B 300) and secondary-feed choice of `AtpMainnetSpecs`; symbol, decimals,
+/// Pancake V3 fee tier and bStock `uiMultiplier` of the mainnet token and pool; and a fixed starting price.
+/// @dev `maxFeedAge` is NOT mainnet's 3 x Chainlink heartbeat (81-180 s for the fast feeds): the mock feeds are
+/// pushed by the testnet price keeper (backend `src/keeper`, a push every 60-300 s step, and it checks each
+/// source's `maxAge` against these values), so they keep 1 hour (AVAX 1 day). The secondary sources are
+/// deployed by the router with CREATE, so these ages do not move any address.
 /// @dev Generated from BSC mainnet, read-only, at block 133542361 (2026-11-14): `decimals()`, `name()`,
 /// `uiMultiplier()` of each token and `fee()` / `slot0()` of each `DeployAtpMainnet` pool. Prices are the pool
 /// spot rounded to 6 significant digits, in USDT (18 decimals) per whole token: a fixed baseline, not a live
@@ -38,7 +41,7 @@ library TestnetAssets {
             "BABAB", "Alibaba (testnet)", 18, 2500, 93783500000000000000, 300, false, 0, 1000000000000000000
         ); // 93.7835 USDT
         s[4] = AssetSpec(
-            "BTCB", "BTCB Token (testnet)", 18, 500, 67123700000000000000000, 300, true, 1 hours, 0
+            "BTCB", "BTCB Token (testnet)", 18, 500, 67123700000000000000000, 100, true, 1 hours, 0
         ); // 67123.7 USDT
         s[5] = AssetSpec(
             "CRCLB",
@@ -64,7 +67,7 @@ library TestnetAssets {
         ); // 4.58630 USDT
         s[7] = AssetSpec("DOGE", "Dogecoin (testnet)", 8, 10000, 62730900000000000, 300, true, 1 hours, 0); // 0.0627309 USDT
         s[8] = AssetSpec(
-            "ETH", "Ethereum Token (testnet)", 18, 500, 1906330000000000000000, 300, true, 1 hours, 0
+            "ETH", "Ethereum Token (testnet)", 18, 500, 1906330000000000000000, 100, true, 1 hours, 0
         ); // 1906.33 USDT
         s[9] = AssetSpec(
             "EWYB",
@@ -172,7 +175,7 @@ library TestnetAssets {
             18,
             500,
             676113000000000000000,
-            300,
+            100,
             false,
             0,
             1000724838657573033
@@ -237,10 +240,10 @@ library TestnetAssets {
         ); // 396.058 USDT
         s[32] =
             AssetSpec("WBNB", "Wrapped BNB (testnet)", 18, 500, 614427000000000000000, 100, true, 1 hours, 0); // 614.427 USDT
-        s[33] = AssetSpec("XAUt", "Tether Gold (testnet)", 6, 500, 3866590000000000000000, 300, false, 0, 0); // 3866.59 USDT
+        s[33] = AssetSpec("XAUt", "Tether Gold (testnet)", 6, 500, 3866590000000000000000, 100, false, 0, 0); // 3866.59 USDT
         s[34] = AssetSpec("XRP", "XRP Token (testnet)", 18, 2500, 993055000000000000, 300, true, 1 hours, 0); // 0.993055 USDT
-        s[35] = AssetSpec("USDC", "USD Coin (testnet)", 18, 100, 1000730000000000000, 300, true, 1 hours, 0); // 1.00073 USDT
-        s[36] = AssetSpec("DAI", "Dai Token (testnet)", 18, 100, 1001540000000000000, 300, true, 1 hours, 0); // 1.00154 USDT
+        s[35] = AssetSpec("USDC", "USD Coin (testnet)", 18, 100, 1000730000000000000, 50, true, 1 hours, 0); // 1.00073 USDT
+        s[36] = AssetSpec("DAI", "Dai Token (testnet)", 18, 100, 1001540000000000000, 50, true, 1 hours, 0); // 1.00154 USDT
         s[37] = AssetSpec(
             "LTC", "Litecoin Token (testnet)", 18, 2500, 48359900000000000000, 300, true, 1 hours, 0
         ); // 48.3599 USDT
