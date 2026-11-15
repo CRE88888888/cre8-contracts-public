@@ -80,15 +80,37 @@ thin_pools() {
   done
 }
 
-for attempt in 1 2 3; do
-  echo "== DeployTestnet ($MODE, $ETH_RPC_URL) run $attempt =="
+# A run deploys at most TESTNET_MARKETS_PER_RUN (default 40) unfinished markets and prints PENDING_MARKETS <n>
+# while some are left (cre8-contracts#39: forge simulates a run as one call, which ran out of gas after ~56 of
+# 134 markets in an earlier draft), so the script is rerun until nothing is pending; each rerun must leave fewer
+# pending. Then up to 3 more runs fix thin pools.
+run=0
+thin_runs=0
+last_pending=""
+while :; do
+  run=$((run + 1))
+  echo "== DeployTestnet ($MODE, $ETH_RPC_URL) run $run =="
   forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow "${SIGNERS[@]}" >"$LOG" 2>&1 \
     || { tail -40 "$LOG"; echo "deploy failed, full log: $LOG"; exit 1; }
-  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION" "$LOG" || true
+  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
+  echo "new contracts and pools this run: $(grep -cE "^\s*(pool|deploy) +NEW" "$LOG" || true)"
+  # No PENDING_MARKETS line on the last run: grep exits 1, which pipefail + set -e must not turn into an abort.
+  PENDING="$(grep -E "^\s*PENDING_MARKETS " "$LOG" | awk '{print $2}' | tail -1 || true)"
+  if [ -n "$PENDING" ]; then
+    if [ -n "$last_pending" ] && [ "$PENDING" -ge "$last_pending" ]; then
+      echo "no progress: still $PENDING markets pending after run $run"; exit 1
+    fi
+    last_pending="$PENDING"
+    echo "$PENDING markets pending -> next run"
+    [ "$MODE" = fork ] && cast rpc anvil_mine 1 >/dev/null
+    continue
+  fi
+  last_pending=""
   THIN="$(thin_pools | tr '\n' ' ')"
   [ -z "$THIN" ] && break
+  thin_runs=$((thin_runs + 1))
   echo "observationCardinality < 2: $THIN-> rerun after a few seconds"
-  [ "$attempt" = 3 ] && { echo "still thin after 3 runs"; exit 1; }
+  [ "$thin_runs" = 3 ] && { echo "still thin after 3 runs"; exit 1; }
   sleep 4
   [ "$MODE" = fork ] && cast rpc anvil_mine 1 >/dev/null
 done

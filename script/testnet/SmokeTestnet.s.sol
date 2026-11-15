@@ -33,16 +33,18 @@ contract SmokeAccount {
 
 /// @title SmokeTestnet
 /// @notice Chain 97 acceptance run for cre8-contracts#30, after `DeployTestnet` and the 30-minute TWAP
-/// warm-up: a fresh contract account claims testnet USDT from the faucet, enrolls (16-asset versions, so three
-/// strategies cover the 38 assets) and, for every asset, buys 100 USDT worth through the executor and the
-/// Pancake Universal Router and sells everything back. The executor enforces the oracle floor (and, since #24,
+/// warm-up: the assets go in groups of 15 (16-asset versions with USDT; 7 groups for the 92 assets of
+/// cre8-contracts#39); per group a fresh contract account claims testnet USDT from the faucet and enrolls in the
+/// group's strategy, and for every asset it buys 100 USDT worth through the executor and the Pancake Universal
+/// Router and sells everything back. The executor enforces the oracle floor (and, since #24,
 /// `amountOutMin`) on every step; this script also prints each fill against its floor. On a public chain it
 /// spends real tBNB, so it is meant for the local fork unless a run on 97 is explicitly wanted.
-/// @dev `TESTNET_EXECUTOR` locates everything else: registry, router and USDT from the executor, the 38 tokens
+/// @dev `TESTNET_EXECUTOR` locates everything else: registry, router and USDT from the executor, the tokens
 /// from `TestnetBook` (CREATE2 addresses of DEPLOYER).
 contract SmokeTestnet is Script {
     uint256 internal constant TRADE_USDT = 100e18;
-    uint256 internal constant CLAIM_USDT = 5_000e18;
+    /// @dev Per group account: 15 buys of 100 USDT stay under the 100%-of-value daily buy cap.
+    uint256 internal constant CLAIM_USDT = 2_000e18;
     uint256 internal constant ASSETS_PER_VERSION = 15; // + USDT = MAX_VERSION_ASSETS (16)
     uint256 internal constant BPS = 10_000;
     bytes1 internal constant V3_SWAP_EXACT_IN = 0x00;
@@ -70,30 +72,39 @@ contract SmokeTestnet is Script {
         }
 
         vm.startBroadcast();
-        env.account = new SmokeAccount(msg.sender);
-        _call(env, address(env.usdt), abi.encodeCall(TestnetUSDT.claim, (CLAIM_USDT)));
-        _approve(env, address(env.usdt));
-
         uint256 strategyId;
+        uint256 claimed;
+        uint256 left;
         for (uint256 i; i < specs.length; ++i) {
             if (i % ASSETS_PER_VERSION == 0) {
+                if (address(env.account) != address(0)) left += env.usdt.balanceOf(address(env.account));
+                // A fresh account per group: the executor caps an account's buys at `maxBuyBps` (100%) of its
+                // value per 24 hours, so one account cannot buy 100 USDT of every asset.
+                env.account = new SmokeAccount(msg.sender);
+                _call(env, address(env.usdt), abi.encodeCall(TestnetUSDT.claim, (CLAIM_USDT)));
+                claimed += CLAIM_USDT;
+                _approve(env, address(env.usdt));
                 strategyId = _strategy(env, tokens, i);
                 _call(
                     env,
                     address(env.registry),
                     abi.encodeCall(AtpRegistry.enroll, (address(env.account), strategyId))
                 );
+                console.log(
+                    string.concat("SMOKE group ", vm.toString(i / ASSETS_PER_VERSION + 1), " account"),
+                    address(env.account)
+                );
             }
             _approve(env, tokens[i]);
             _roundTrip(env, specs[i], tokens[i], strategyId);
         }
         vm.stopBroadcast();
+        left += env.usdt.balanceOf(address(env.account));
 
-        uint256 usdtLeft = env.usdt.balanceOf(address(env.account));
         console.log("");
-        console.log("SMOKE account", address(env.account));
-        console.log("SMOKE USDT claimed / left (wei)", CLAIM_USDT, usdtLeft);
-        console.log("SMOKE round-trip cost over 38 assets (USDT wei)", CLAIM_USDT - usdtLeft);
+        console.log("SMOKE assets round-tripped", specs.length);
+        console.log("SMOKE USDT claimed / left (wei)", claimed, left);
+        console.log("SMOKE round-trip cost over all assets (USDT wei)", claimed - left);
     }
 
     function _roundTrip(

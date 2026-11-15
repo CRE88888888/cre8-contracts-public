@@ -95,9 +95,16 @@ const PM_VERIFICATION_GAS = 80_000n;
 const PM_POST_OP_GAS = 0n; // empty context: the EntryPoint never calls postOp
 const stubSigner = privateKeyToAccount(generatePrivateKey());
 
+// Every validity window below (paymaster validUntil, session TimestampPolicy, executor deadline) is checked
+// against block.timestamp, and the fork's clock runs ahead of the wall clock: fork-e2e.sh skips the 30-minute
+// TWAP warm-up and, since cre8-contracts#39, an hour for the keeper's second poke round. Take "now" from the chain.
+async function chainNow(): Promise<number> {
+  return Number((await publicClient.getBlock()).timestamp);
+}
+
 function paymasterFor(signer: LocalAccount) {
-  const window = () => {
-    const now = Math.floor(Date.now() / 1000);
+  const window = async () => {
+    const now = await chainNow();
     return { validUntil: now + 3600, validAfter: 0 };
   };
   const timestamps = (validUntil: number, validAfter: number) =>
@@ -115,7 +122,7 @@ function paymasterFor(signer: LocalAccount) {
       };
     },
     async getPaymasterData(userOp: any) {
-      const { validUntil, validAfter } = window();
+      const { validUntil, validAfter } = await window();
       const packed = toPackedUserOperation({
         ...userOp,
         paymaster: C.paymaster,
@@ -191,7 +198,7 @@ async function main() {
   const depositBefore = await publicClient.readContract({ address: C.paymaster, abi: paymasterAbi, functionName: 'getDeposit' });
 
   // ---- session permission: same three policies as backend, GasPolicy pinned to our paymaster ----
-  const validUntil = Math.floor(Date.now() / 1000) + 365 * 86400;
+  const validUntil = (await chainNow()) + 365 * 86400;
   const selector = encodeFunctionData({ abi: executorAbi, functionName: 'executeRebalance', args: [operator.address, [], 0n] }).slice(0, 10) as Hex;
   const policies = [
     toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: [{ target: executor, selector }] }),
@@ -273,7 +280,7 @@ async function main() {
       data: encodeAbiParameters([{ type: 'bytes' }, { type: 'bytes[]' }], ['0x00', [input]]),
     });
   }
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+  const deadline = BigInt((await chainNow()) + 3600);
   const rebalanceData = encodeFunctionData({ abi: executorAbi, functionName: 'executeRebalance', args: [account, steps, deadline] });
   const rebalance = await send(clientFor(sessionAccount, pm), [{ to: executor, data: rebalanceData }]);
   check(rebalance.receipt.success, 'session-key UserOp executeRebalance (3 buys) sponsored', rebalance.hash);

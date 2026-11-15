@@ -59,7 +59,8 @@ interface IObservationCardinality {
 
 /// @title DeployTestnet
 /// @notice BSC TESTNET (chain 97) ONLY (cre8-contracts#30). Deploys the whole CRE8 stack against mock assets:
-/// - testnet USDT (numeraire, capped faucet) and 38 mock launch assets (`TestnetAssets`);
+/// - testnet USDT (numeraire, capped faucet) and 92 mock assets (`TestnetAssets`: the 38 launch assets and,
+///   testnet only, the other showcase-fund tokens and crypto of cre8-contracts#39);
 /// - one Pancake V3 pool per asset against USDT, full-range liquidity, observation room for the 30-minute TWAP;
 /// - the registry, oracle router and executor with `DeployAtpMainnet`'s parameters;
 /// - mock USD push feeds as the secondary source of the same 11 assets as mainnet;
@@ -70,6 +71,8 @@ interface IObservationCardinality {
 /// @dev Idempotent by construction: every contract is deployed with CREATE2, so each address is a pure function
 /// of (deployer, salt, init code). A rerun finds the code and only does what is still missing; a complete
 /// deployment reruns with no transaction. A local chain 97 fork therefore predicts the public addresses exactly.
+/// A run deploys at most `TESTNET_MARKETS_PER_RUN` unfinished markets and then prints `PENDING_MARKETS <n>`
+/// instead of funding, handing over and verifying; `deploy-97.sh` reruns until nothing is pending.
 /// Changing a contract's code or constructor arguments moves its address (a new deployment next to the old
 /// one), which is the intended versioning.
 ///
@@ -116,6 +119,11 @@ contract DeployTestnet is Script {
     /// @dev The second, tiny mint that makes a pool write its first post-initialization observation.
     uint256 internal constant POKE_LIQUIDITY = 1e18;
     uint256 internal constant FAUCET_DAILY_LIMIT = 10_000e18;
+    /// @dev Unfinished markets one run deploys (cre8-contracts#39): ~22M gas and ~12 transactions each. forge
+    /// simulates the whole `run()` as one call, and on a fresh fork an earlier 134-market draft ran out of gas
+    /// there after ~56 markets in one run; 40 keeps a run near the ~500 transactions / ~0.85B gas of the 38-asset deployment.
+    /// `TESTNET_MARKETS_PER_RUN` overrides it.
+    uint256 internal constant MARKETS_PER_RUN = 40;
     uint8 internal constant FEED_DECIMALS = 8;
     int24 internal constant MAX_TICK = 887_272;
 
@@ -155,12 +163,23 @@ contract DeployTestnet is Script {
         );
         TestnetAssets.AssetSpec[] memory specs = TestnetAssets.specs();
         AssetOut[] memory out = new AssetOut[](specs.length);
+        uint256 perRun = vm.envOr("TESTNET_MARKETS_PER_RUN", MARKETS_PER_RUN);
+        require(perRun > 0, "TESTNET_MARKETS_PER_RUN must be > 0");
 
-        // 1. DEPLOYER: contracts, mocks, pools, liquidity, feeds.
+        // 1. DEPLOYER: contracts, mocks, pools, liquidity, feeds - for at most `perRun` unfinished markets.
         vm.startBroadcast(TestnetBook.DEPLOYER);
         _gasPolicy();
         Core memory core = _core();
+        uint256 started;
+        uint256 pending;
         for (uint256 i; i < specs.length; ++i) {
+            if (!_marketDone(core, specs[i])) {
+                if (started == perRun) {
+                    ++pending;
+                    continue;
+                }
+                ++started;
+            }
             out[i] = _market(core, specs[i]);
         }
         vm.stopBroadcast();
@@ -173,9 +192,16 @@ contract DeployTestnet is Script {
         vm.stopBroadcast();
         vm.startBroadcast(core.router.owner());
         for (uint256 i; i < specs.length; ++i) {
-            _oracles(core, specs[i], out[i]);
+            if (out[i].token != address(0)) _oracles(core, specs[i], out[i]);
         }
         vm.stopBroadcast();
+
+        // Markets left for the next run: no funding, hand-over, verification or manifest until all are done.
+        // `scripts/testnet/deploy-97.sh` reruns while it sees this line.
+        if (pending != 0) {
+            console.log("PENDING_MARKETS", pending);
+            return;
+        }
 
         // 3. DEPLOYER: tBNB for every role, the paymaster deposit, and the ownership proposals.
         vm.startBroadcast(TestnetBook.DEPLOYER);
@@ -272,6 +298,27 @@ contract DeployTestnet is Script {
     }
 
     // ---------------------------------------------------------------- per asset
+
+    /// @dev Whether every per-asset step of `_market` and `_oracles` is already on chain, read before this run
+    /// sends anything. Only unfinished markets count against `TESTNET_MARKETS_PER_RUN`; a finished one still runs
+    /// through `_market` / `_oracles`, which then send nothing.
+    function _marketDone(Core memory core, TestnetAssets.AssetSpec memory spec) internal view returns (bool) {
+        address token = TestnetBook.tokenAddress(spec, TestnetBook.DEPLOYER);
+        if (token.code.length == 0 || !TestnetToken(token).isMinter(TestnetBook.KEEPER)) return false;
+        address usdt = address(core.usdt);
+        (address token0, address token1) = token < usdt ? (token, usdt) : (usdt, token);
+        address pool = ITestnetV3Factory(V3_FACTORY).getPool(token0, token1, spec.fee);
+        if (pool == address(0) || IPancakeV3Pool(pool).liquidity() == 0) return false;
+        // `observationCardinality < 2` (the first mint landed in the pool's initialization second) does not count:
+        // `_pool` still pokes such a pool on every run, and deploy-97.sh reruns until none is left. Counting it
+        // would let last run's thin pools take this run's places and stall the progress check.
+        (,,,, uint16 cardinalityNext,,) = IPancakeV3Pool(pool).slot0();
+        if (cardinalityNext < OBSERVATION_CARDINALITY) return false;
+        if (address(core.router.oracleOf(token)) == address(0)) return false;
+        if (!spec.hasFeed) return true;
+        (IPriceSource source,) = core.router.secondaryOf(token);
+        return address(source) != address(0);
+    }
 
     function _market(Core memory core, TestnetAssets.AssetSpec memory spec)
         internal

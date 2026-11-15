@@ -12,12 +12,20 @@ import { TestnetPriceFeed } from "../../src/testnet/TestnetPriceFeed.sol";
 import { TestnetOwnedDeployer } from "../../src/testnet/TestnetOwnedDeployer.sol";
 import { DeployTestnet } from "../../script/DeployTestnet.s.sol";
 import { TestnetAssets } from "../../script/testnet/TestnetAssets.sol";
+import { PokePoolsTestnet } from "../../script/testnet/PokePoolsTestnet.s.sol";
 import { AtpMainnetSpecs } from "../../script/AtpMainnetSpecs.sol";
 
 /// @dev Exposes the mainnet oracle book so the testnet list can be checked against it.
 contract MainnetSpecsHarness is AtpMainnetSpecs {
     function specs() external pure returns (OracleSpec[] memory) {
         return _oracleSpecs();
+    }
+}
+
+/// @dev Exposes the keeper poke's baseline price.
+contract PokePoolsHarness is PokePoolsTestnet {
+    function sqrtPrice(uint256 priceE18, uint8 decimals, bool assetIsToken0) external pure returns (uint160) {
+        return _sqrtPriceX96(priceE18, decimals, assetIsToken0);
     }
 }
 
@@ -274,7 +282,7 @@ contract TestnetContractsTest is Test {
     function test_sqrtPriceX96_roundTripsEverySpecPrice() public {
         DeployTestnet script = new DeployTestnet();
         TestnetAssets.AssetSpec[] memory specs = TestnetAssets.specs();
-        assertEq(specs.length, 38);
+        assertEq(specs.length, TestnetAssets.COUNT);
         for (uint256 i; i < specs.length; ++i) {
             uint256 oneAsset = 10 ** specs[i].decimals;
             for (uint256 order; order < 2; ++order) {
@@ -291,15 +299,17 @@ contract TestnetContractsTest is Test {
 
     // ---- oracle book vs mainnet (cre8-contracts#25) ----
 
-    /// @dev Same assets in the same order as the mainnet book, with the mainnet `maxSlippageBps` tier (S 50 /
-    /// A 100 / B 300) and a secondary feed on exactly the assets that have one on mainnet.
+    /// @dev The first `LAUNCH_COUNT` entries are the mainnet book: same assets in the same order, with the
+    /// mainnet `maxSlippageBps` tier (S 50 / A 100 / B 300) and a secondary feed on exactly the assets that have
+    /// one on mainnet. The testnet-only entries after them (#39) are checked by `test_specs_testnetExtension`.
     function test_specs_matchMainnetTiersAndFeedChoice() public {
         TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
         AtpMainnetSpecs.OracleSpec[] memory m = new MainnetSpecsHarness().specs();
-        assertEq(t.length, m.length, "asset count");
+        assertEq(TestnetAssets.LAUNCH_COUNT, m.length, "launch asset count");
+        assertGe(t.length, m.length, "the launch assets lead the list");
         uint256 tierS;
         uint256 tierA;
-        for (uint256 i; i < t.length; ++i) {
+        for (uint256 i; i < m.length; ++i) {
             assertEq(t[i].symbol, m[i].symbol, "order");
             assertEq(t[i].maxSlippageBps, m[i].maxSlippageBps, t[i].symbol);
             assertEq(t[i].hasFeed, m[i].usdFeed != address(0), t[i].symbol);
@@ -308,6 +318,73 @@ contract TestnetContractsTest is Test {
         }
         assertEq(tierS, 2, "tier S: USDC, DAI");
         assertEq(tierA, 6, "tier A: WBNB, BTCB, ETH, QQQB, XAUt, NVDAB");
+    }
+
+    /// @dev #39: 38 launch assets + 40 other tokens of the 16 showcase funds + 14 crypto. Every testnet-only
+    /// entry is tier B (300 bps) without a secondary feed; every symbol is unique (it names the CREATE2 salt and the manifest
+    /// key, and `deploy-97.sh` reads `asset.<letters>.pool`), never USDT, and every entry is a pool Pancake V3
+    /// can create (fee tier, decimals, non-zero price).
+    function test_specs_testnetExtension() public pure {
+        TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
+        assertEq(t.length, TestnetAssets.COUNT);
+        assertEq(TestnetAssets.COUNT, 38 + 40 + 14, "launch + showcase-fund tokens + crypto");
+        uint256 bStocks;
+        for (uint256 i; i < t.length; ++i) {
+            bytes memory sym = bytes(t[i].symbol);
+            assertGt(sym.length, 0, "empty symbol");
+            for (uint256 k; k < sym.length; ++k) {
+                bool letter = (sym[k] >= "A" && sym[k] <= "Z") || (sym[k] >= "a" && sym[k] <= "z");
+                assertTrue(letter, t[i].symbol);
+            }
+            assertTrue(keccak256(sym) != keccak256("USDT"), "USDT is the numeraire");
+            for (uint256 j; j < i; ++j) {
+                assertTrue(keccak256(sym) != keccak256(bytes(t[j].symbol)), t[i].symbol);
+            }
+            uint24 fee = t[i].fee;
+            assertTrue(fee == 100 || fee == 500 || fee == 2500 || fee == 10_000, t[i].symbol);
+            assertGt(t[i].priceE18, 0, t[i].symbol);
+            assertGt(bytes(t[i].name).length, 0, t[i].symbol);
+            if (t[i].uiMultiplier != 0) ++bStocks;
+            if (i < TestnetAssets.LAUNCH_COUNT) continue;
+            assertEq(t[i].maxSlippageBps, 300, t[i].symbol);
+            assertFalse(t[i].hasFeed, t[i].symbol);
+            assertEq(t[i].maxFeedAge, 0, t[i].symbol);
+            assertTrue(t[i].decimals == 18 || t[i].decimals == 9, t[i].symbol); // TONCOIN: 9, as on BSC
+        }
+        assertEq(bStocks, 24 + 20, "bStock mocks: 24 launch + 20 showcase-fund tokens");
+    }
+
+    /// @dev #39: the testnet-only entries are exactly the issue's list, in this order: the 40 other tokens of the
+    /// 16 showcase funds (ASCII order), then the 14 crypto. Nothing else rides along.
+    function test_specs_testnetExtension_exactList() public pure {
+        string memory want = "ABBVon ALABB AMATB AMDB APHon APLDon AVGOB AXPon BEB BLKon CBRSB CEGon CIENon COHRB "
+            "CORZon CRDOB CRMB CRWVB CVXon GEVB GLDon GOOGon GPROB IEFon IRENB IVVon KOon LLYB MAon NBISB NEMon ORCLB "
+            "PANWon PYPLB SHAZB STXB UBERon VRTon VSTB Von "
+            "ADA LINK BCH NEAR UNI ZEC TONCOIN DOT SHIB PEPE AAVE Cake FIL ATOM ";
+        TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
+        assertEq(t.length - TestnetAssets.LAUNCH_COUNT, 40 + 14, "testnet-only count");
+        string memory got;
+        for (uint256 i = TestnetAssets.LAUNCH_COUNT; i < t.length; ++i) {
+            got = string.concat(got, t[i].symbol, " ");
+        }
+        assertEq(got, want);
+    }
+
+    /// @dev `PokePoolsTestnet` aims each keeper swap at the same baseline the pool was initialized with.
+    function test_pokeBaseline_matchesDeployPrice() public {
+        DeployTestnet script = new DeployTestnet();
+        PokePoolsHarness poke = new PokePoolsHarness();
+        TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
+        for (uint256 i; i < t.length; ++i) {
+            assertEq(
+                poke.sqrtPrice(t[i].priceE18, t[i].decimals, true),
+                script.sqrtPriceX96(t[i].priceE18, t[i].decimals, true)
+            );
+            assertEq(
+                poke.sqrtPrice(t[i].priceE18, t[i].decimals, false),
+                script.sqrtPriceX96(t[i].priceE18, t[i].decimals, false)
+            );
+        }
     }
 
     /// @dev Feed max ages deliberately stay at the testnet keeper's cadence (1 hour, AVAX 1 day), not mainnet's

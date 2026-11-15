@@ -2,9 +2,9 @@
   "chainId": 97,
   "mode": "fork",
   "note": "fork = verified on a local anvil fork of chain 97; the public deployment lands on the same CREATE2 addresses",
-  "verifiedAtBlock": 142810197,
-  "generatedAt": "2026-11-15T04:21:54Z",
-  "gitCommit": "45b2ce7200b5f958555f043a31b3a533fecacbff",
+  "verifiedAtBlock": 142841703,
+  "generatedAt": "2026-11-15T08:27:14Z",
+  "gitCommit": "b8517cc4848c69a974553782a810dace31d82383",
   "roles": {
     "deployer": "0x55662B4183fcA1230694D5D57F56E4F2E0e3008a",
     "owner": "0x09BBB9A06a0C49Ad24bddB18808944041783054e",
@@ -242,6 +242,276 @@
       "oracle": "0x756A7242c548811BD05F97416D5755A420bdCf85",
       "feed": "0x750F3415122Ae9cF34e6cab35acef883a37b0113",
       "secondary": "0x9f45eA3957e024085C6b61B56912d96775Af16F3"
+    },
+    "ABBVon": {
+      "token": "0x9B76B0cd3eB101E4c7e7d9A80397648fF5Ba985b",
+      "pool": "0x9bb843B64d6a49e2E9eeE9EDd38B5cCf4f40094D",
+      "oracle": "0x5005dC4856Ae99CDc9819Ec32Ab148b707674807"
+    },
+    "ALABB": {
+      "token": "0x1E267eaD867a6Eb5e8BEB2e66f91fd20EeD426D5",
+      "pool": "0x97573F650A95164bC0ADc100cb81DCD7583fbb0f",
+      "oracle": "0x43594936619b153638Dd6eF6b8B1d8a9F8a2B0DE"
+    },
+    "AMATB": {
+      "token": "0x255CFDD632600a289a181caAB4511c30a10F7949",
+      "pool": "0x9b8EAED5f4A68B3669D1c80f7680c7dCcF7eA521",
+      "oracle": "0x0E54f641193E8361cEE5bCbF6be90B70b11ecDe1"
+    },
+    "AMDB": {
+      "token": "0xA887f513a46aEfa98bF42Ae28B74Ff2c6Ca70FC7",
+      "pool": "0x24eD5BC652AE7c7B0e179656ADBF7C004e7c10dA",
+      "oracle": "0x7162606bD02247b0bA756519a3C0B3408Df17c04"
+    },
+    "APHon": {
+      "token": "0x0Ad9F1644333a3dc950901c793998Bb18663e4d8",
+      "pool": "0x74071947885ACdb42aDec69dEFB123f48aDc86Ef",
+      "oracle": "0xDA59c1da4Cf36161d42998565CF5b98f98aa9A43"
+    },
+    "APLDon": {
+      "token": "0xA5611547b984a7deEF1e4FC0E8E0d8b0798e3300",
+      "pool": "0x0f5C638272749bD81aC52C862f327577d819cE7a",
+      "oracle": "0x852cA75e7999E41bbf6c210829aCeF19fa8cdc83"
+    },
+    "AVGOB": {
+      "token": "0x1B686F1268f05dFe9f2efFE2117f2E7807D59cF2",
+      "pool": "0xd16A76DC1ACd5247d29F7dCb0E48Fe6034344B19",
+      "oracle": "0x638D9BDedf90430d634B657f78e5482421dE5605"
+    },
+    "AXPon": {
+      "token": "0x9B3FB69E3998e371399128F80fc9ff941D50B55F",
+      "pool": "0x8121188CD3901960b733A4DDDc1c151a93d92457",
+      "oracle": "0x988A27DCDaaC15b30E6f6B88FE69E44a0C6Fd555"
+    },
+    "BEB": {
+      "token": "0x4aa1D4149724E6CC5003a12FaCa47eEf48f8cC40",
+      "pool": "0xe967c310a0458DCad4D664121E2d0796acD30EAd",
+      "oracle": "0x4506100935D738fFf1815e43A420AfbF0D87314c"
+    },
+    "BLKon": {
+      "token": "0x70De7713D83eB54ea02749A57B4c510B087aBa29",
+      "pool": "0x7b6450fd0aDa5DD791FF9F4C95E23cC6AE8D9f2a",
+      "oracle": "0x62916A8e073427B85Fd80369Daccfb70a6D41c7B"
+    },
+    "CBRSB": {
+      "token": "0x026275AF378d498fb7eEa6D6cB7539393a9E0C6C",
+      "pool": "0xC8Eb810A22736A2112790B51C5Fe5d8167385ca6",
+      "oracle": "0x057d82ec5AfDf3409fD07020680FC708A5B645E7"
+    },
+    "CEGon": {
+      "token": "0x1A6a9d761C14F5f5722dE0F258A8C1EDe5b1c4E7",
+      "pool": "0x7a62139416E5F1D3483834b68f937762e9c3EDCa",
+      "oracle": "0x521FD925C1d9eD7FeC7631045aC742Af19c93838"
+    },
+    "CIENon": {
+      "token": "0x319fe02ddfe1Bb894825b0813712f8a71E3A4368",
+      "pool": "0x01e09ACB3552aa13Af899E62D10B1c1633eADE1e",
+      "oracle": "0x670472D662E8189c128A55AF80D8D55f4d3C3225"
+    },
+    "COHRB": {
+      "token": "0xAb415c7B7eAa29f5870aE4e88Ce6518B4566356F",
+      "pool": "0x9c3a1fA0f319Ee9810B6D625Bf093d487772EfC9",
+      "oracle": "0x3558dB7Ec5743c8747617463732BaA2E43d868C3"
+    },
+    "CORZon": {
+      "token": "0x015Ebadf7fcad8d86B32cdb8CE29844edda95b70",
+      "pool": "0x83638b35505648779280e6634DA56fDA608DF2f8",
+      "oracle": "0xB3E82c958fcB42F002369838E2487C551De6B0E8"
+    },
+    "CRDOB": {
+      "token": "0xED752a446D117a081a304b670ccC3239843918E3",
+      "pool": "0x3931dF2c0D1266C826367C26C53fCa216239300C",
+      "oracle": "0xc7314d7516f89bac6780a67310c55c135c68E572"
+    },
+    "CRMB": {
+      "token": "0xe96DdBd298C460F1a3BA0C0c043093f62C8E875A",
+      "pool": "0xdf932a7A74853210e49904ACE5dd468CeaFB0df7",
+      "oracle": "0xa42BBe6C6e6495463FF138D84eB6a2AFc528F84f"
+    },
+    "CRWVB": {
+      "token": "0x1812C38838CFa3A2D65BBAD032c2B37b6EcFB737",
+      "pool": "0xC7bcdB1Bae5E332B708b0c6fB6DdF8c39ca1Eed9",
+      "oracle": "0x1e52Eb15b8A99d3a74f0f6ab414050358004f53e"
+    },
+    "CVXon": {
+      "token": "0xdea3E81B35C4f550B3E1Ae824C139be7a378E4c0",
+      "pool": "0xf441Ff81B85b4e2346599c9d1A9737C35f7BAc6E",
+      "oracle": "0xDd50Ff3e416A5Aa682dD41f0641F830bc64C6892"
+    },
+    "GEVB": {
+      "token": "0x2e4b59f91Ec2eE494f7DAA209201F8f27F67BbFf",
+      "pool": "0xB6c312557a02d14589e6F911B1D132897391D258",
+      "oracle": "0x650050A1E7505929377f426B9cb466FCaCe1EF70"
+    },
+    "GLDon": {
+      "token": "0x1E018AA559d3B947AB37646327713D07Fad50912",
+      "pool": "0x3B900ce213460DCf1656FD163185D8a7D86C7c30",
+      "oracle": "0x70F483706aB460ec35B8941AC2dCa1913Ea15B7B"
+    },
+    "GOOGon": {
+      "token": "0x0FAbfd379349c0EA8A4606C4658497e61EE14760",
+      "pool": "0xf47B10e0810FFf64e49241C5028d4D7523471DC1",
+      "oracle": "0x5DEd651bb2fb218899e78E71bD760f8c91B228b3"
+    },
+    "GPROB": {
+      "token": "0x146a3B6D848119158Fb9ADD261ecC1F3554B5B89",
+      "pool": "0xC99004275a561b5E52C3366b840B96E2d05b3E2a",
+      "oracle": "0xb0e552926954E2F399346fdF9C85570548Ff5C33"
+    },
+    "IEFon": {
+      "token": "0xbB261723a59f85cEc235c77ca3C8b2B5f60cd4aA",
+      "pool": "0xa326EcFC89Bf05BbAb6D70606322960877CF7CA4",
+      "oracle": "0x19F44e0199300a069bAa37f1E83d980648eD79c1"
+    },
+    "IRENB": {
+      "token": "0xAf83b816AC2df259cce113be85c9072f6641B34b",
+      "pool": "0xd5B419aD5DEa375335BE0B3Ce0F0C2dE4B6e0742",
+      "oracle": "0x194818bD9157C2EA01e93f78627e989A77bDfc40"
+    },
+    "IVVon": {
+      "token": "0x616494E6043Dc5C362878Db6C4c126Dd586ABE28",
+      "pool": "0xbd279EE78fC20b55B5dca2F9d872783B5b27E8fb",
+      "oracle": "0x3D53E27B2826E78fDeb2e3F3515CB456C5dA07dE"
+    },
+    "KOon": {
+      "token": "0x02D2700FE3F1E28954CE9Fa41966d1C944D72b52",
+      "pool": "0x5BFfa3203abB2e250ba1B22Ccab015E75f856b33",
+      "oracle": "0xF9B37E7cc8A98A5d928219e316a6F34343f5A39a"
+    },
+    "LLYB": {
+      "token": "0x59C67FF7F24a0c2325c6372f0EF2809cf5CB546f",
+      "pool": "0x69F493DfD083c8d34c8e86935EAC9a32C2153445",
+      "oracle": "0x55DB4E91eA516959F1388c9269D689e8c55d3357"
+    },
+    "MAon": {
+      "token": "0x09bA441BFca50Ea559F0766b7E5B7BAEAd3C2C8a",
+      "pool": "0xfb71c4bA15515a59494bB9d9E7c5EFab349b7CcE",
+      "oracle": "0x5EBF55935d67FC51F466aD7dFB140739aeB85Efc"
+    },
+    "NBISB": {
+      "token": "0xD8eF174BB435d31F89468544C7f9f1e4B19c298c",
+      "pool": "0x4dEb25731c0b8D976E84b4089469B4a838EffA05",
+      "oracle": "0x17360Fdc7657808480477B0cB5936e24D740c5ea"
+    },
+    "NEMon": {
+      "token": "0xfAc7A975D0bf254C438d9d7C4e2754977eb836D6",
+      "pool": "0xC96768ed4643F6f6ccD808d7d215efcB37b46B72",
+      "oracle": "0xA9f5f436858ebAf2911ccc64F232fb9EA992AddE"
+    },
+    "ORCLB": {
+      "token": "0x5eC68abA17671D211C0D79D070C9aCc193889955",
+      "pool": "0xC870bA30EBc6D1EC7225bAB6c9a6Dba093A53d70",
+      "oracle": "0x5f1d54AeeacC4488768b3f8F6AD314d7bca296a9"
+    },
+    "PANWon": {
+      "token": "0x9aEDd320474B527234E0fcF95594112c3F781C91",
+      "pool": "0xCebcC2AD89C811a39DFe3529768A2f7bA83f1bd0",
+      "oracle": "0x05c0197239f36F6c20b51f3e53d1bd46A5C09ac5"
+    },
+    "PYPLB": {
+      "token": "0x6e417454adFcB7D0cA0eba7b4B5318da0f53aB81",
+      "pool": "0x4b7baf58F3972F2aCbA2B259204b58C9B50b8881",
+      "oracle": "0x5d4007ac0e6a479052979799f352AD8be910beAB"
+    },
+    "SHAZB": {
+      "token": "0x7022eA5BCa8737d3245430bD2DB49eD7711FF01A",
+      "pool": "0xD489f1AbDc6c0A73251521a3b80fD39467F83ffa",
+      "oracle": "0x35b39Cd2e9A0b8a062D9a96c161013e6f6FC72e5"
+    },
+    "STXB": {
+      "token": "0x1B70A09a974f269Bd86632cC81C1C12D775590Db",
+      "pool": "0x896c6e70aeBe7257e523D717Dc9a87961043d757",
+      "oracle": "0xA6F0B54633A972d1D901BaA526584EB67bd83CD7"
+    },
+    "UBERon": {
+      "token": "0x7a6e6f404dfe67E4F064A173AB52D838Baa9498a",
+      "pool": "0x1cA305056A0819e2D09458C173E5a7553BE7f49C",
+      "oracle": "0xC72Ee1066059F3A4E7CC47008033B57F7B455BF2"
+    },
+    "VRTon": {
+      "token": "0x88aA53ED64f8B06f7C4BA7cc6C87869FD5B646A4",
+      "pool": "0xe158D97784B46ff34BD24C2c690682E84606069E",
+      "oracle": "0x2B0DCE43042E3Ec199633FDDCDc5802914d20961"
+    },
+    "VSTB": {
+      "token": "0xF697267D420fAf19F10059d015EACB8fD76799f6",
+      "pool": "0x6f1E432Faf2e59d42ce4178fe5E443B7111dc729",
+      "oracle": "0x9fBC0f5c01D569308E34BecA6FB5B69C99e16Dde"
+    },
+    "Von": {
+      "token": "0xaf518CAc016D5c16DaB03CCA329E308dB7391E1E",
+      "pool": "0xB4FFCae4eaBae80E44Dd657df51433464F6E1A0A",
+      "oracle": "0xe3289b9287C19aB4525Fae7f97c3e784782eb7A4"
+    },
+    "ADA": {
+      "token": "0x286D41ea9845a879Ac76494650fF59B9d69CB164",
+      "pool": "0x2d79732E662209114A06Fa2ff7bE24F555a06b09",
+      "oracle": "0x328694FD3483287a71de0d473288E5FEfED25c48"
+    },
+    "LINK": {
+      "token": "0x456faC6c36FbC8D1cb4245D3B80a807A3e2a5d1D",
+      "pool": "0xcFF470F26eA455536E758DA2B268842F201416a8",
+      "oracle": "0xDc7A72Dbe4a56be0f92459Ae9a1f34E990F317B7"
+    },
+    "BCH": {
+      "token": "0xcC4f64D93399E66a5A0FbF25a015da02e1364208",
+      "pool": "0x6B713adC102486C036DC239E8FE1eB97F578fc9C",
+      "oracle": "0x64B6EFeFA9DEb4b6F6B85eB793aE203CDc43041E"
+    },
+    "NEAR": {
+      "token": "0xa3C6F5B3196CFB745C3BE1Bc914c83f064121565",
+      "pool": "0xb3C9173E9299f7eE71baB709f163A56d3B869f64",
+      "oracle": "0xeC411d3bE266f0A55Cb82E84d01dcF9A6D8bb855"
+    },
+    "UNI": {
+      "token": "0x1224C02bA57a0ccDf994C96F3e0f2400ca5559A2",
+      "pool": "0x92aCDf9cE8D39E8c78Fa1F668a847850B3eAdB5e",
+      "oracle": "0x03d5d281BaBBa781E39bf43dAA6b9B2384B47B98"
+    },
+    "ZEC": {
+      "token": "0x92e51e050c6232528d4Eca5B64A176b5a9e12Bed",
+      "pool": "0x4613676a9ED1790bA4bb5d6FcE9C5b99b4b480A9",
+      "oracle": "0xBB51F2A47bC9c27a4C10dF8BbF13fEaeCDf58300"
+    },
+    "TONCOIN": {
+      "token": "0x5F8B9DA554e35ca80b931280c9c5fd9A54c923f0",
+      "pool": "0x8d39c85A542D3D05b053eD4a56761bEed67FC5AA",
+      "oracle": "0xd652dfac675Ed271543E4c4a8742e3DA5462AE7A"
+    },
+    "DOT": {
+      "token": "0xC9341A66C56A60cFBEf718402FDe69B59D2FC014",
+      "pool": "0x5827671cb4251034A38EB0f28Ab4114d13d5b8A3",
+      "oracle": "0xceB440d67fc16c79C1BC86BA7B13b0b6AbCd94dE"
+    },
+    "SHIB": {
+      "token": "0xdb91a5977D35B0Cc32e84de2F974D86582941c6E",
+      "pool": "0x948452f61D487FF8945D9Fa07a2D8AADE1fDcf69",
+      "oracle": "0x812Bc2892777169DAbC61efF66F9F1e243C8a507"
+    },
+    "PEPE": {
+      "token": "0xED6D9C53d6369CCFbfF8e2Cae264A298ad3921b8",
+      "pool": "0xBDEa3A5C76f040737854516A12c4e4984109FC55",
+      "oracle": "0xd41249663fD410Dc3D0De4d8ae386e4576f96BC3"
+    },
+    "AAVE": {
+      "token": "0xC11DbF7979F0Fa2A40FDFf8C8f9C02971E3460E0",
+      "pool": "0x76738A335364a7BE2669a33c58521A3E43Af0917",
+      "oracle": "0xef817c46726729b7e9950c5CE42e2E6f36f6e10E"
+    },
+    "Cake": {
+      "token": "0x163D2A0119EC959019ad43662eca66B70Dc7D81a",
+      "pool": "0x1b6312f1146Ba2D9FdF26C8d223eC3A2356d7de0",
+      "oracle": "0x3b38eB9819aa6BABEb3985dCCd64fE893453AE0c"
+    },
+    "FIL": {
+      "token": "0x5AdFdb29bFA979a4a91Ea01B849373005d00cCD6",
+      "pool": "0x77Bee8B4cf9E754c53D7d46A238af639c6C7d207",
+      "oracle": "0x948d56a2B5c6386F7fEa787EAae4199Ca46431D8"
+    },
+    "ATOM": {
+      "token": "0x0A289C717912A1aB7Dc49D278B5E4afFF9F5042a",
+      "pool": "0x291C1357B3b027143CB33b566A5fF472E6260Bf7",
+      "oracle": "0xd1263B7A74a55Df4b8c33422bc818593da2C0B32"
     }
   }
 }
