@@ -4,9 +4,9 @@ pragma solidity ^0.8.26;
 import { Test } from "forge-std/Test.sol";
 import { AtpRegistry } from "../../src/atp/AtpRegistry.sol";
 
-/// @notice Pins `AtpRegistry.publishVersion` validation: the weight sum, duplicate assets, the 16-asset
-/// ceiling and the array-length match are the only gates between a provider and the asset allowlist the
-/// executor trusts.
+/// @notice Pins `AtpRegistry.publishVersion` validation: the weight sum, duplicate assets and the array-length
+/// match are the only gates between a provider and the asset allowlist the executor trusts. There is no
+/// asset-count ceiling since cre8-contracts#45.
 contract AtpRegistryTest is Test {
     address internal constant PROVIDER = address(0xBEEF);
     address internal constant OUTSIDER = address(0xCAFE);
@@ -85,12 +85,64 @@ contract AtpRegistryTest is Test {
         assertTrue(registry.isAssetAllowed(strategyId, 2, ASSET_B));
     }
 
-    function test_publishVersion_acceptsFullSixteenAssets() public {
-        address[] memory assets = _assets(registry.MAX_VERSION_ASSETS());
+    function test_publishVersion_acceptsSixteenAssets() public {
+        address[] memory assets = _assets(16);
         _publish(assets, _weights(assets.length, 625));
 
         assertEq(registry.versionCount(strategyId), 1);
         assertTrue(registry.isAssetAllowed(strategyId, 0, assets[15]));
+    }
+
+    /// @dev 17 was the first count the former 16-asset ceiling rejected (cre8-contracts#45).
+    function test_publishVersion_acceptsSeventeenAssets() public {
+        address[] memory assets = _assets(17);
+        uint16[] memory weights = _weights(17, 588);
+        weights[0] = 10_000 - 588 * 16;
+        _publish(assets, weights);
+
+        assertEq(registry.version(strategyId, 0).assets.length, 17);
+        assertTrue(registry.isAssetAllowed(strategyId, 0, assets[16]));
+    }
+
+    /// @dev USDT + all 92 testnet assets, the largest version the testnet can hold today.
+    function test_publishVersion_acceptsNinetyThreeAssets() public {
+        address[] memory assets = _assets(93);
+        uint16[] memory weights = _weights(93, 107);
+        weights[0] = 10_000 - 107 * 92;
+        _publish(assets, weights);
+
+        AtpRegistry.Version memory published = registry.version(strategyId, 0);
+        assertEq(published.assets.length, 93);
+        assertEq(published.weightsBps.length, 93);
+        assertEq(published.weightsBps[0], 156);
+        assertEq(published.assets[92], assets[92]);
+        assertTrue(registry.isAssetAllowed(strategyId, 0, assets[0]));
+        assertTrue(registry.isAssetAllowed(strategyId, 0, assets[92]));
+        assertFalse(registry.isAssetAllowed(strategyId, 0, address(uint160(0x1000 + 93))));
+    }
+
+    /// @dev No ceiling on the count at all: the weight sum is the only bound, here 500 assets of 20 bps.
+    function test_publishVersion_acceptsFiveHundredAssets() public {
+        address[] memory assets = _assets(500);
+        _publish(assets, _weights(500, 20));
+
+        assertEq(registry.version(strategyId, 0).assets.length, 500);
+        assertTrue(registry.isAssetAllowed(strategyId, 0, assets[499]));
+    }
+
+    function test_publishVersion_largeVersionStillRejectsWeightMiss() public {
+        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.WeightsMismatch.selector, uint256(9_951)));
+        _publish(_assets(93), _weights(93, 107));
+    }
+
+    function test_publishVersion_largeVersionStillRejectsDuplicateAtTheEnd() public {
+        address[] memory assets = _assets(93);
+        assets[92] = assets[0];
+        uint16[] memory weights = _weights(93, 107);
+        weights[0] = 10_000 - 107 * 92;
+
+        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.DuplicateAsset.selector, assets[0]));
+        _publish(assets, weights);
     }
 
     // ---- weight validation ----
@@ -118,7 +170,7 @@ contract AtpRegistryTest is Test {
         _publish(_twoAssets(), _weights(2, 4_999));
     }
 
-    // ---- duplicate / length / cap ----
+    // ---- duplicate / length ----
 
     function test_publishVersion_revertsOnDuplicateAsset() public {
         address[] memory assets = new address[](2);
@@ -146,13 +198,6 @@ contract AtpRegistryTest is Test {
     function test_publishVersion_revertsOnLengthMismatch() public {
         vm.expectRevert(AtpRegistry.LengthMismatch.selector);
         _publish(_twoAssets(), _weights(3, 3_333));
-    }
-
-    function test_publishVersion_revertsOnTooManyAssets() public {
-        address[] memory assets = _assets(registry.MAX_VERSION_ASSETS() + 1);
-
-        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.TooManyAssets.selector, uint256(17)));
-        _publish(assets, _weights(assets.length, 588));
     }
 
     function test_publishVersion_revertsOnEmptyAssets() public {

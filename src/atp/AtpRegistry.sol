@@ -46,9 +46,6 @@ contract AtpRegistry {
     uint16 public constant MAX_SWAP_FEE_BPS = 300;
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant TOTAL_WEIGHT_BPS = 10_000;
-    /// @notice Upper bound on a version's asset list. `isAssetAllowed` is read twice per swap step on-chain,
-    /// so the list is kept short enough that the linear scan stays cheap.
-    uint256 public constant MAX_VERSION_ASSETS = 16;
     /// @notice `pauseFlags` bits: who holds an account paused. Each source clears only what it may (see
     /// `setPaused`); the account is paused while any bit is set.
     uint8 public constant PAUSED_BY_OWNER = 1;
@@ -106,7 +103,6 @@ contract AtpRegistry {
     error NotStrategyProvider(uint256 id);
     error EmptyAssets();
     error LengthMismatch();
-    error TooManyAssets(uint256 count);
     error DuplicateAsset(address asset);
     error WeightsMismatch(uint256 sum);
     error Unauthorized();
@@ -291,7 +287,8 @@ contract AtpRegistry {
 
     /// @notice Whether `asset` is tradable in `id` at `versionNumber` (0 = active).
     /// @dev Returns false rather than reverting for an unknown strategy/version so the executor can fail one
-    /// step with its own error; an empty asset list can therefore never be "allowed".
+    /// step with its own error; an empty asset list can therefore never be "allowed". The scan is linear in the
+    /// version's asset count and runs twice per swap step.
     function isAssetAllowed(uint256 id, uint16 versionNumber, address asset) public view returns (bool) {
         if (versionNumber == 0) versionNumber = activeVersion[id];
         if (versionNumber == 0 || versionNumber >= _versions[id].length) return false;
@@ -308,12 +305,15 @@ contract AtpRegistry {
         if (bps > MAX_SWAP_FEE_BPS) revert FeeTooHigh(bps);
     }
 
-    /// @dev Duplicate-free, positive-length asset list with weights summing to exactly 10000.
+    /// @dev Duplicate-free, positive-length asset list with weights summing to exactly 10000. There is no
+    /// asset-count ceiling (cre8-contracts#45). Swaps are per step, so a large rebalance or exit is split over
+    /// several `executeRebalance` batches; only this publish and the executor's account valuation (once per
+    /// batch with a buy) walk the whole list in one transaction. docs/testnet-97.zh-TW.md has the gas per
+    /// flow measured for a 93-asset version.
     function _validateVersion(address[] calldata assets, uint16[] calldata weightsBps) internal pure {
         uint256 count = assets.length;
         if (count == 0) revert EmptyAssets();
         if (count != weightsBps.length) revert LengthMismatch();
-        if (count > MAX_VERSION_ASSETS) revert TooManyAssets(count);
         uint256 sum;
         for (uint256 i; i < count; ++i) {
             address asset = assets[i];

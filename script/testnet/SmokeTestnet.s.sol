@@ -33,19 +33,22 @@ contract SmokeAccount {
 
 /// @title SmokeTestnet
 /// @notice Chain 97 acceptance run for cre8-contracts#30, after `DeployTestnet` and the 30-minute TWAP
-/// warm-up: the assets go in groups of 15 (16-asset versions with USDT; 7 groups for the 92 assets of
-/// cre8-contracts#39); per group a fresh contract account claims testnet USDT from the faucet and enrolls in the
-/// group's strategy, and for every asset it buys 100 USDT worth through the executor and the Pancake Universal
-/// Router and sells everything back. The executor enforces the oracle floor (and, since #24,
-/// `amountOutMin`) on every step; this script also prints each fill against its floor. On a public chain it
-/// spends real tBNB, so it is meant for the local fork unless a run on 97 is explicitly wanted.
+/// warm-up. Since cre8-contracts#45 (no asset-count ceiling) it uses one strategy whose version holds USDT and
+/// all 92 assets of cre8-contracts#39: one fresh contract account claims testnet USDT from the faucet, enrolls,
+/// buys 100 USDT worth of every asset through the executor and the Pancake Universal Router, sells everything
+/// back and withdraws its USDT. Buys and sales go in batches of `SMOKE_STEPS_PER_BATCH` steps (default 16), the
+/// way the backend splits a large rebalance. The executor enforces the oracle floor (and, since #24,
+/// `amountOutMin`) on every step; this script also prints each fill against its floor, and `SMOKE_TX <label>
+/// <index>` for the transactions whose gas `fork-e2e.sh` reports (index into the broadcast's transactions). On a
+/// public chain it spends real tBNB, so it is meant for the local fork unless a run on 97 is explicitly wanted.
 /// @dev `TESTNET_EXECUTOR` locates everything else: registry, router and USDT from the executor, the tokens
 /// from `TestnetBook` (CREATE2 addresses of DEPLOYER).
 contract SmokeTestnet is Script {
     uint256 internal constant TRADE_USDT = 100e18;
-    /// @dev Per group account: 15 buys of 100 USDT stay under the 100%-of-value daily buy cap.
-    uint256 internal constant CLAIM_USDT = 2_000e18;
-    uint256 internal constant ASSETS_PER_VERSION = 15; // + USDT = MAX_VERSION_ASSETS (16)
+    /// @dev The faucet's daily limit. 92 buys of 100 USDT (9,200) stay under the executor's buy cap, 100% of the
+    /// account value per 24 hours (about 10,000 less fees and pool fees).
+    uint256 internal constant CLAIM_USDT = 10_000e18;
+    uint256 internal constant DEFAULT_STEPS_PER_BATCH = 16;
     uint256 internal constant BPS = 10_000;
     bytes1 internal constant V3_SWAP_EXACT_IN = 0x00;
 
@@ -55,10 +58,16 @@ contract SmokeTestnet is Script {
         AtpMultiPoolOracle router;
         TestnetUSDT usdt;
         SmokeAccount account;
+        uint256 strategyId;
+        uint16 feeBps;
+        /// @dev Transactions broadcast so far; the next one has this index.
+        uint256 txCount;
     }
 
     function run() external {
         require(block.chainid == 97, "SmokeTestnet: chain 97 only");
+        uint256 perBatch = vm.envOr("SMOKE_STEPS_PER_BATCH", DEFAULT_STEPS_PER_BATCH);
+        require(perBatch != 0, "SmokeTestnet: SMOKE_STEPS_PER_BATCH = 0");
         Env memory env;
         env.executor = AtpExecutor(vm.envAddress("TESTNET_EXECUTOR"));
         env.registry = env.executor.registry();
@@ -72,107 +81,133 @@ contract SmokeTestnet is Script {
         }
 
         vm.startBroadcast();
-        uint256 strategyId;
-        uint256 claimed;
-        uint256 left;
-        for (uint256 i; i < specs.length; ++i) {
-            if (i % ASSETS_PER_VERSION == 0) {
-                if (address(env.account) != address(0)) left += env.usdt.balanceOf(address(env.account));
-                // A fresh account per group: the executor caps an account's buys at `maxBuyBps` (100%) of its
-                // value per 24 hours, so one account cannot buy 100 USDT of every asset.
-                env.account = new SmokeAccount(msg.sender);
-                _call(env, address(env.usdt), abi.encodeCall(TestnetUSDT.claim, (CLAIM_USDT)));
-                claimed += CLAIM_USDT;
-                _approve(env, address(env.usdt));
-                strategyId = _strategy(env, tokens, i);
-                _call(
-                    env,
-                    address(env.registry),
-                    abi.encodeCall(AtpRegistry.enroll, (address(env.account), strategyId))
-                );
-                console.log(
-                    string.concat("SMOKE group ", vm.toString(i / ASSETS_PER_VERSION + 1), " account"),
-                    address(env.account)
-                );
-            }
+        env.account = new SmokeAccount(msg.sender);
+        ++env.txCount;
+        _call(env, address(env.usdt), abi.encodeCall(TestnetUSDT.claim, (CLAIM_USDT)));
+        _approve(env, address(env.usdt));
+        _strategy(env, tokens);
+        _call(
+            env,
+            address(env.registry),
+            abi.encodeCall(AtpRegistry.enroll, (address(env.account), env.strategyId))
+        );
+        console.log("SMOKE account", address(env.account));
+        console.log("SMOKE version assets (incl. USDT) / steps per batch", tokens.length + 1, perBatch);
+        for (uint256 i; i < tokens.length; ++i) {
             _approve(env, tokens[i]);
-            _roundTrip(env, specs[i], tokens[i], strategyId);
         }
-        vm.stopBroadcast();
-        left += env.usdt.balanceOf(address(env.account));
 
+        uint256[] memory bought = new uint256[](tokens.length);
+        for (uint256 from; from < tokens.length; from += perBatch) {
+            _batch(env, specs, tokens, from, Math.min(from + perBatch, tokens.length), true, bought);
+        }
+        for (uint256 from; from < tokens.length; from += perBatch) {
+            _batch(env, specs, tokens, from, Math.min(from + perBatch, tokens.length), false, bought);
+        }
+        uint256 left = env.usdt.balanceOf(address(env.account));
+        // Exit: the owner moves the USDT out of its own account (never through the executor).
+        _call(env, address(env.usdt), abi.encodeCall(IERC20.transfer, (msg.sender, left)));
+        _mark(env, "exit_withdrawUsdt");
+        vm.stopBroadcast();
+
+        for (uint256 i; i < tokens.length; ++i) {
+            require(
+                IERC20(tokens[i]).balanceOf(address(env.account)) == 0,
+                string.concat(specs[i].symbol, ": not fully sold")
+            );
+        }
         console.log("");
         console.log("SMOKE assets round-tripped", specs.length);
-        console.log("SMOKE USDT claimed / left (wei)", claimed, left);
-        console.log("SMOKE round-trip cost over all assets (USDT wei)", claimed - left);
+        console.log("SMOKE USDT claimed / left (wei)", CLAIM_USDT, left);
+        console.log("SMOKE round-trip cost over all assets (USDT wei)", CLAIM_USDT - left);
     }
 
-    function _roundTrip(
+    /// @dev One `executeRebalance` over tokens[from, to): buys of `TRADE_USDT` each (`buy`), or sales of exactly
+    /// what the buys returned. Every fill is checked against its floor and printed.
+    function _batch(
         Env memory env,
-        TestnetAssets.AssetSpec memory spec,
-        address token,
-        uint256 strategyId
+        TestnetAssets.AssetSpec[] memory specs,
+        address[] memory tokens,
+        uint256 from,
+        uint256 to,
+        bool buy,
+        uint256[] memory bought
     ) internal {
-        uint16 feeBps = env.registry.effectiveFeeBps(strategyId);
-        IERC20 asset = IERC20(token);
-
-        (uint256 buyQuote, uint256 buyFloor) = env.router.previewSwap(address(env.usdt), token, TRADE_USDT);
-        uint256 before = asset.balanceOf(address(env.account));
-        _swap(
+        uint256 count = to - from;
+        AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](count);
+        uint256[] memory floors = new uint256[](count);
+        uint256[] memory before = new uint256[](count);
+        for (uint256 k; k < count; ++k) {
+            uint256 i = from + k;
+            (address tokenIn, address tokenOut) =
+                buy ? (address(env.usdt), tokens[i]) : (tokens[i], address(env.usdt));
+            uint256 amountIn = buy ? TRADE_USDT : bought[i];
+            (, floors[k]) = env.router.previewSwap(tokenIn, tokenOut, amountIn);
+            steps[k] = _step(
+                env,
+                tokenIn,
+                tokenOut,
+                specs[i].fee,
+                amountIn,
+                _minGross(floors[k], env.feeBps, specs[i].maxSlippageBps)
+            );
+            before[k] = buy ? IERC20(tokens[i]).balanceOf(address(env.account)) : 0;
+        }
+        uint256 usdtBefore = env.usdt.balanceOf(address(env.account));
+        _call(
             env,
-            address(env.usdt),
-            token,
-            spec.fee,
-            TRADE_USDT,
-            _minGross(buyFloor, feeBps, spec.maxSlippageBps)
+            address(env.executor),
+            abi.encodeCall(AtpExecutor.executeRebalance, (address(env.account), steps, block.timestamp + 600))
         );
-        uint256 bought = asset.balanceOf(address(env.account)) - before;
-        require(bought >= buyFloor, string.concat(spec.symbol, ": buy below floor"));
+        string memory label = string.concat(
+            buy ? "buy" : "sell",
+            "_assets_",
+            vm.toString(from + 1),
+            "-",
+            vm.toString(to),
+            "_steps_",
+            vm.toString(count)
+        );
+        _mark(env, label);
 
-        (uint256 sellQuote, uint256 sellFloor) = env.router.previewSwap(token, address(env.usdt), bought);
-        before = env.usdt.balanceOf(address(env.account));
-        _swap(
-            env, token, address(env.usdt), spec.fee, bought, _minGross(sellFloor, feeBps, spec.maxSlippageBps)
-        );
-        uint256 sold = env.usdt.balanceOf(address(env.account)) - before;
-        require(sold >= sellFloor, string.concat(spec.symbol, ": sale below floor"));
-        require(asset.balanceOf(address(env.account)) == 0, string.concat(spec.symbol, ": not fully sold"));
-
-        console.log(
-            string.concat(
-                "SMOKE ",
-                spec.symbol,
-                " buy 100 USDT -> ",
-                vm.toString(bought),
-                " (quote ",
-                vm.toString(buyQuote),
-                ", floor ",
-                vm.toString(buyFloor),
-                "); sell -> ",
-                vm.toString(sold),
-                " USDT wei (quote ",
-                vm.toString(sellQuote),
-                ", floor ",
-                vm.toString(sellFloor),
-                ")"
-            )
-        );
+        if (buy) {
+            for (uint256 k; k < count; ++k) {
+                uint256 i = from + k;
+                bought[i] = IERC20(tokens[i]).balanceOf(address(env.account)) - before[k];
+                require(bought[i] >= floors[k], string.concat(specs[i].symbol, ": buy below floor"));
+                console.log(
+                    string.concat("SMOKE ", specs[i].symbol, " buy 100 USDT -> ", vm.toString(bought[i])),
+                    string.concat("(floor ", vm.toString(floors[k]), ")")
+                );
+            }
+        } else {
+            // Every sale pays USDT, so per asset only the executor's own per-step check (gross >= amountOutMin
+            // >= floor grossed up over the fee) applies; here the batch total is checked against the floor sum.
+            uint256 received = env.usdt.balanceOf(address(env.account)) - usdtBefore;
+            uint256 floorSum;
+            for (uint256 k; k < count; ++k) {
+                floorSum += floors[k];
+            }
+            require(received >= floorSum, string.concat(label, ": sales below floor"));
+            console.log(
+                string.concat("SMOKE ", label, " USDT received / floor sum (wei)"), received, floorSum
+            );
+        }
     }
 
-    function _swap(
+    function _step(
         Env memory env,
         address tokenIn,
         address tokenOut,
         uint24 fee,
         uint256 amountIn,
         uint256 minOut
-    ) internal {
+    ) internal view returns (AtpExecutor.SwapStep memory) {
         bytes[] memory inputs = new bytes[](1);
         inputs[0] = abi.encode(
             address(env.executor), amountIn, minOut, abi.encodePacked(tokenIn, fee, tokenOut), true
         );
-        AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](1);
-        steps[0] = AtpExecutor.SwapStep({
+        return AtpExecutor.SwapStep({
             tokenIn: tokenIn,
             tokenOut: tokenOut,
             amountIn: amountIn,
@@ -180,32 +215,26 @@ contract SmokeTestnet is Script {
             venue: address(env.executor.universalRouter()),
             data: abi.encode(abi.encodePacked(V3_SWAP_EXACT_IN), inputs)
         });
-        _call(
-            env,
-            address(env.executor),
-            abi.encodeCall(AtpExecutor.executeRebalance, (address(env.account), steps, block.timestamp + 600))
-        );
     }
 
-    /// @dev One strategy per group of 15 assets (+ USDT), equal weights with the remainder on USDT.
-    function _strategy(Env memory env, address[] memory tokens, uint256 from) internal returns (uint256 id) {
-        uint256 count = Math.min(ASSETS_PER_VERSION, tokens.length - from);
+    /// @dev One strategy over USDT + every asset (93 with the 92 of #39), equal weights with the remainder on USDT.
+    function _strategy(Env memory env, address[] memory tokens) internal {
+        uint256 count = tokens.length;
         address[] memory assets = new address[](count + 1);
         uint16[] memory weights = new uint16[](count + 1);
         uint256 each = BPS / (count + 1);
         assets[0] = address(env.usdt);
         weights[0] = uint16(BPS - each * count);
         for (uint256 k; k < count; ++k) {
-            assets[k + 1] = tokens[from + k];
+            assets[k + 1] = tokens[k];
             weights[k + 1] = uint16(each);
         }
-        id = env.registry
-            .registerStrategy(
-                string.concat("testnet smoke ", vm.toString(from / ASSETS_PER_VERSION + 1)),
-                "cre8-contracts#30",
-                false
-            );
-        env.registry.publishVersion(id, assets, weights, keccak256("smoke"), 0);
+        env.strategyId = env.registry.registerStrategy("testnet smoke", "cre8-contracts#30, #45", false);
+        ++env.txCount;
+        env.registry.publishVersion(env.strategyId, assets, weights, keccak256("smoke"), 0);
+        ++env.txCount;
+        _mark(env, "publishVersion");
+        env.feeBps = env.registry.effectiveFeeBps(env.strategyId);
     }
 
     function _approve(Env memory env, address token) internal {
@@ -214,6 +243,12 @@ contract SmokeTestnet is Script {
 
     function _call(Env memory env, address target, bytes memory data) internal {
         env.account.execute(target, data);
+        ++env.txCount;
+    }
+
+    /// @dev Labels the transaction just broadcast for `fork-e2e.sh`, which reads its gas from the receipts.
+    function _mark(Env memory env, string memory label) internal pure {
+        console.log(string.concat("SMOKE_TX ", label), env.txCount - 1);
     }
 
     /// @dev The executor's `minGross` plus a cushion of a sixth of the asset's slippage budget (tier B 300 bps ->
