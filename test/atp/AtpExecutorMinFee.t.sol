@@ -78,7 +78,8 @@ contract AtpExecutorMinFeeTest is Test {
         weights[1] = 5_000;
         strategyId = registry.registerStrategy("index", "min fee", true);
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), strategyId);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), strategyId, 1);
 
         usdt.approve(address(executor), type(uint256).max);
         tokenA.approve(address(executor), type(uint256).max);
@@ -484,8 +485,10 @@ contract AtpExecutorMinFeeTest is Test {
         assertEq(_usdt(FEE_RECIPIENT), 0.225e18);
 
         MinFeeAccount other = new MinFeeAccount(executor);
+        vm.prank(address(other));
+        registry.approveEnrollment(strategyId, 1);
         vm.prank(OPERATOR);
-        registry.enroll(address(other), strategyId);
+        registry.enroll(address(other), strategyId, 1);
         usdt.mint(address(other), 26e18);
         other.approve(address(usdt));
         other.approve(address(tokenA));
@@ -556,8 +559,10 @@ contract AtpExecutorMinFeeTest is Test {
         usdt.mint(address(this), 101e18);
         _exec(_one(_buy(10e18)));
         MinFeeAccount other = new MinFeeAccount(executor);
+        vm.prank(address(other));
+        registry.approveEnrollment(strategyId, 1);
         vm.prank(OPERATOR);
-        registry.enroll(address(other), strategyId);
+        registry.enroll(address(other), strategyId, 1);
         usdt.mint(address(other), 101e18);
         other.approve(address(usdt));
         other.approve(address(tokenA));

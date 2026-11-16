@@ -123,12 +123,21 @@ send "$SAFE_A" $RT 0x79ba5097
 eq "registry owner = Safe A" "$(cast call $REG 'owner()(address)')" "$SAFE_A"
 eq "router owner = Safe A" "$(cast call $RT 'owner()(address)')" "$SAFE_A"
 eq "operator = OP1" "$(cast call $REG 'operator()(address)')" "$OP1"
+# Local-only fixture: publish one day before the frozen price snapshot, then advance back to it.
+# anvil_setTime changes no production oracle checks or feed data; no swap/quote runs in the past.
+VERSION_FIXTURE_NOW=$(cast block latest -f timestamp)
+cast rpc anvil_setTime $(( (VERSION_FIXTURE_NOW - 86400) * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
 send $PROVIDER $REG "registerStrategy(string,string,bool)" "Drill" "ops drill" true
 send $PROVIDER $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "[$WBNB,$USDT,$DOGE]" "[4000,4000,2000]" \
   0x0000000000000000000000000000000000000000000000000000000000000001 0
+cast rpc anvil_setTime $(( VERSION_FIXTURE_NOW * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
+[ "$(cast call $REG 'activeVersion(uint256)(uint16)' 1)" = "1" ] || { echo "version did not mature"; exit 1; }
 cast rpc anvil_setCode $ACCOUNT 0x00 >/dev/null   # smart account 必須有 code，executor 才接受
 actor $ACCOUNT
-send $OP1 $REG "enroll(address,uint256)" $ACCOUNT 1
+send $ACCOUNT $REG "approveEnrollment(uint256,uint16)" 1 1
+send $OP1 $REG "enroll(address,uint256,uint16)" $ACCOUNT 1 1
 eq "帳戶已 enroll、未暫停" "$(paused_of $ACCOUNT)" "false"
 rebalance_noop && ok "帳戶可以呼叫 executeRebalance（空步驟）" || fail "未暫停時 executeRebalance 不該 revert"
 
@@ -139,11 +148,11 @@ eq "1-1 Safe A setOperator(0) → operator = 0" "$(cast call $REG 'operator()(ad
 send "$SAFE_A" $REG "setPaused(address,bool)" $ACCOUNT true
 eq "1-2 Safe A setPaused(帳戶, true) → paused = true" "$(paused_of $ACCOUNT)" "true"
 expect_err "1-3 舊 operator 解除暫停" "Unauthorized()" $OP1 $REG "setPaused(address,bool)" $ACCOUNT false
-expect_err "1-4 舊 operator 重新 enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256)" $ACCOUNT 1
+expect_err "1-4 舊 operator 重新 enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256,uint16)" $ACCOUNT 1 1
 expect_err "1-5 帳戶 executeRebalance" "Paused()" $ACCOUNT $EX \
   "executeRebalance(address,(address,address,uint256,uint256,address,bytes)[],uint256)" $ACCOUNT "[]" 99999999999
 echo "  -- 注意：帳戶本人重新 enroll 會清掉暫停"
-send $ACCOUNT $REG "enroll(address,uint256)" $ACCOUNT 1
+send $ACCOUNT $REG "enroll(address,uint256,uint16)" $ACCOUNT 1 1
 eq "1-6 帳戶自己 enroll → paused = false（Safe 的暫停被帳戶本人解除）" "$(paused_of $ACCOUNT)" "false"
 echo "  -- 帳戶本人的暫停：Safe 解除不了，只有帳戶本人能解除"
 send $ACCOUNT $REG "setPaused(address,bool)" $ACCOUNT true
@@ -162,13 +171,15 @@ echo
 echo "== 情境 2：撤銷並更換 operator（OP1 私鑰外洩）"
 send "$SAFE_A" $REG "setOperator(address)" $OP2
 eq "2-1 Safe A setOperator(OP2) → operator = OP2" "$(cast call $REG 'operator()(address)')" "$OP2"
-expect_err "2-2 舊 operator enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256)" $USER2 1
+expect_err "2-2 舊 operator enroll" "Unauthorized()" $OP1 $REG "enroll(address,uint256,uint16)" $USER2 1 1
 expect_err "2-3 舊 operator setPaused" "Unauthorized()" $OP1 $REG "setPaused(address,bool)" $ACCOUNT false
-send $OP2 $REG "enroll(address,uint256)" $USER2 1
+actor $USER2
+send $USER2 $REG "approveEnrollment(uint256,uint16)" 1 1
+send $OP2 $REG "enroll(address,uint256,uint16)" $USER2 1 1
 eq "2-4 新 operator enroll 另一個帳戶" "$(cast call $REG 'isEnrolled(address)(bool)' $USER2)" "true"
 send $OP2 $REG "setPaused(address,bool)" $ACCOUNT false
 eq "2-5 新 operator 解除 → 解除不了 Safe 的暫停（pauseFlags = 1）" "$(flags_of $ACCOUNT)" "1"
-expect_err "2-6 新 operator 重新 enroll 已 enroll 的帳戶" "AlreadyEnrolled(address)" $OP2 $REG "enroll(address,uint256)" $ACCOUNT 1
+expect_err "2-6 新 operator 重新 enroll 已 enroll 的帳戶" "AlreadyEnrolled(address)" $OP2 $REG "enroll(address,uint256,uint16)" $ACCOUNT 1 1
 send $OP2 $REG "setPaused(address,bool)" $ACCOUNT true
 eq "2-7 新 operator 自己暫停 → pauseFlags = 3" "$(flags_of $ACCOUNT)" "3"
 send $OP2 $REG "setPaused(address,bool)" $ACCOUNT false

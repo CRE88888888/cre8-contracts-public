@@ -141,19 +141,30 @@ for WHO in "$DEPLOYER" "$OPERATOR"; do
 done
 
 echo "== operator 的日常權限（策略、enroll、暫停）"
+# Local-only fixture: publish one day before the frozen price snapshot, then advance back to it.
+# anvil_setTime changes no production oracle checks or feed data; no swap/quote runs in the past.
+VERSION_FIXTURE_NOW=$(cast block latest -f timestamp)
+cast rpc anvil_setTime $(( (VERSION_FIXTURE_NOW - 86400) * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
 cast send -q $REG "registerStrategy(string,string,bool)" "Elon Universe" "rehearsal" true --unlocked --from "$OPERATOR" >/dev/null
 ASSETS='[0x5b1910eAaD6450E50f816082Aa078C41F10C292f,0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1,0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c,0xbA2aE424d960c26247Dd6c32edC70B295c744C43,0x2170Ed0880ac9A755fd29B2688956BD959F933F8]'
 cast send -q $REG "publishVersion(uint256,address[],uint16[],bytes32,uint64)" 1 "$ASSETS" "[2000,2000,2000,2000,2000]" \
   0x0000000000000000000000000000000000000000000000000000000000000001 0 --unlocked --from "$OPERATOR" >/dev/null
+cast rpc anvil_setTime $(( VERSION_FIXTURE_NOW * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
+[ "$(cast call $REG 'activeVersion(uint256)(uint16)' 1)" = "1" ] || { echo "version did not mature"; exit 1; }
 ok "operator 以 provider 身分註冊並發布策略 1"
-cast send -q $REG "enroll(address,uint256)" $U 1 --unlocked --from "$OPERATOR" >/dev/null && ok "operator enroll"
+cast rpc anvil_impersonateAccount "$U" >/dev/null
+cast rpc anvil_setBalance "$U" 0x16345785D8A0000 >/dev/null
+cast send -q $REG "approveEnrollment(uint256,uint16)" 1 1 --unlocked --from "$U" >/dev/null
+cast send -q $REG "enroll(address,uint256,uint16)" $U 1 1 --unlocked --from "$OPERATOR" >/dev/null && ok "operator enroll"
 cast send -q $REG "setPaused(address,bool)" $U true --unlocked --from "$OPERATOR" >/dev/null && ok "operator 暫停帳戶"
 # 策略 1 已存在、帳戶已 enroll，這兩筆 revert 只可能是權限：部署者交接後不保留 operator 權限。
-expect_revert "部署者 enroll"            $REG "enroll(address,uint256)" $S3 1 --unlocked --from "$DEPLOYER"
+expect_revert "部署者 enroll"            $REG "enroll(address,uint256,uint16)" $S3 1 1 --unlocked --from "$DEPLOYER"
 expect_revert "部署者 setPaused（解除）" $REG "setPaused(address,bool)" $U false --unlocked --from "$DEPLOYER"
-expect_revert "Safe（owner）enroll" $REG "enroll(address,uint256)" $S2 1 --unlocked --from "$SAFE"
+expect_revert "Safe（owner）enroll" $REG "enroll(address,uint256,uint16)" $S2 1 1 --unlocked --from "$SAFE"
 # A10-2：operator 只能做第一次 enroll，也只能解除自己設的暫停
-expect_revert "operator 重新 enroll 已 enroll 的帳戶" $REG "enroll(address,uint256)" $U 1 --unlocked --from "$OPERATOR"
+expect_revert "operator 重新 enroll 已 enroll 的帳戶" $REG "enroll(address,uint256,uint16)" $U 1 1 --unlocked --from "$OPERATOR"
 flags() { cast call $REG 'pauseFlags(address)(uint8)' "$1"; }
 [ "$(flags $U)" = "2" ] && ok "pauseFlags = 2（operator 設的）" || fail "pauseFlags $(flags $U)"
 cast send -q $REG "setPaused(address,bool)" $U true --unlocked --from "$SAFE" >/dev/null

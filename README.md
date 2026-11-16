@@ -20,6 +20,8 @@ CRE8 ATP（Automated Token Portfolio）智慧合約。獨立 repo，自 bnb-agen
 | `src/atp/interfaces/IOracleFloor.sol` | oracle 地板介面（`previewSwap`） |
 | `src/atp/interfaces/IUniversalRouter.sol` | PancakeSwap Universal Router 介面＋command 常數 |
 
+策略設定變更的 24 小時通知、本人同意、版本 ABI 與 #52 ledger 對接見 [P11 版本規格](docs/versioning-p11.zh-TW.md)。
+
 ## 核心不變式
 
 `minGross = ceil(oracleFloor / (1 - swapFeeBps/10000))`：fee 併進 minOut 反推，保證扣費後使用者實得

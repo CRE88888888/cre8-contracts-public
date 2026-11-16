@@ -125,8 +125,10 @@ contract AtpHandler is Test {
             tokenB.mint(address(account), 1_000e18);
         }
         // Account 0 is enrolled by the operator (first enrollment); account 1 starts unenrolled.
+        vm.prank(address(accounts[0]));
+        registry.approveEnrollment(strategyAB, 1);
         vm.prank(OPERATOR);
-        registry.enroll(address(accounts[0]), strategyAB);
+        registry.enroll(address(accounts[0]), strategyAB, 1);
         _modelEnroll(address(accounts[0]), strategyAB, false);
 
         // A real router, only to attack its admin surface.
@@ -164,6 +166,7 @@ contract AtpHandler is Test {
         weights[1] = 4_000;
         weights[2] = 4_000;
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
+        vm.warp(block.timestamp + 1 days);
     }
 
     function tokens() external view returns (BurnableToken[5] memory) {
@@ -519,6 +522,10 @@ contract AtpHandler is Test {
         uint256 id = strategySeed ? strategyAB : strategyAC;
         uint256 who = callerSeed % 4; // 0 account itself, 1 operator, 2 outsider, 3 Safe
         address operator = registry.operator();
+        if (!modelEnrolled[address(account)]) {
+            vm.prank(address(account));
+            registry.approveEnrollment(id, 1);
+        }
         bool expected = who == 0 || (who == 1 && operator == OPERATOR && !modelEnrolled[address(account)]);
         bool ok;
         if (who == 0) {
@@ -527,7 +534,7 @@ contract AtpHandler is Test {
             } catch { }
         } else {
             vm.prank(who == 1 ? OPERATOR : who == 2 ? OUTSIDER : address(this));
-            try registry.enroll(address(account), id) {
+            try registry.enroll(address(account), id, 1) {
                 ok = true;
             } catch { }
         }

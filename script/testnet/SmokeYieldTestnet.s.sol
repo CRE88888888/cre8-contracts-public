@@ -30,7 +30,7 @@ contract YieldSmokeAccount {
     function prepare(AtpExecutor executor, uint256 strategy, bytes32 id, uint256 amount) external onlyOwner {
         AtpYieldRegistry yields = executor.yieldRegistry();
         Y.Market memory m = yields.market(id);
-        executor.registry().enroll(address(this), strategy);
+        executor.registry().enroll(address(this), strategy, 1);
         yields.setYieldPolicy(id, amount, true);
         IERC20(m.asset).approve(address(executor), amount);
         IERC20(m.receipt).approve(address(executor), type(uint256).max);
@@ -69,10 +69,26 @@ contract SmokeYieldTestnet is Script {
         address smokeOwner = vm.envAddress("YIELD_SMOKE_OWNER");
         B.Spec[] memory specs = B.specs();
         string memory phase = vm.envString("TESTNET_YIELD_PHASE");
+        bool preparePhase = keccak256(bytes(phase)) == keccak256("prepare");
         bool supplyPhase = keccak256(bytes(phase)) == keccak256("supply");
-        require(supplyPhase || keccak256(bytes(phase)) == keccak256("exit"), "unknown yield smoke phase");
-        uint256 strategy =
-            supplyPhase ? _strategy(executor.registry(), specs, executor.numeraire(), smokeOwner) : 0;
+        require(
+            preparePhase || supplyPhase || keccak256(bytes(phase)) == keccak256("exit"),
+            "unknown yield smoke phase"
+        );
+        uint256 strategy = (preparePhase || supplyPhase)
+            ? _strategy(executor.registry(), specs, executor.numeraire(), smokeOwner)
+            : 0;
+        if (preparePhase) {
+            require(executor.registry().activeVersion(strategy) == 0, "yield prepare: version already active");
+            console.log("YIELD_PENDING strategy; wait 24h and rerun with TESTNET_YIELD_STRATEGY_ID", strategy);
+            return;
+        }
+        if (supplyPhase) {
+            require(
+                executor.registry().activeVersion(strategy) == 1,
+                "prepare strategy first, wait 24h, set TESTNET_YIELD_STRATEGY_ID"
+            );
+        }
         for (uint256 i; i < specs.length; ++i) {
             (address asset, uint256 seed) = B.asset(specs[i], executor.numeraire());
             bytes32 id = B.id(specs[i], asset);
@@ -196,6 +212,16 @@ contract SmokeYieldTestnet is Script {
             weights[i] = uint16(10_000 / count);
         }
         weights[0] += uint16(10_000 - count * (10_000 / count));
+        id = vm.envOr("TESTNET_YIELD_STRATEGY_ID", uint256(0));
+        if (id != 0) {
+            AtpRegistry.Version memory accepted = registry.version(id, 1);
+            require(
+                keccak256(abi.encode(accepted.assets, accepted.weightsBps))
+                    == keccak256(abi.encode(assets, weights)),
+                "yield smoke settings mismatch"
+            );
+            return id;
+        }
         vm.startBroadcast(owner);
         id = registry.registerStrategy("Yield compatibility", "Local mock APR and exit acceptance", true);
         ++txIndex;

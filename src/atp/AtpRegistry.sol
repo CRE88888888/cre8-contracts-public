@@ -2,18 +2,9 @@
 pragma solidity ^0.8.26;
 
 /// @title AtpRegistry
-/// @notice On-chain record of ATP strategies: versioned asset/weight sets, the admin-controlled swap fee,
-/// and which strategy version an account is enrolled in.
-/// @dev Weights are data, not logic: the keeper reads them, the executor only uses the asset set of the
-/// enrolled version as an allowlist. A published version is immutable; a provider changes weights by
-/// publishing the next version, and existing enrollments keep the version they pinned until they re-enroll.
-/// @dev Roles: `owner` (a Safe on mainnet) holds every admin power and hands it over in two steps
-/// (`transferOwnership` → `acceptOwnership`). `operator` is the backend relayer key, set and revoked by the
-/// owner: it may only make an account's first enrollment and pause/resume what it paused itself, so a leaked
-/// relayer key cannot touch fees, ownership, an enrolled account's strategy or version, or a pause set by the
-/// owner or the account (A10-2). Changing an enrolled account's strategy or version is the account's own call
-/// (its owner's sudo UserOp). The first enrollment still has no two-phase user signature - see
-/// docs/atp-pivot-executor-spec.zh-TW.md §6.
+/// @notice Versioned strategy settings with an immutable 24-hour notice period and explicit account consent.
+/// @dev Enrolled accounts follow the latest effective version for swaps. Enrollment.version records the
+/// version personally accepted by the account (also retained for the separate yield-policy consent).
 contract AtpRegistry {
     // ---- types ----
     struct Version {
@@ -25,6 +16,12 @@ contract AtpRegistry {
         bytes32 scheduleHash;
         /// @notice Unix timestamp from which this version may be executed.
         uint64 activeAt;
+        /// @notice Commitment to per-asset strategy parameters and fund rules, encoded off chain.
+        bytes32 settingsHash;
+        /// @notice Creator performance fee; consumed by the separate performance-fee ledger.
+        uint16 performanceFeeBps;
+        /// @notice keccak256(abi.encode(assets, weightsBps, scheduleHash, settingsHash, performanceFeeBps)).
+        bytes32 configHash;
     }
 
     struct StrategyMeta {
@@ -36,12 +33,22 @@ contract AtpRegistry {
 
     struct Enrollment {
         uint256 strategyId;
-        /// @notice Version index pinned at enrollment time (1-based; 0 means "never enrolled").
+        /// @notice Version index personally accepted at enrollment time (1-based; 0 means "never enrolled").
         uint16 version;
         bool paused;
     }
 
     // ---- constants ----
+    uint64 public constant VERSION_DELAY = 1 days;
+    uint64 public constant PUBLICATION_INTERVAL = 7 days;
+    uint16 public constant MIN_PERFORMANCE_FEE_BPS = 500;
+    uint16 public constant MAX_PERFORMANCE_FEE_BPS = 2_000;
+    /// @notice Maximum distinct assets across a strategy's effective history and any new version.
+    /// Includes the numeraire when listed; cancelled versions do not consume capacity.
+    uint256 public constant MAX_STRATEGY_ASSETS = 128;
+    bytes32 public constant FOLLOW_VERSIONS_TERMS = keccak256(
+        "I agree to follow future strategy versions; changes require at least 24 hours notice during which I can exit. Fee-only decreases may take effect immediately."
+    );
     /// @notice Hard ceiling for both the default and the per-strategy swap fee (0-3%).
     uint16 public constant MAX_SWAP_FEE_BPS = 300;
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -57,7 +64,7 @@ contract AtpRegistry {
     address public owner;
     /// @notice Proposed next owner; becomes `owner` only when it calls `acceptOwnership`.
     address public pendingOwner;
-    /// @notice Relayer key allowed to `enroll` accounts and `setPaused`; zero means no operator.
+    /// @notice Relayer key allowed to consume approved first enrollments and `setPaused`; zero means no operator.
     address public operator;
     /// @notice Default swap fee for strategies without an override.
     uint16 public defaultSwapFeeBps;
@@ -71,8 +78,14 @@ contract AtpRegistry {
     mapping(uint256 => StrategyMeta) public strategies;
     /// @dev 1-based version history: index 0 is an empty sentinel so that version 0 can mean "active".
     mapping(uint256 => Version[]) internal _versions;
-    /// @notice Currently active version index for a strategy (0 = none published).
-    mapping(uint256 => uint16) public activeVersion;
+    mapping(uint256 => uint16) private _effectiveVersion;
+    mapping(uint256 => uint16) private _pendingVersion;
+    mapping(uint256 => mapping(uint16 => bool)) public cancelledVersion;
+    mapping(uint256 => uint64) public lastPublishedAt;
+    mapping(uint256 => address[]) private _historicalAssets;
+    mapping(uint256 => mapping(address => bool)) private _historicalAsset;
+    /// @notice One-use approval for the operator's FIRST enrollment, granted only by the account itself.
+    mapping(address => bytes32) public enrollmentApproval;
     /// @notice Next strategy id to be handed out; ids start at 1.
     uint256 public nextStrategyId;
 
@@ -93,6 +106,9 @@ contract AtpRegistry {
     event NumeraireSet(address indexed numeraire);
     event StrategyRegistered(uint256 indexed id, address indexed provider, string name);
     event VersionPublished(uint256 indexed id, uint16 version, bytes32 scheduleHash);
+    event VersionScheduled(uint256 indexed id, uint16 indexed version, uint64 activeAt, bytes32 configHash);
+    event VersionCancelled(uint256 indexed id, uint16 indexed version);
+    event EnrollmentApproved(address indexed account, uint256 indexed id, uint16 version, bytes32 terms);
     event Enrolled(address indexed account, uint256 id, uint16 version);
     event EnrollmentPausedSet(address indexed account, bool paused);
     event PauseFlagsSet(address indexed account, uint8 flags);
@@ -119,6 +135,15 @@ contract AtpRegistry {
     /// @dev Weight 0 for an asset other than the numeraire.
     error ZeroWeight(address asset);
     error NumeraireAlreadySet();
+    error PendingVersionExists(uint256 id);
+    error NoPendingVersion(uint256 id);
+    error PublicationTooSoon(uint256 earliest);
+    error ActivationTooSoon(uint256 earliest);
+    error PerformanceFeeOutOfRange(uint16 bps);
+    error VersionLimit();
+    error StrategyAssetLimitExceeded(uint256 count);
+    error UnexpectedVersion(uint16 expected, uint16 actual);
+    error ConsentRequired();
 
     constructor() {
         owner = msg.sender;
@@ -191,61 +216,195 @@ contract AtpRegistry {
         emit StrategyRegistered(id, msg.sender, name);
     }
 
-    /// @notice Publish the next version of `id` and make it active for new enrollments.
-    /// @dev Append-only: a version index can never be reused or overwritten, so the history of a strategy
-    /// only grows. Only the strategy provider or the registry owner may publish.
+    /// @notice Publish with default 5% performance fee and no additional off-chain rules.
+    /// `activeAt == 0` selects the earliest permitted activation; a nonzero time cannot shorten notice.
     function publishVersion(
         uint256 id,
         address[] calldata assets,
         uint16[] calldata weightsBps,
         bytes32 scheduleHash,
         uint64 activeAt
-    ) external returns (uint16 versionNumber) {
-        StrategyMeta memory meta = strategies[id];
-        if (meta.provider == address(0)) revert UnknownStrategy(id);
-        if (msg.sender != meta.provider && msg.sender != owner) revert NotStrategyProvider(id);
+    ) external returns (uint16) {
+        return _publishVersion(
+            id, assets, weightsBps, scheduleHash, bytes32(0), MIN_PERFORMANCE_FEE_BPS, activeAt
+        );
+    }
+
+    /// @notice Publish the complete settings commitment. Only a provable fee-only decrease can be immediate.
+    function publishSettingsVersion(
+        uint256 id,
+        address[] calldata assets,
+        uint16[] calldata weightsBps,
+        bytes32 scheduleHash,
+        bytes32 settingsHash,
+        uint16 performanceFeeBps,
+        uint64 activeAt
+    ) external returns (uint16) {
+        return _publishVersion(
+            id, assets, weightsBps, scheduleHash, settingsHash, performanceFeeBps, activeAt
+        );
+    }
+
+    function _publishVersion(
+        uint256 id,
+        address[] calldata assets,
+        uint16[] calldata weightsBps,
+        bytes32 scheduleHash,
+        bytes32 settingsHash,
+        uint16 performanceFeeBps,
+        uint64 activeAt
+    ) private returns (uint16 versionNumber) {
+        _providerOrOwner(id);
         _validateVersion(assets, weightsBps);
-
+        if (performanceFeeBps < MIN_PERFORMANCE_FEE_BPS || performanceFeeBps > MAX_PERFORMANCE_FEE_BPS) {
+            revert PerformanceFeeOutOfRange(performanceFeeBps);
+        }
+        _activate(id);
+        if (_pendingVersion[id] != 0) revert PendingVersionExists(id);
         Version[] storage history = _versions[id];
-        // 1-based: seed the sentinel on first publish so version 0 stays reserved for "active".
+        if (history.length != 0 && block.timestamp < uint256(lastPublishedAt[id]) + PUBLICATION_INTERVAL) {
+            revert PublicationTooSoon(uint256(lastPublishedAt[id]) + PUBLICATION_INTERVAL);
+        }
+        // _activate has materialized every previously effective asset, including a just-matured pending.
+        // The new list is duplicate-free, so each asset absent from that history adds exactly one slot.
+        uint256 assetCount = _historicalAssets[id].length;
+        for (uint256 i; i < assets.length; ++i) {
+            if (!_historicalAsset[id][assets[i]]) ++assetCount;
+        }
+        if (assetCount > MAX_STRATEGY_ASSETS) revert StrategyAssetLimitExceeded(assetCount);
+        bool feeOnlyDecrease;
+        uint16 current = _effectiveVersion[id];
+        if (current != 0) {
+            Version storage prior = history[current];
+            feeOnlyDecrease = performanceFeeBps < prior.performanceFeeBps
+                && keccak256(abi.encode(assets, weightsBps, scheduleHash, settingsHash))
+                    == keccak256(
+                        abi.encode(prior.assets, prior.weightsBps, prior.scheduleHash, prior.settingsHash)
+                    );
+        }
+        uint256 earliest = block.timestamp + (feeOnlyDecrease ? 0 : VERSION_DELAY);
+        if (earliest > type(uint64).max) revert ActivationTooSoon(earliest);
+        if (activeAt == 0) activeAt = uint64(earliest);
+        if (activeAt < earliest) revert ActivationTooSoon(earliest);
         if (history.length == 0) history.push();
-        Version storage published = history.push();
-        published.assets = assets;
-        published.weightsBps = weightsBps;
-        published.scheduleHash = scheduleHash;
-        published.activeAt = activeAt;
-
+        if (history.length > type(uint16).max) revert VersionLimit();
+        history.push(
+            Version({
+                assets: assets,
+                weightsBps: weightsBps,
+                scheduleHash: scheduleHash,
+                activeAt: activeAt,
+                settingsHash: settingsHash,
+                performanceFeeBps: performanceFeeBps,
+                configHash: keccak256(
+                    abi.encode(assets, weightsBps, scheduleHash, settingsHash, performanceFeeBps)
+                )
+            })
+        );
         versionNumber = uint16(history.length - 1);
-        activeVersion[id] = versionNumber;
+        lastPublishedAt[id] = uint64(block.timestamp);
+        _pendingVersion[id] = versionNumber;
         emit VersionPublished(id, versionNumber, scheduleHash);
+        emit VersionScheduled(id, versionNumber, activeAt, history[versionNumber].configHash);
+        _activate(id);
+    }
+
+    /// @notice Cancel only before activation. Cancellation never reuses a version or resets the 7-day clock.
+    function cancelVersion(uint256 id) external {
+        _providerOrOwner(id);
+        uint16 pending = pendingVersion(id);
+        if (pending == 0) revert NoPendingVersion(id);
+        cancelledVersion[id][pending] = true;
+        _pendingVersion[id] = 0;
+        emit VersionCancelled(id, pending);
+    }
+
+    function _providerOrOwner(uint256 id) private view {
+        address provider = strategies[id].provider;
+        if (provider == address(0)) revert UnknownStrategy(id);
+        if (msg.sender != provider && msg.sender != owner) revert NotStrategyProvider(id);
+    }
+
+    /// @notice Latest version effective at this block, without a keeper activation transaction.
+    function activeVersion(uint256 id) public view returns (uint16) {
+        uint16 pending = _pendingVersion[id];
+        return
+            pending != 0 && _versions[id][pending].activeAt <= block.timestamp
+                ? pending
+                : _effectiveVersion[id];
+    }
+
+    function pendingVersion(uint256 id) public view returns (uint16) {
+        uint16 pending = _pendingVersion[id];
+        return pending != 0 && _versions[id][pending].activeAt > block.timestamp ? pending : 0;
+    }
+
+    function _activate(uint256 id) private {
+        uint16 pending = _pendingVersion[id];
+        if (pending == 0 || _versions[id][pending].activeAt > block.timestamp) return;
+        _effectiveVersion[id] = pending;
+        _pendingVersion[id] = 0;
+        address[] storage assets = _versions[id][pending].assets;
+        for (uint256 i; i < assets.length; ++i) {
+            address asset = assets[i];
+            if (!_historicalAsset[id][asset]) {
+                _historicalAsset[id][asset] = true;
+                _historicalAssets[id].push(asset);
+            }
+        }
     }
 
     // ---- enrollment ----
 
-    /// @notice Enroll `account` into `id`, pinning the currently active version.
-    /// @dev The account itself may always (re-)enroll: that is how its owner moves to another strategy or a
-    /// newer version, and it clears every pause, since the account is the owner's own. The operator (backend
-    /// relayer) may only make the first enrollment of an account that is not enrolled yet, so it can neither
-    /// move a funded account onto a strategy or version its owner never chose, nor clear a pause by
-    /// re-enrolling. The owner cannot enroll: it is a Safe and has no reason to.
-    /// TODO: the operator's first enrollment still carries no two-phase user signature.
-    function enroll(address account, uint256 id) external {
+    /// @notice Account's sudo call consents to FOLLOW_VERSIONS_TERMS and authorizes ONE first enrollment.
+    /// The operator cannot manufacture consent, choose another strategy/version, or reuse it after enrollment.
+    function approveEnrollment(uint256 id, uint16 expectedVersion) external {
+        if (isEnrolled[msg.sender]) revert AlreadyEnrolled(msg.sender);
+        _checkExpectedVersion(id, expectedVersion);
+        enrollmentApproval[msg.sender] = _approval(id, expectedVersion);
+        emit EnrollmentApproved(msg.sender, id, expectedVersion, FOLLOW_VERSIONS_TERMS);
+    }
+
+    function revokeEnrollmentApproval() external {
+        delete enrollmentApproval[msg.sender];
+        emit EnrollmentApproved(msg.sender, 0, 0, FOLLOW_VERSIONS_TERMS);
+    }
+
+    /// @notice Account's own sudo call is consent to FOLLOW_VERSIONS_TERMS; operator needs prior approval.
+    /// expectedVersion must equal the latest EFFECTIVE version, never zero. No two-argument entry point exists.
+    function enroll(address account, uint256 id, uint16 expectedVersion) external {
         if (msg.sender != account) {
             if (msg.sender != operator) revert Unauthorized();
             if (isEnrolled[account]) revert AlreadyEnrolled(account);
         }
         if (account == address(0)) revert ZeroAddress();
-        if (strategies[id].provider == address(0)) revert UnknownStrategy(id);
-        uint16 version = activeVersion[id];
-        if (version == 0) revert VersionNotPublished(id);
-
-        _enrollments[account] = Enrollment({ strategyId: id, version: version, paused: false });
+        _checkExpectedVersion(id, expectedVersion);
+        if (msg.sender != account && enrollmentApproval[account] != _approval(id, expectedVersion)) {
+            revert ConsentRequired();
+        }
+        delete enrollmentApproval[account];
+        _enrollments[account] = Enrollment({ strategyId: id, version: expectedVersion, paused: false });
         isEnrolled[account] = true;
         if (pauseFlags[account] != 0) {
             pauseFlags[account] = 0;
             emit PauseFlagsSet(account, 0);
         }
-        emit Enrolled(account, id, version);
+        emit Enrolled(account, id, expectedVersion);
+    }
+
+    function _checkExpectedVersion(uint256 id, uint16 expectedVersion) private view {
+        if (strategies[id].provider == address(0)) revert UnknownStrategy(id);
+        uint16 actual = activeVersion(id);
+        if (actual == 0) revert VersionNotPublished(id);
+        if (expectedVersion == 0 || expectedVersion != actual) {
+            revert UnexpectedVersion(expectedVersion, actual);
+        }
+    }
+
+    function _approval(uint256 id, uint16 versionNumber) private view returns (bytes32) {
+        return keccak256(
+            abi.encode(id, versionNumber, _versions[id][versionNumber].configHash, FOLLOW_VERSIONS_TERMS)
+        );
     }
 
     /// @notice Pause or resume an enrolled account. A paused account fails every `executeRebalance`.
@@ -290,7 +449,7 @@ contract AtpRegistry {
 
     /// @notice Version record; `versionNumber == 0` resolves to the active version.
     function version(uint256 id, uint16 versionNumber) public view returns (Version memory) {
-        if (versionNumber == 0) versionNumber = activeVersion[id];
+        if (versionNumber == 0) versionNumber = activeVersion(id);
         if (versionNumber == 0 || versionNumber >= _versions[id].length) {
             revert UnknownVersion(id, versionNumber);
         }
@@ -308,13 +467,37 @@ contract AtpRegistry {
     /// step with its own error; an empty asset list can therefore never be "allowed". The scan is linear in the
     /// version's asset count and runs twice per swap step.
     function isAssetAllowed(uint256 id, uint16 versionNumber, address asset) public view returns (bool) {
-        if (versionNumber == 0) versionNumber = activeVersion[id];
+        if (versionNumber == 0) versionNumber = activeVersion(id);
         if (versionNumber == 0 || versionNumber >= _versions[id].length) return false;
+        if (cancelledVersion[id][versionNumber] || _versions[id][versionNumber].activeAt > block.timestamp) {
+            return false;
+        }
         address[] storage assets = _versions[id][versionNumber].assets;
         for (uint256 i; i < assets.length; ++i) {
             if (assets[i] == asset) return true;
         }
         return false;
+    }
+
+    /// @notice Ever effective (not pending or cancelled): admitted only for sales back to numeraire.
+    function wasAssetAllowed(uint256 id, address asset) external view returns (bool) {
+        return _historicalAsset[id][asset] || isAssetAllowed(id, 0, asset);
+    }
+
+    /// @notice Deduplicated union of all effective versions, including a matured but unmaterialized pending.
+    function historicalAssets(uint256 id) external view returns (address[] memory assets) {
+        address[] storage past = _historicalAssets[id];
+        uint16 current = activeVersion(id);
+        address[] memory latest = current == 0 ? new address[](0) : _versions[id][current].assets;
+        assets = new address[](past.length + latest.length);
+        uint256 count;
+        for (uint256 i; i < past.length; ++i) {
+            assets[count++] = past[i];
+        }
+        for (uint256 i; i < latest.length; ++i) {
+            if (!_historicalAsset[id][latest[i]]) assets[count++] = latest[i];
+        }
+        assembly { mstore(assets, count) }
     }
 
     // ---- internals ----
@@ -323,16 +506,16 @@ contract AtpRegistry {
         if (bps > MAX_SWAP_FEE_BPS) revert FeeTooHigh(bps);
     }
 
-    /// @dev Duplicate-free, positive-length asset list with weights summing to exactly 10000. There is no
-    /// asset-count ceiling (cre8-contracts#45). Swaps are per step, so a large rebalance or exit is split over
-    /// several `executeRebalance` batches; only this publish and the executor's account valuation (once per
-    /// batch with a buy) walk the whole list in one transaction. docs/testnet-97.zh-TW.md has the gas per
-    /// flow measured for a 93-asset version. Every asset must be a contract and have a positive weight, except
-    /// the numeraire, which may have weight 0 (cre8-contracts#47).
+    /// @dev Duplicate-free, positive-length asset list with weights summing to exactly 10000. The complete
+    /// effective history plus this list must fit MAX_STRATEGY_ASSETS; reject an oversized list before the
+    /// quadratic duplicate check. Every asset must be a contract and have a positive weight, except the
+    /// numeraire, which may have weight 0 (cre8-contracts#47). Providers must publish oracle-supported assets;
+    /// the registry does not validate oracle coverage.
     function _validateVersion(address[] calldata assets, uint16[] calldata weightsBps) internal view {
         uint256 count = assets.length;
         if (count == 0) revert EmptyAssets();
         if (count != weightsBps.length) revert LengthMismatch();
+        if (count > MAX_STRATEGY_ASSETS) revert StrategyAssetLimitExceeded(count);
         address numeraire_ = numeraire;
         uint256 sum;
         for (uint256 i; i < count; ++i) {

@@ -148,9 +148,11 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
 - `src/testnet/aa/` 是 GPL-3.0 的上游原檔（eth-infinitism），只給測試網使用；`src/atp/` 沒有任何檔案引用它。
 - KyberSwap、OpenOcean 都不支援 97，所以測試網只有 Pancake V3 這一個 venue。
 
-## 8. 一檔基金不設資產數上限（#45）
+## 8. 多資產基金與歷史聯集上限（#45、#28）
 
 `AtpRegistry` 原本把一個版本限制在 16 個資產（`MAX_VERSION_ASSETS`），#45 拿掉了（使用者 2026-11-15 決定），常數與 `TooManyAssets` 一起刪除。剩下的檢查：至少一個資產、長度相符、沒有重複、權重加總 10000；#47 另外要求每個資產地址都有 code、權重 0 只允許 numeraire（見第 9 節）。`AtpMainnetSpecs`、`DeployAtpMainnet` 沒有改。
+
+#28 的 P11 歷史資產估值審查後，C3 定案新增每個策略「全部已生效歷史＋新版」去重聯集 **128 個**上限（含列入的 USDT）；超過就 revert `StrategyAssetLimitExceeded(count)`。取消且從未生效的資產不占名額，已生效名額不會因新版移除而釋出。兩個發版入口都適用，93 個資產的測試網策略仍可發布。provider 只能發布 oracle 支援且已核對報價的資產；registry 不替 provider 驗證 oracle 覆蓋。詳見 [P11 規格](versioning-p11.zh-TW.md)。
 
 **主網已部署的 registry 仍有 16 檔上限（#47 #11）**：#45 只影響之後的新部署。`deployments/mainnet.json` 裡那份 registry 是 #45 之前的程式碼，發佈超過 16 個資產的版本會 revert `TooManyAssets`。在主網重新部署 registry 之前，backend 對 chain 56 保留 16 檔上限。
 
@@ -164,7 +166,7 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
 | 買入上限的帳戶估值 `_accountValue`（批次裡有任何一筆買入就跑一次） | 是：每個資產 `balanceOf`，有持有的再問 oracle | **不能分批**，每個買入批次都付一次；只賣出的批次（退出）不估值 |
 | `buyAllowance`（view） | 是 | 鏈下呼叫，不受每筆交易 gas 上限限制 |
 
-估值是唯一拆不掉的整檔迴圈。它只對「有持有」的資產問 oracle（每個約 6.6 萬 gas），而能買到手的資產只有 oracle router 已上架的（測試網 92 個、主網 38 個），所以估值的成本由上架資產數決定，不由版本長度決定；版本裡沒上架的資產只多一次 `balanceOf`。因此不需要另設技術上限。
+估值是唯一拆不掉的整檔迴圈，P11 起涵蓋歷史資產去重聯集。它只對「有持有」的資產問 oracle（每個約 6.6 萬 gas）；零持倉仍需讀 `balanceOf`，異常代幣可能每次耗盡 100,000 gas 讀取預算。128 聯集上限避免歷史清單無限累積，provider 仍須遵守 oracle 資產准入；每批可用步數要按持倉估值成本安排。
 
 **實測（本機 chain 97 fork，2026-11-15，區塊 142,886,688 起，直接交易 gasUsed，不是 Kernel UserOp）：** 版本 = USDT＋92 個資產，每個資產買 100 USDT。
 
@@ -196,7 +198,7 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
   - 這是核心合約改動：之後主網新部署的 executor 也是這個行為（`DeployAtpMainnet` 一字未改，但它部署的是 `src/atp/AtpExecutor.sol`）；主網已部署的 executor 不受影響。
 - **最低費上限 1%（#9）**：補收的最低費不超過該批（#47 起是該時間窗累計）成交量的 1%（`MIN_FEE_MAX_BPS`），所以 30 USDT 以下收不到 0.30。例如每個資產最少 1 USDT 的定期定額、零碎的出場。參數表 §3 由 C3 補上。
 
-**資產驗證（#4）**：`publishVersion` 要求每個資產地址有 code（EOA 會讓含買入的批次全部 revert），權重 0 只允許 numeraire。registry 不知道 numeraire 是誰，所以新增 owner 只能設一次的 `setNumeraire`；沒設之前任何資產都不能是權重 0（fail closed）。測試網部署時設為測試 USDT。**主網之後若重新部署 registry，Safe 要呼叫 `setNumeraire(USDT)`，否則後端以權重 0 送 USDT 的版本會 revert**（`DeployAtpMainnet` 不能改，所以這一步不在腳本裡）。executor 估值時對每個資產的 `balanceOf` 改用 staticcall，revert 或回傳不足 32 bytes 都當 0（fail closed，只會降低買入上限）。不設資產數上限（使用者決定）。
+**資產驗證（#4）**：`publishVersion` 要求每個資產地址有 code（EOA 會讓含買入的批次全部 revert），權重 0 只允許 numeraire。registry 不知道 numeraire 是誰，所以新增 owner 只能設一次的 `setNumeraire`；沒設之前任何資產都不能是權重 0（fail closed）。測試網部署時設為測試 USDT。**主網之後若重新部署 registry，Safe 要呼叫 `setNumeraire(USDT)`，否則後端以權重 0 送 USDT 的版本會 revert**（`DeployAtpMainnet` 不能改，所以這一步不在腳本裡）。executor 估值時對每個資產的 `balanceOf` 改用 staticcall，revert 或回傳不足 32 bytes 都當 0（fail closed，只會降低買入上限）。#28 後新增 128 個歷史聯集上限，見第 8 節。
 
 **水龍頭與權限（#3、#6、#7）**：見第 1、2 節。
 

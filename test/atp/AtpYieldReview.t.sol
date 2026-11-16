@@ -37,7 +37,7 @@ contract AtpYieldReviewTest is AtpYieldSafetyTest {
         address attacker = address(0xA77);
         vm.etch(attacker, hex"00");
         vm.startPrank(attacker);
-        registry.enroll(attacker, strategy);
+        registry.enroll(attacker, strategy, 1);
         yields.setYieldPolicy(ids[0], type(uint256).max, true);
         (bool ok,) = address(yields)
             .call(

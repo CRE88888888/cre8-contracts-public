@@ -5,8 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { AtpRegistry } from "../../src/atp/AtpRegistry.sol";
 
 /// @notice Pins `AtpRegistry.publishVersion` validation: the weight sum, duplicate assets and the array-length
-/// match are the only gates between a provider and the asset allowlist the executor trusts. There is no
-/// asset-count ceiling since cre8-contracts#45.
+/// match and the 128-asset historical union bound gate the asset allowlist the executor trusts.
 contract AtpRegistryTest is Test {
     address internal constant PROVIDER = address(0xBEEF);
     address internal constant OUTSIDER = address(0xCAFE);
@@ -46,7 +45,9 @@ contract AtpRegistryTest is Test {
 
     function _publish(address[] memory assets, uint16[] memory weights) internal {
         vm.prank(PROVIDER);
+        vm.warp(block.timestamp + 7 days);
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
+        vm.warp(block.timestamp + 1 days);
     }
 
     // ---- happy path ----
@@ -126,13 +127,14 @@ contract AtpRegistryTest is Test {
         assertFalse(registry.isAssetAllowed(strategyId, 0, address(uint160(0x1000 + 93))));
     }
 
-    /// @dev No ceiling on the count at all: the weight sum is the only bound, here 500 assets of 20 bps.
-    function test_publishVersion_acceptsFiveHundredAssets() public {
+    /// @dev Preserve the former 500-asset fixture: P11 now rejects it to bound historical valuation gas.
+    function test_publishVersion_rejectsFiveHundredAssets() public {
         address[] memory assets = _assets(500);
+        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.StrategyAssetLimitExceeded.selector, uint256(500)));
         _publish(assets, _weights(500, 20));
 
-        assertEq(registry.version(strategyId, 0).assets.length, 500);
-        assertTrue(registry.isAssetAllowed(strategyId, 0, assets[499]));
+        assertEq(registry.versionCount(strategyId), 0);
+        assertFalse(registry.isAssetAllowed(strategyId, 0, assets[499]));
     }
 
     function test_publishVersion_largeVersionStillRejectsWeightMiss() public {
@@ -274,18 +276,24 @@ contract AtpRegistryTest is Test {
     function test_publishVersion_revertsForNonProvider() public {
         vm.prank(OUTSIDER);
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.NotStrategyProvider.selector, strategyId));
+        vm.warp(block.timestamp + 7 days);
         registry.publishVersion(strategyId, _twoAssets(), _weights(2, 5_000), bytes32(0), 0);
+        vm.warp(block.timestamp + 1 days);
     }
 
     function test_publishVersion_ownerMayPublish() public {
         // setUp deploys the registry from this test contract, so `address(this)` is the owner.
+        vm.warp(block.timestamp + 7 days);
         registry.publishVersion(strategyId, _twoAssets(), _weights(2, 5_000), bytes32(0), 0);
+        vm.warp(block.timestamp + 1 days);
         assertEq(registry.versionCount(strategyId), 1);
     }
 
     function test_publishVersion_revertsForUnknownStrategy() public {
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.UnknownStrategy.selector, uint256(999)));
+        vm.warp(block.timestamp + 7 days);
         registry.publishVersion(999, _twoAssets(), _weights(2, 5_000), bytes32(0), 0);
+        vm.warp(block.timestamp + 1 days);
     }
 
     // ---- allowlist defaults ----

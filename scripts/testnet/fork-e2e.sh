@@ -35,6 +35,38 @@ for RERUN_BALANCE in 0x1bc16d674ec80000 0x98a7d9b8314c0000; do # 2 and 11 tBNB, 
   echo "rerun idempotent, manifest and deployer balance unchanged ($RERUN_BEFORE wei)"
 done
 
+echo "== P11. prepare both smoke strategies, then observe the full notice period =="
+# Version-only migration of the deployment acceptance caller: no oracle checks are weakened.
+# Publish at the previous day's timestamp and return to the original price snapshot before warming TWAP.
+VERSION_EOA="$(cast rpc eth_accounts | jq -r '.[8]')"
+cast rpc anvil_impersonateAccount "$VERSION_EOA" >/dev/null
+cast rpc anvil_setBalance "$VERSION_EOA" 0x8AC7230489E80000 >/dev/null
+VERSION_NOW="$(cast block latest -f timestamp)"
+cast rpc anvil_setBlockTimestampInterval 0 >/dev/null
+trap 'cast rpc anvil_setTime $(( VERSION_NOW * 1000 )) >/dev/null; cast rpc anvil_mine 1 >/dev/null; cast rpc anvil_removeBlockTimestampInterval >/dev/null' EXIT
+cast rpc anvil_setTime $(( (VERSION_NOW - 86400) * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
+VERSION_LOG="$(mktemp -t cre8-version-smoke.XXXXXX)"
+TESTNET_EXECUTOR="$(jq -r .contracts.executor deployments/testnet-97.json)" TESTNET_SMOKE_PREPARE=true \
+  forge script script/testnet/SmokeTestnet.s.sol --tc SmokeTestnet --rpc-url "$ETH_RPC_URL" --broadcast --slow \
+  --unlocked --sender "$VERSION_EOA" >"$VERSION_LOG" 2>&1 || { tail -60 "$VERSION_LOG"; exit 1; }
+export TESTNET_SMOKE_STRATEGY_ID="$(awk '/SMOKE_PENDING strategy/ {print $NF}' "$VERSION_LOG")"
+TESTNET_EXECUTOR="$(jq -r .contracts.executor deployments/testnet-97.json)" \
+  YIELD_SMOKE_OWNER="$VERSION_EOA" TESTNET_YIELD_PHASE=prepare \
+  forge script script/testnet/SmokeYieldTestnet.s.sol --tc SmokeYieldTestnet --rpc-url "$ETH_RPC_URL" --broadcast --slow \
+  --unlocked --sender "$VERSION_EOA" >"$VERSION_LOG" 2>&1 || { tail -60 "$VERSION_LOG"; exit 1; }
+export TESTNET_YIELD_STRATEGY_ID="$(awk '/YIELD_PENDING strategy/ {print $NF}' "$VERSION_LOG")"
+rm -f "$VERSION_LOG"
+[ -n "$TESTNET_SMOKE_STRATEGY_ID" ] && [ -n "$TESTNET_YIELD_STRATEGY_ID" ] || { echo "missing prepared strategy ids"; exit 1; }
+cast rpc anvil_setTime $(( VERSION_NOW * 1000 )) >/dev/null
+cast rpc anvil_mine 1 >/dev/null
+cast rpc anvil_removeBlockTimestampInterval >/dev/null
+trap - EXIT
+for version_id in "$TESTNET_SMOKE_STRATEGY_ID" "$TESTNET_YIELD_STRATEGY_ID"; do
+  [ "$(cast call "$(jq -r .contracts.registry deployments/testnet-97.json)" 'activeVersion(uint256)(uint16)' "$version_id")" = "1" ] \
+    || { echo "prepared version did not become active after 24h"; exit 1; }
+done
+
 echo "== 2. TWAP warm-up (+30 min) and keeper push =="
 cast rpc evm_increaseTime 1800 >/dev/null && cast rpc anvil_mine 1 >/dev/null
 cast rpc anvil_impersonateAccount "$KEEPER" >/dev/null

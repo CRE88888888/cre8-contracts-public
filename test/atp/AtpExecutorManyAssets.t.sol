@@ -53,7 +53,8 @@ contract AtpExecutorManyAssetsTest is Test {
         }
         strategyId = registry.registerStrategy("all testnet assets", "cre8-contracts#45", true);
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), strategyId);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), strategyId, 1);
 
         usdt.approve(address(executor), type(uint256).max);
         usdt.mint(address(this), DEPOSIT);

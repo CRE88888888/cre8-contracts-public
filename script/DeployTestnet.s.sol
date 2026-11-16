@@ -845,6 +845,15 @@ contract DeployTestnet is YieldViewPin {
         );
         require(core.registry.operator() == TestnetBook.OPERATOR, "registry operator");
         require(
+            core.registry.VERSION_DELAY() == 1 days && core.registry.PUBLICATION_INTERVAL() == 7 days,
+            "registry version delays"
+        );
+        require(
+            core.registry.MIN_PERFORMANCE_FEE_BPS() == 500
+                && core.registry.MAX_PERFORMANCE_FEE_BPS() == 2_000,
+            "registry performance fee bounds"
+        );
+        require(
             address(core.executor.yieldRegistry()) == address(core.yields)
                 && core.yields.marketCount() == YieldBook.COUNT
                 && core.yields.reader() == expectedYieldView(),

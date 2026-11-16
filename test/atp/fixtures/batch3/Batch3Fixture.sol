@@ -141,11 +141,17 @@ abstract contract Batch3Fixture is Test {
         weights[0] = 5_000;
         weights[1] = 5_000;
         strategy = registry.registerStrategy("batch3", "local regression", true);
+        // P11: publish one day before this fixture, then restore its exact pool-history clock.
+        uint256 enrollmentTime = vm.getBlockTimestamp();
+        vm.warp(enrollmentTime - 1 days);
         registry.publishVersion(strategy, assets, weights, keccak256("batch3 schema3"), 0);
-        registry.enroll(address(this), strategy);
+        vm.warp(enrollmentTime);
+        registry.enroll(address(this), strategy, 1);
         vm.etch(SECOND, hex"00");
+        vm.prank(SECOND);
+        registry.approveEnrollment(strategy, 1);
         vm.prank(OPERATOR);
-        registry.enroll(SECOND, strategy);
+        registry.enroll(SECOND, strategy, 1);
         for (uint256 i; i < 2; ++i) {
             address account = i == 0 ? address(this) : SECOND;
             usdt.mint(account, 1_000e18);

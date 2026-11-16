@@ -43,7 +43,8 @@ contract AtpExecutorGlobalPauseTest is Test {
         weights[0] = 10_000;
         uint256 id = registry.registerStrategy("index", "global pause", true);
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), id);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), id, 1);
     }
 
     function _rebalance() internal {

@@ -75,9 +75,12 @@ contract AtpExecutorBuyLimitForkTest is ForkPoolHelpers {
         uint16[] memory weights = new uint16[](2);
         weights[0] = 5_000;
         weights[1] = 5_000;
+        uint256 enrollmentTime = vm.getBlockTimestamp();
+        vm.warp(enrollmentTime - 1 days);
         registry.publishVersion(id, assets, weights, bytes32(0), 0);
+        vm.warp(enrollmentTime);
         vm.prank(address(account));
-        registry.enroll(address(account), id);
+        registry.enroll(address(account), id, 1);
 
         deal(USDT, address(account), DEPOSIT);
         account.approveToken(USDT, address(executor), type(uint256).max);

@@ -54,7 +54,7 @@ contract TestAccount {
     }
 
     function enroll(AtpRegistry registry, uint256 id) external {
-        registry.enroll(address(this), id);
+        registry.enroll(address(this), id, 1);
     }
 
     function setPaused(AtpRegistry registry, bool paused) external {

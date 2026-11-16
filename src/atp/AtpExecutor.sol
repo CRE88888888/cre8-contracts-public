@@ -611,10 +611,10 @@ contract AtpExecutor is ReentrancyGuard {
         return Math.mulDiv(_accountValue(account, enrollment), bps, BPS_DENOMINATOR);
     }
 
-    /// @dev Account value in numeraire units: its numeraire balance plus, for every other asset of its pinned
-    /// version it holds, the oracle quote (`quoted`, before slippage) for selling the whole balance. An asset
+    /// @dev Account value in numeraire units: its numeraire balance plus, for every other historically effective
+    /// version asset it holds, the oracle quote (`quoted`, before slippage) for selling the whole balance. An asset
     /// the oracle cannot price (stale, cleared) counts as zero: that only lowers the cap, i.e. fails closed,
-    /// instead of blocking the whole batch. Tokens outside the pinned version are not counted. Likewise an asset
+    /// instead of blocking the whole batch. Tokens outside effective version history are not counted. Likewise an asset
     /// whose `balanceOf` reverts, answers with less than one word or needs more than `BALANCE_OF_GAS` counts as zero (cre8-contracts#47): a
     /// provider must not be able to brick every buy of a version with such a token.
     function _accountValue(address account, AtpRegistry.Enrollment memory enrollment)
@@ -623,7 +623,7 @@ contract AtpExecutor is ReentrancyGuard {
         returns (uint256 value)
     {
         value = IERC20(numeraire).balanceOf(account);
-        address[] memory assets = registry.version(enrollment.strategyId, enrollment.version).assets;
+        address[] memory assets = registry.historicalAssets(enrollment.strategyId);
         for (uint256 i; i < assets.length; ++i) {
             address asset = assets[i];
             if (asset == numeraire) continue;
@@ -686,10 +686,10 @@ contract AtpExecutor is ReentrancyGuard {
                 || yieldRegistry.receiptMarket(step.tokenOut) != bytes32(0)
         ) revert AssetNotAllowed();
         if (step.tokenIn == step.tokenOut) revert SameToken();
-        if (
-            !registry.isAssetAllowed(enrollment.strategyId, enrollment.version, step.tokenIn)
-                || !registry.isAssetAllowed(enrollment.strategyId, enrollment.version, step.tokenOut)
-        ) revert AssetNotAllowed();
+        if (step.tokenOut == numeraire
+                ? !registry.wasAssetAllowed(enrollment.strategyId, step.tokenIn)
+                : (!registry.isAssetAllowed(enrollment.strategyId, 0, step.tokenOut)
+                        || !registry.isAssetAllowed(enrollment.strategyId, 0, step.tokenIn))) revert AssetNotAllowed();
 
         Venue memory venue = venues[step.venue];
         if (venue.kind == VenueKind.NONE) revert VenueNotAllowed(step.venue);

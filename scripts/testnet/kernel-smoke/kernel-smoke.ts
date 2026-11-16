@@ -2,7 +2,7 @@
 // goes through enroll -> session key -> rebalance, every UserOp sponsored by our own VerifyingPaymaster and
 // bundled by a local alto. Mirrors backend's construction (src/permissions.ts, src/chain.ts, src/scheduler.ts):
 // the operator EOA deploys the account through the MetaFactory with the session permission in initConfig and
-// enrolls it; the owner (sudo validator) approves the executor; the session key may only call
+// prepares its strategy; the owner (sudo validator) consents to enrollment and approves the executor; the session key may only call
 // `executeRebalance` / `executeSupply` / `executeWithdraw`, and its GasPolicy only accepts our paymaster.
 //
 // Negative checks: a session UserOp outside the CallPolicy, a paymaster signature from the wrong key, and a
@@ -62,7 +62,7 @@ const FEES: Record<string, number> = { WBNB: 500, BTCB: 500, AAPLB: 2500 };
 const registryAbi = parseAbi([
   'function registerStrategy(string name, string description, bool isPublic) returns (uint256)',
   'function publishVersion(uint256 id, address[] assets, uint16[] weightsBps, bytes32 scheduleHash, uint64 activeAt) returns (uint16)',
-  'function enroll(address account, uint256 id)',
+  'function enroll(address account, uint256 id, uint16 expectedVersion)',
   'function nextStrategyId() view returns (uint256)',
   'function isEnrolled(address) view returns (bool)',
   'function effectiveFeeBps(uint256) view returns (uint16)',
@@ -263,23 +263,38 @@ async function main() {
     const account = deployAccount.address;
     check(((await publicClient.getCode({ address: account })) ?? '0x') !== '0x', 'Kernel v3.3 account deployed by operator', account);
 
-    // ---- 2. strategy + operator enroll + faucet ----
+    // ---- 2. strategy + owner consent + faucet ----
     const assets = [C.usdt, ...TRADE.map((s) => A[s].token)];
     const id = (await publicClient.readContract({ address: C.registry, abi: registryAbi, functionName: 'nextStrategyId' })) + 1n;
-    for (const [fn, args] of [
-      ['registerStrategy', ['testnet kernel smoke', 'cre8-contracts#30', false]],
-      ['publishVersion', [id, assets, [2500, 2500, 2500, 2500], encodePacked(['string'], ['smoke']).padEnd(66, '0') as Hex, 0n]],
-      ['enroll', [account, id]],
-    ] as const) {
-      const h = await operatorWallet.writeContract({ address: C.registry, abi: registryAbi, functionName: fn as any, args: args as any });
-      await publicClient.waitForTransactionReceipt({ hash: h });
+    const versionSnapshotTime = await chainNow();
+    // Local fixture: publish yesterday, then wait until the original price snapshot.
+    await forkRpc('anvil_setBlockTimestampInterval', [0]);
+    await forkRpc('anvil_setTime', [(versionSnapshotTime - 86400) * 1000]);
+    await forkRpc('anvil_mine', [1]);
+    try {
+      for (const [fn, args] of [
+        ['registerStrategy', ['testnet kernel smoke', 'cre8-contracts#30', false]],
+        ['publishVersion', [id, assets, [2500, 2500, 2500, 2500], encodePacked(['string'], ['smoke']).padEnd(66, '0') as Hex, 0n]],
+      ] as const) {
+        const h = await operatorWallet.writeContract({ address: C.registry, abi: registryAbi, functionName: fn as any, args: args as any });
+        await publicClient.waitForTransactionReceipt({ hash: h });
+      }
+    } finally {
+      await forkRpc('anvil_setTime', [versionSnapshotTime * 1000]);
+      await forkRpc('anvil_mine', [1]);
+      await forkRpc('anvil_removeBlockTimestampInterval', []);
     }
-    check(await publicClient.readContract({ address: C.registry, abi: registryAbi, functionName: 'isEnrolled', args: [account] }), 'operator enrolled the account', `strategy ${id}`);
+    const ownerAccount = await createKernelAccount(publicClient, { address: account, plugins: { sudo }, entryPoint, kernelVersion });
+    const enrollment = await send(clientFor(ownerAccount, pm), [{
+      to: C.registry,
+      data: encodeFunctionData({ abi: registryAbi, functionName: 'enroll', args: [account, id, 1] }),
+    }]);
+    check(enrollment.receipt.success, 'owner signed consent to future versions (sudo UserOp)', enrollment.hash);
+    check(await publicClient.readContract({ address: C.registry, abi: registryAbi, functionName: 'isEnrolled', args: [account] }), 'account enrolled at expected version', `strategy ${id}`);
     const claim = await operatorWallet.writeContract({ address: C.usdt, abi: usdtAbi, functionName: 'claimFor', args: [account, 1_000n * 10n ** 18n] });
     await publicClient.waitForTransactionReceipt({ hash: claim });
 
     // ---- 3. owner (sudo) approves the executor, sponsored ----
-    const ownerAccount = await createKernelAccount(publicClient, { address: account, plugins: { sudo }, entryPoint, kernelVersion } as any);
     const approve = await send(
       clientFor(ownerAccount, pm),
       assets.map((t) => ({ to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [executor, 2n ** 256n - 1n] }) })),

@@ -134,7 +134,8 @@ contract AtpExecutorVenuesTest is Test {
         weights[1] = 5_000;
         uint256 id = registry.registerStrategy("index", "venues", true);
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), id);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), id, 1);
 
         usdt.approve(address(executor), type(uint256).max);
         tokenA.approve(address(executor), type(uint256).max);

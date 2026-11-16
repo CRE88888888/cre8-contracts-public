@@ -168,7 +168,8 @@ contract AtpExecutorBuyLimitTest is Test {
         weights[2] = 4_000;
         strategyId = registry.registerStrategy("index", "buy limit", true);
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), strategyId);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), strategyId, 1);
 
         usdt.approve(address(executor), type(uint256).max);
         tokenA.approve(address(executor), type(uint256).max);
@@ -429,7 +430,8 @@ contract AtpExecutorBuyLimitTest is Test {
         weights[3] = 2_500;
         uint256 id = registry.registerStrategy("broken", "balanceOf reverts", true);
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), id);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), id, 1);
 
         (uint256 cap,,) = executor.buyAllowance(address(this));
         assertEq(cap, 1_000e18, "only the USDT counts");
@@ -454,7 +456,8 @@ contract AtpExecutorBuyLimitTest is Test {
         weights[3] = 2_500;
         uint256 id = registry.registerStrategy("hostile", "gas griefing", true);
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
-        registry.enroll(address(this), id);
+        vm.warp(block.timestamp + 1 days);
+        registry.enroll(address(this), id, 1);
 
         AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](1);
         steps[0] = _buy(tokenA, 100e18);

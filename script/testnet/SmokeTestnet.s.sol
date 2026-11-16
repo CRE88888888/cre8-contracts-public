@@ -83,6 +83,20 @@ contract SmokeTestnet is Script {
         }
 
         vm.startBroadcast();
+        _strategy(env, tokens);
+        if (vm.envOr("TESTNET_SMOKE_PREPARE", false)) {
+            require(env.registry.activeVersion(env.strategyId) == 0, "smoke prepare: version already active");
+            vm.stopBroadcast();
+            console.log(
+                "SMOKE_PENDING strategy; wait 24h, refresh prices, rerun with TESTNET_SMOKE_STRATEGY_ID",
+                env.strategyId
+            );
+            return;
+        }
+        require(
+            env.registry.activeVersion(env.strategyId) == 1,
+            "prepare strategy first, wait 24h, set TESTNET_SMOKE_STRATEGY_ID"
+        );
         env.account = new SmokeAccount(msg.sender);
         ++env.txCount;
         vm.stopBroadcast();
@@ -93,11 +107,10 @@ contract SmokeTestnet is Script {
         vm.stopBroadcast();
         vm.startBroadcast();
         _approve(env, address(env.usdt));
-        _strategy(env, tokens);
         _call(
             env,
             address(env.registry),
-            abi.encodeCall(AtpRegistry.enroll, (address(env.account), env.strategyId))
+            abi.encodeCall(AtpRegistry.enroll, (address(env.account), env.strategyId, uint16(1)))
         );
         console.log("SMOKE account", address(env.account));
         console.log("SMOKE version assets (incl. USDT) / steps per batch", tokens.length + 1, perBatch);
@@ -236,6 +249,17 @@ contract SmokeTestnet is Script {
         for (uint256 k; k < count; ++k) {
             assets[k + 1] = tokens[k];
             weights[k + 1] = uint16(each);
+        }
+        env.strategyId = vm.envOr("TESTNET_SMOKE_STRATEGY_ID", uint256(0));
+        if (env.strategyId != 0) {
+            AtpRegistry.Version memory accepted = env.registry.version(env.strategyId, 1);
+            require(
+                keccak256(abi.encode(accepted.assets, accepted.weightsBps))
+                    == keccak256(abi.encode(assets, weights)),
+                "smoke settings mismatch"
+            );
+            env.feeBps = env.registry.effectiveFeeBps(env.strategyId);
+            return;
         }
         env.strategyId = env.registry.registerStrategy("testnet smoke", "cre8-contracts#30, #45", false);
         ++env.txCount;

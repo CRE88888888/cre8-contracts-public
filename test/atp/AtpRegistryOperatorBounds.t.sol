@@ -38,8 +38,10 @@ contract AtpRegistryOperatorBoundsTest is Test {
         _publish(strategyB, address(0xBBB1));
         vm.stopPrank();
 
+        vm.prank(ACCOUNT);
+        registry.approveEnrollment(strategyA, 1);
         vm.prank(OPERATOR);
-        registry.enroll(ACCOUNT, strategyA);
+        registry.enroll(ACCOUNT, strategyA, 1);
     }
 
     function _publish(uint256 id, address asset) internal {
@@ -49,7 +51,9 @@ contract AtpRegistryOperatorBoundsTest is Test {
         assets[0] = asset;
         uint16[] memory weights = new uint16[](1);
         weights[0] = 10_000;
+        vm.warp(block.timestamp + 7 days);
         registry.publishVersion(id, assets, weights, keccak256("schedule"), 0);
+        vm.warp(block.timestamp + 1 days);
     }
 
     function _pause(address by, bool paused) internal {
@@ -76,7 +80,7 @@ contract AtpRegistryOperatorBoundsTest is Test {
     function test_operator_cannotMoveAnEnrolledAccountToAnotherStrategy() public {
         vm.prank(OPERATOR);
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.AlreadyEnrolled.selector, ACCOUNT));
-        registry.enroll(ACCOUNT, strategyB);
+        registry.enroll(ACCOUNT, strategyB, 1);
         assertEq(registry.enrollments(ACCOUNT).strategyId, strategyA, "strategy unchanged");
     }
 
@@ -86,7 +90,7 @@ contract AtpRegistryOperatorBoundsTest is Test {
 
         vm.prank(OPERATOR);
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.AlreadyEnrolled.selector, ACCOUNT));
-        registry.enroll(ACCOUNT, strategyA);
+        registry.enroll(ACCOUNT, strategyA, 1);
         assertEq(registry.enrollments(ACCOUNT).version, 1, "version unchanged");
     }
 
@@ -94,19 +98,19 @@ contract AtpRegistryOperatorBoundsTest is Test {
         _pause(SAFE, true);
         vm.prank(OPERATOR);
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.AlreadyEnrolled.selector, ACCOUNT));
-        registry.enroll(ACCOUNT, strategyA);
+        registry.enroll(ACCOUNT, strategyA, 1);
         _assertPause(BY_OWNER, "still paused by the Safe");
     }
 
     function test_account_canMoveItselfToAnotherStrategyAndVersion() public {
         vm.prank(ACCOUNT);
-        registry.enroll(ACCOUNT, strategyB);
+        registry.enroll(ACCOUNT, strategyB, 1);
         assertEq(registry.enrollments(ACCOUNT).strategyId, strategyB, "moved strategy");
 
         vm.prank(PROVIDER);
         _publish(strategyB, address(0xBBB2));
         vm.prank(ACCOUNT);
-        registry.enroll(ACCOUNT, strategyB);
+        registry.enroll(ACCOUNT, strategyB, 2);
         assertEq(registry.enrollments(ACCOUNT).version, 2, "moved version");
     }
 
@@ -119,18 +123,18 @@ contract AtpRegistryOperatorBoundsTest is Test {
         vm.expectEmit(true, false, false, true, address(registry));
         emit AtpRegistry.PauseFlagsSet(ACCOUNT, 0);
         vm.prank(ACCOUNT);
-        registry.enroll(ACCOUNT, strategyA);
+        registry.enroll(ACCOUNT, strategyA, 1);
         _assertPause(0, "cleared by the account's own enrollment");
     }
 
     function test_owner_andOutsider_stillCannotEnroll() public {
         vm.prank(SAFE);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(OTHER_ACCOUNT, strategyA);
+        registry.enroll(OTHER_ACCOUNT, strategyA, 1);
 
         vm.prank(OUTSIDER);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(OTHER_ACCOUNT, strategyA);
+        registry.enroll(OTHER_ACCOUNT, strategyA, 1);
     }
 
     // ---- pause sources ----

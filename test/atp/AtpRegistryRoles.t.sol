@@ -28,6 +28,7 @@ contract AtpRegistryRolesTest is Test {
         uint16[] memory weights = new uint16[](1);
         weights[0] = 10_000;
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
+        vm.warp(block.timestamp + 1 days);
         vm.stopPrank();
     }
 
@@ -109,8 +110,10 @@ contract AtpRegistryRolesTest is Test {
     function test_operator_canEnrollAnAccount() public {
         registry.setOperator(OPERATOR);
 
+        vm.prank(ACCOUNT);
+        registry.approveEnrollment(strategyId, 1);
         vm.prank(OPERATOR);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
 
         assertTrue(registry.isEnrolled(ACCOUNT), "enrolled");
         AtpRegistry.Enrollment memory enrollment = registry.enrollments(ACCOUNT);
@@ -121,7 +124,7 @@ contract AtpRegistryRolesTest is Test {
 
     function test_account_canEnrollItself() public {
         vm.prank(ACCOUNT);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
         assertTrue(registry.isEnrolled(ACCOUNT));
     }
 
@@ -129,21 +132,21 @@ contract AtpRegistryRolesTest is Test {
     function test_owner_cannotEnroll() public {
         registry.setOperator(OPERATOR);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
     }
 
     function test_outsider_cannotEnroll() public {
         registry.setOperator(OPERATOR);
         vm.prank(OUTSIDER);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
     }
 
     /// @dev With no operator set, nobody but the account itself can enroll it.
     function test_enroll_withoutOperator_onlyTheAccount() public {
         vm.prank(OPERATOR);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
     }
 
     function test_revokedOperator_cannotEnroll() public {
@@ -152,13 +155,15 @@ contract AtpRegistryRolesTest is Test {
 
         vm.prank(OPERATOR);
         vm.expectRevert(AtpRegistry.Unauthorized.selector);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
     }
 
     function test_setPaused_byOperatorOrOwner() public {
         registry.setOperator(OPERATOR);
+        vm.prank(ACCOUNT);
+        registry.approveEnrollment(strategyId, 1);
         vm.prank(OPERATOR);
-        registry.enroll(ACCOUNT, strategyId);
+        registry.enroll(ACCOUNT, strategyId, 1);
 
         vm.prank(OPERATOR);
         registry.setPaused(ACCOUNT, true);
@@ -192,6 +197,7 @@ contract AtpRegistryRolesTest is Test {
         weights[0] = 10_000;
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.NotStrategyProvider.selector, strategyId));
         registry.publishVersion(strategyId, assets, weights, keccak256("schedule"), 0);
+        vm.warp(block.timestamp + 1 days);
 
         vm.stopPrank();
     }
