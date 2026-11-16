@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Optional chain-97 performanceFeeLedger manifest field",
+  "description": "Requires the P11 registry: active version fee/configHash and historicalAssets exclude pending/cancelled versions. Merge only after deployment and on-chain pin verification; absence means not deployed.",
+  "type": "object",
+  "required": ["performanceFeeLedger"],
+  "properties": {
+    "performanceFeeLedger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "registry", "oracle", "yieldRegistry", "numeraire", "platformRecipient", "initialPlatformShareBps", "maxPlatformShareBps", "platformNoticeSeconds", "chainId", "registryVersionDelaySeconds", "registryPublicationIntervalSeconds", "maxStrategyAssets", "minCreatorFeeBps", "maxCreatorFeeBps"],
+      "properties": {
+        "address": {"$ref": "#/$defs/address"},
+        "registry": {"$ref": "#/$defs/address"},
+        "oracle": {"$ref": "#/$defs/address"},
+        "yieldRegistry": {"$ref": "#/$defs/address"},
+        "numeraire": {"$ref": "#/$defs/address"},
+        "platformRecipient": {"$ref": "#/$defs/address"},
+        "initialPlatformShareBps": {"const": 1000},
+        "maxPlatformShareBps": {"const": 2000},
+        "platformNoticeSeconds": {"const": 604800},
+        "registryVersionDelaySeconds": {"const": 86400},
+        "registryPublicationIntervalSeconds": {"const": 604800},
+        "maxStrategyAssets": {"const": 128},
+        "minCreatorFeeBps": {"const": 500},
+        "maxCreatorFeeBps": {"const": 2000},
+        "chainId": {"const": 97}
+      }
+    }
+  },
+  "$defs": {"address": {"type": "string", "pattern": "^0x(?!0{40}$)[0-9a-fA-F]{40}$"}}
+}
