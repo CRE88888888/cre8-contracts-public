@@ -534,6 +534,63 @@ contract AtpExecutorMinFeeTest is Test {
 
     // ---- the formula ----
 
+    /// @dev Batch3 V9's 10 + 20 + 270 example: top-ups already paid are never refunded as T(c) falls.
+    function test_batch3_prefixTopUps_areNotRefunded_atCumulative300() public {
+        tokenA.mint(address(this), _aForGross(300e18));
+        _exec(_one(_sell(_aForGross(10e18))));
+        assertEq(_usdt(FEE_RECIPIENT), 0.1e18);
+        _exec(_one(_sell(_aForGross(20e18))));
+        assertEq(_usdt(FEE_RECIPIENT), 0.3e18);
+        _exec(_one(_sell(_aForGross(270e18))));
+        assertEq(_usdt(FEE_RECIPIENT), 0.57e18, "paid top-ups are not refunded at 300");
+        (, uint192 c, uint256 paid) = executor.minFeeWindowOf(address(this));
+        assertEq(c, 300e18);
+        assertEq(paid, 0.27e18);
+        assertEq(_usdt(address(this)), 299.43e18);
+    }
+
+    /// @dev Independent 24h buy and 1h fee windows: neither UTC midnight nor the other account resets them.
+    function test_batch3_twoAccounts_feeAndBuyWindowsDoNotShareClocks() public {
+        vm.warp(100 days + 23 hours + 30 minutes);
+        uint256 start = vm.getBlockTimestamp();
+        usdt.mint(address(this), 101e18);
+        _exec(_one(_buy(10e18)));
+        MinFeeAccount other = new MinFeeAccount(executor);
+        vm.prank(OPERATOR);
+        registry.enroll(address(other), strategyId);
+        usdt.mint(address(other), 101e18);
+        other.approve(address(usdt));
+        other.approve(address(tokenA));
+        vm.warp(start + 30 minutes);
+        other.run(_one(_buy(10e18)), block.timestamp);
+        (uint64 ownStart,,) = executor.minFeeWindowOf(address(this));
+        (uint64 otherStart,,) = executor.minFeeWindowOf(address(other));
+        assertEq(ownStart, start, "midnight is not a reset");
+        assertEq(otherStart, start + 30 minutes);
+        vm.warp(start + 1 hours - 1);
+        _exec(_one(_buy(20e18)));
+        (, uint192 c, uint256 paid) = executor.minFeeWindowOf(address(this));
+        assertEq(c, 30e18);
+        assertEq(paid, 0.27e18);
+        vm.warp(start + 1 hours);
+        _exec(_one(_buy(10e18)));
+        (ownStart, c, paid) = executor.minFeeWindowOf(address(this));
+        assertEq(ownStart, start + 1 hours);
+        assertEq(c, 10e18);
+        assertEq(paid, 0.09e18);
+        other.run(_one(_buy(20e18)), block.timestamp);
+        (otherStart, c, paid) = executor.minFeeWindowOf(address(other));
+        assertEq(otherStart, start + 30 minutes, "other account's fee window still open");
+        assertEq(c, 30e18);
+        assertEq(paid, 0.27e18);
+        (ownStart, c) = executor.buyWindowOf(address(this));
+        assertEq(ownStart, start, "1h fee reset does not reset 24h buys");
+        assertEq(c, 40e18);
+        (otherStart, c) = executor.buyWindowOf(address(other));
+        assertEq(otherStart, start + 30 minutes);
+        assertEq(c, 30e18);
+    }
+
     /// @dev total = proportional + top-up = max(proportional, min(minBatchFee, 1%)), the top-up never exceeds
     /// the minimum nor 1% of the notional, and it is monotone non-increasing in the proportional rate.
     function testFuzz_topUpFormula(uint256 notional, uint16 feeBps, uint256 minFee) public {
