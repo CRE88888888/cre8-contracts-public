@@ -78,12 +78,16 @@ case "$MODE" in
     ;;
   *) echo "usage: deploy-97.sh fork|public"; exit 1 ;;
 esac
+# BSC caps every transaction at 16,777,216 gas (BEP-652); a 3x estimate pushes the executor deploy (~9.7M)
+# and pool cardinality calls (~14.2M) over it ("gas limit too high"). Public runs use a small margin; the
+# fork keeps 300 because anvil does not enforce the cap. Override with DEPLOY_GAS_MULT.
+if [ "$MODE" = public ]; then GAS_MULT="${DEPLOY_GAS_MULT:-115}"; else GAS_MULT="${DEPLOY_GAS_MULT:-300}"; fi
 [ "$(cast chain-id)" = "97" ] || { echo "$ETH_RPC_URL is not chain 97"; exit 1; }
 
 # Deploy the stateless library once at a CREATE2 address, then pin that address when linking.
 # Foundry's default nonce-based library deployment would otherwise change addresses on every rerun.
 env -u DAPP_LIBRARIES ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/testnet/DeployYieldView.s.sol --rpc-url "$ETH_RPC_URL" \
-  --broadcast --slow --gas-estimate-multiplier 300 "${SIGNERS[@]}" >"$LOG" 2>&1 \
+  --broadcast --slow --gas-estimate-multiplier "$GAS_MULT" "${SIGNERS[@]}" >"$LOG" 2>&1 \
   || { tail -40 "$LOG"; exit 1; }
 YIELD_VIEW="$(awk '/^[[:space:]]*YIELD_VIEW / {print $2}' "$LOG")"
 [ -n "$YIELD_VIEW" ] || { echo "missing yield view address"; exit 1; }
@@ -124,7 +128,7 @@ while :; do
   # `env` with an empty KEY_ENV (fork mode) adds nothing.
   # Simulation shares one timestamp; mining can enter an interest-mint branch absent in the estimate.
   # Keep the transaction budget generous without discounting any protocol minimum or actual gasUsed.
-  env ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow --gas-estimate-multiplier 300 "${SIGNERS[@]}" >"$LOG" 2>&1 \
+  env ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow --gas-estimate-multiplier "$GAS_MULT" "${SIGNERS[@]}" >"$LOG" 2>&1 \
     || { tail -80 "$LOG"; echo "deploy failed (last 80 lines of the forge log above; the log is removed on exit)"; exit 1; }
   grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS|PENDING_YIELD_MARKETS|PENDING_HANDOVER" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
   if ! grep -q "No transactions to broadcast" "$LOG"; then
