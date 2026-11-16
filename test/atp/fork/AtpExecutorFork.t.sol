@@ -4,10 +4,31 @@ pragma solidity ^0.8.26;
 import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { AtpExecutor } from "../../../src/atp/AtpExecutor.sol";
+import { AtpYieldRegistry } from "../../../src/atp/yield/AtpYieldRegistry.sol";
 import { AtpRegistry } from "../../../src/atp/AtpRegistry.sol";
 import { PancakeV3TwapOracle } from "../../../src/atp/PancakeV3TwapOracle.sol";
 import { IUniversalRouter } from "../../../src/atp/interfaces/IUniversalRouter.sol";
 import { IPancakeV3Pool } from "../../../src/atp/interfaces/IPancakeV3Pool.sol";
+
+import { YieldActions } from "../../../src/atp/yield/YieldActions.sol";
+import { YieldReader } from "../../../src/atp/yield/YieldReader.sol";
+import { YieldTypes as Y } from "../../../src/atp/yield/YieldTypes.sol";
+
+/// @dev Local-only compatibility harness for the EXACT action library in AtpExecutor. Production supply
+/// separately requires registry admission; the research Lista vault is deliberately not admitted on mainnet.
+contract YieldCompatibilityHarness {
+    function supply(Y.Market memory m, address account, uint256 amount) external returns (uint256) {
+        YieldReader.validate(m);
+        YieldReader.sync(m);
+        return YieldActions.supply(m, account, amount, YieldReader.quoteSupply(m, account, amount));
+    }
+
+    function withdraw(Y.Market memory m, address account, uint256 shares) external returns (uint256) {
+        YieldReader.validate(m);
+        YieldReader.sync(m);
+        return YieldActions.withdraw(m, account, shares, YieldReader.quoteWithdraw(m, shares));
+    }
+}
 
 /// @dev The one member of the PCS V3 factory this test reads. The pool address is resolved on-chain, never
 /// hard-coded, so a factory re-deployment cannot silently point the test at the wrong pool.
@@ -129,6 +150,103 @@ contract AtpExecutorForkTest is Test {
         // v2: the owner cannot enroll; the account itself (or the operator) does.
         vm.prank(address(account));
         registry.enroll(address(account), strategyId);
+    }
+
+    function test_yieldAdapter_realVenus_roundTrip() public {
+        _yieldRoundTrip(
+            Y.Kind.VENUS,
+            0xfD5840Cd36d94D7229439859C0112a4185BC0255,
+            0xfD5840Cd36d94D7229439859C0112a4185BC0255,
+            0xfD36E2c2a6789Db23113685031d7F16329158384
+        );
+    }
+
+    function test_yieldAdapter_realLista_roundTrip() public {
+        _yieldRoundTrip(
+            Y.Kind.LISTA,
+            0xEB4F6FFB1038E1cCa701e7d53083B37ec5b6Ba33,
+            0xEB4F6FFB1038E1cCa701e7d53083B37ec5b6Ba33,
+            0x8F73b65B4caAf64FBA2aF91cC5D4a2A1318E5D8C
+        );
+    }
+
+    function test_yieldAdapter_realAave_roundTrip() public {
+        _yieldRoundTrip(
+            Y.Kind.AAVE,
+            0x6807dc923806fE8Fd134338EABCA509979a7e0cB,
+            0xa9251ca9DE909CB71783723713B21E4233fbf1B1,
+            0x6807dc923806fE8Fd134338EABCA509979a7e0cB
+        );
+    }
+
+    function test_review14_mainnetVenus_missingImplementationProofRejected() public {
+        _rejectMissingProof(
+            Y.Kind.VENUS,
+            0xfD5840Cd36d94D7229439859C0112a4185BC0255,
+            0xfD5840Cd36d94D7229439859C0112a4185BC0255,
+            0xfD36E2c2a6789Db23113685031d7F16329158384,
+            0xfD36E2c2a6789Db23113685031d7F16329158384
+        );
+    }
+
+    function test_review14_mainnetLista_missingImplementationProofRejected() public {
+        _rejectMissingProof(
+            Y.Kind.LISTA,
+            0xEB4F6FFB1038E1cCa701e7d53083B37ec5b6Ba33,
+            0xEB4F6FFB1038E1cCa701e7d53083B37ec5b6Ba33,
+            0x8F73b65B4caAf64FBA2aF91cC5D4a2A1318E5D8C,
+            0xEB4F6FFB1038E1cCa701e7d53083B37ec5b6Ba33
+        );
+    }
+
+    function test_review14_mainnetAave_missingImplementationProofRejected() public {
+        _rejectMissingProof(
+            Y.Kind.AAVE,
+            0x6807dc923806fE8Fd134338EABCA509979a7e0cB,
+            0xa9251ca9DE909CB71783723713B21E4233fbf1B1,
+            0x6807dc923806fE8Fd134338EABCA509979a7e0cB,
+            0x6807dc923806fE8Fd134338EABCA509979a7e0cB
+        );
+    }
+
+    function _rejectMissingProof(Y.Kind kind, address target, address receipt, address risk, address missing)
+        private
+    {
+        assertGt(missing.code.length, 0);
+        (bool ok, bytes memory data) = missing.staticcall(abi.encodeWithSignature("implementation()"));
+        assertFalse(ok && data.length == 32, "must prove implementation getter is unavailable");
+        Y.Market memory m = Y.Market(
+            56, kind, USDT, receipt, target, risk, bytes32(uint256(1)), 1, type(uint256).max, true, false
+        );
+        AtpYieldRegistry yields = executor.yieldRegistry();
+        vm.expectRevert(YieldReader.UnsafeMarket.selector);
+        yields.registerMarket(keccak256(abi.encode(kind)), m);
+        assertEq(executor.yieldRegistry().receiptMarket(receipt), bytes32(0));
+    }
+
+    function _yieldRoundTrip(Y.Kind kind, address target, address receipt, address risk) internal {
+        YieldCompatibilityHarness harness = new YieldCompatibilityHarness();
+        uint256 amount = 10e18;
+        deal(USDT, address(this), amount);
+        IERC20(USDT).approve(address(harness), amount);
+        IERC20(receipt).approve(address(harness), type(uint256).max);
+        Y.Market memory m =
+            Y.Market(56, kind, USDT, receipt, target, risk, bytes32(0), 1, type(uint256).max, true, false);
+        uint256 gasStart = gasleft();
+        uint256 received = harness.supply(m, address(this), amount);
+        emit log_named_uint("yield supply gas", gasStart - gasleft());
+        assertGt(received, 0);
+        assertEq(IERC20(USDT).balanceOf(address(this)), 0);
+        assertEq(IERC20(USDT).allowance(address(harness), target), 0);
+        emit log_named_uint("real receipt acquired", IERC20(receipt).balanceOf(address(this)));
+        gasStart = gasleft();
+        uint256 returned = harness.withdraw(m, address(this), IERC20(receipt).balanceOf(address(this)));
+        emit log_named_uint("yield withdraw gas", gasStart - gasleft());
+        emit log_named_uint("real underlying returned", returned);
+        assertGt(returned, 0);
+        assertEq(IERC20(USDT).balanceOf(address(this)), returned);
+        assertEq(IERC20(receipt).balanceOf(address(harness)), 0);
+        assertEq(IERC20(USDT).balanceOf(address(harness)), 0);
     }
 
     function test_executeRebalance_swapsOnRealPancakeV3UniversalRouter() public {

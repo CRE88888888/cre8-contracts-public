@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import { Script, console } from "forge-std/Script.sol";
+import { console } from "forge-std/Script.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { AtpRegistry } from "../src/atp/AtpRegistry.sol";
 import { AtpExecutor } from "../src/atp/AtpExecutor.sol";
@@ -18,6 +18,16 @@ import { VerifyingPaymaster } from "../src/testnet/aa/samples/VerifyingPaymaster
 import { IEntryPoint } from "../src/testnet/aa/interfaces/IEntryPoint.sol";
 import { TestnetAssets } from "./testnet/TestnetAssets.sol";
 import { TestnetBook } from "./testnet/TestnetBook.sol";
+import { TestnetYieldBook as YieldBook } from "./testnet/TestnetYieldBook.sol";
+import { AtpYieldRegistry } from "../src/atp/yield/AtpYieldRegistry.sol";
+import { YieldTypes as Y } from "../src/atp/yield/YieldTypes.sol";
+import { YieldReader } from "../src/atp/yield/YieldReader.sol";
+import { YieldView } from "../src/atp/yield/YieldView.sol";
+import { YieldViewPin } from "./testnet/DeployYieldView.s.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { MockVenus } from "../src/testnet/yield/MockVenus.sol";
+import { MockLista } from "../src/testnet/yield/MockLista.sol";
+import { MockAavePool, MockAToken } from "../src/testnet/yield/MockAavePool.sol";
 import { GasPolicyInitCode } from "./testnet/GasPolicyInitCode.sol";
 
 interface ITestnetV3Factory {
@@ -96,7 +106,7 @@ interface ITestnetPositionNft {
 /// docs/testnet-97.zh-TW.md. Broadcasts from DEPLOYER and OWNER, so both must be available as signers
 /// (`--unlocked` on a fork; on chain 97 the keys come from the environment, `TESTNET_DEPLOYER_KEY` and
 /// `TESTNET_OWNER_KEY`, never from command-line arguments another process could read with `ps`; #47).
-contract DeployTestnet is Script {
+contract DeployTestnet is YieldViewPin {
     // ---- chain 97 pins (sources in docs/testnet-97.zh-TW.md) ----
     address internal constant V3_FACTORY = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865;
     address internal constant POSITION_MANAGER = 0x427bF5b37357632377eCbEC9de3626C71A5396c1;
@@ -168,6 +178,7 @@ contract DeployTestnet is Script {
         AtpRegistry registry;
         AtpMultiPoolOracle router;
         AtpExecutor executor;
+        AtpYieldRegistry yields;
         TestnetPriceFeed usdtUsdFeed;
         VerifyingPaymaster paymaster;
     }
@@ -182,6 +193,7 @@ contract DeployTestnet is Script {
 
     function run() external {
         require(block.chainid == 97, "DeployTestnet: BSC testnet (97) only");
+        _verifyYieldView(address(YieldView));
         rememberKey("TESTNET_DEPLOYER_KEY", TestnetBook.DEPLOYER);
         rememberKey("TESTNET_OWNER_KEY", TestnetBook.OWNER);
         require(
@@ -231,6 +243,13 @@ contract DeployTestnet is Script {
         // `scripts/testnet/deploy-97.sh` reruns while it sees this line.
         if (pending != 0) {
             console.log("PENDING_MARKETS", pending);
+            return;
+        }
+
+        // Yield markets are a separate bounded phase, before the mock tokens' ownership hand-over.
+        uint256 pendingYield = _yieldMarkets(core);
+        if (pendingYield != 0) {
+            console.log("PENDING_YIELD_MARKETS", pendingYield);
             return;
         }
 
@@ -332,6 +351,7 @@ contract DeployTestnet is Script {
                 )
             )
         );
+        core.yields = core.executor.yieldRegistry();
         core.paymaster = VerifyingPaymaster(
             payable(_owned(
                     core.ownedDeployer,
@@ -343,6 +363,146 @@ contract DeployTestnet is Script {
                 ))
         );
         if (!core.usdt.isFaucet(TestnetBook.OPERATOR)) core.usdt.setFaucet(TestnetBook.OPERATOR, true);
+    }
+
+    // ---------------------------------------------------------------- yield markets (#40/#41/#42)
+
+    function _yieldInit(YieldBook.Spec memory spec, TestnetToken token) internal pure returns (bytes memory) {
+        bytes memory args = abi.encode(token, TestnetBook.OWNER, spec.aprBps);
+        if (spec.kind == Y.Kind.VENUS) return abi.encodePacked(type(MockVenus).creationCode, args);
+        if (spec.kind == Y.Kind.LISTA) return abi.encodePacked(type(MockLista).creationCode, args);
+        return abi.encodePacked(type(MockAavePool).creationCode, args);
+    }
+
+    function _yieldMarkets(Core memory core) internal returns (uint256 pending) {
+        YieldBook.Spec[] memory specs = YieldBook.specs();
+        uint256 perRun = vm.envOr("TESTNET_YIELD_MARKETS_PER_RUN", uint256(8));
+        require(perRun > 0, "TESTNET_YIELD_MARKETS_PER_RUN must be > 0");
+        uint256 started;
+        for (uint256 i; i < specs.length; ++i) {
+            (address asset, uint256 seed) = YieldBook.asset(specs[i], address(core.usdt));
+            bytes memory initCode = _yieldInit(specs[i], TestnetToken(asset));
+            address target = TestnetBook.create2Address(YieldBook.label(specs[i]), initCode);
+            address receipt = target;
+            if (specs[i].kind == Y.Kind.AAVE && target.code.length != 0) {
+                receipt = MockAavePool(target).receipt();
+            }
+            bool done = target.code.length != 0
+                && core.yields.receiptMarket(receipt) == YieldBook.id(specs[i], asset);
+            if (!done) {
+                if (started == perRun) {
+                    ++pending;
+                    continue;
+                }
+                ++started;
+            }
+            _yieldMarket(core, specs[i], TestnetToken(asset), seed, initCode);
+        }
+    }
+
+    function _yieldMarket(
+        Core memory core,
+        YieldBook.Spec memory spec,
+        TestnetToken token,
+        uint256 seed,
+        bytes memory initCode
+    ) internal {
+        vm.startBroadcast(TestnetBook.DEPLOYER);
+        address target = _create2(YieldBook.label(spec), initCode);
+        vm.stopBroadcast();
+        address receipt = spec.kind == Y.Kind.AAVE ? MockAavePool(target).receipt() : target;
+        // Accrual may mint test interest ONLY into the simulated market, never to an arbitrary receiver.
+        vm.startBroadcast(token.owner());
+        address interestMinter = spec.kind == Y.Kind.AAVE ? receipt : target;
+        if (!token.isMinter(interestMinter)) token.setMinter(interestMinter, true);
+        bool seedNeeded = IERC20(receipt).totalSupply() == 0;
+        if (seedNeeded) {
+            uint256 balance = token.balanceOf(TestnetBook.DEPLOYER);
+            if (balance < seed) token.mint(TestnetBook.DEPLOYER, seed - balance);
+        }
+        vm.stopBroadcast();
+        if (seedNeeded) {
+            vm.startBroadcast(TestnetBook.DEPLOYER);
+            token.approve(target, seed);
+            if (spec.kind == Y.Kind.VENUS) {
+                require(MockVenus(target).mint(seed) == 0, "mock Venus seed error");
+                IERC20(receipt).transfer(TestnetBook.OWNER, IERC20(receipt).balanceOf(TestnetBook.DEPLOYER));
+            } else if (spec.kind == Y.Kind.LISTA) {
+                MockLista(target).deposit(seed, TestnetBook.OWNER);
+            } else {
+                MockAavePool(target).supply(address(token), seed, TestnetBook.OWNER, 0);
+            }
+            token.approve(target, 0);
+            vm.stopBroadcast();
+        }
+        bytes32 id = YieldBook.id(spec, address(token));
+        if (core.yields.receiptMarket(receipt) == bytes32(0)) {
+            // A resumed seeded market must accrue in a broadcast transaction before health is read.
+            vm.startBroadcast(TestnetBook.DEPLOYER);
+            if (spec.kind == Y.Kind.VENUS) {
+                require(MockVenus(target).accrueInterest() == 0, "mock Venus accrue error");
+            } else if (spec.kind == Y.Kind.LISTA) {
+                MockLista(target).accrue();
+            } else {
+                MockAToken(receipt).accrue();
+            }
+            vm.stopBroadcast();
+            uint256 initialRate = spec.kind == Y.Kind.VENUS
+                ? MockVenus(target).exchangeRateStored()
+                : spec.kind == Y.Kind.LISTA ? MockLista(target).convertToAssets(1e18) : uint256(1e18);
+            Y.Market memory m = Y.Market(
+                97,
+                spec.kind,
+                address(token),
+                receipt,
+                target,
+                target,
+                bytes32(0),
+                initialRate / 2,
+                initialRate * 2,
+                true,
+                false
+            );
+            m.configuration = YieldReader.health(m).configuration;
+            vm.startBroadcast(core.registry.owner());
+            core.yields.registerMarket(id, m);
+            vm.stopBroadcast();
+        }
+        Y.Market memory stored = core.yields.market(id);
+        require(
+            stored.asset == address(token) && stored.receipt == receipt && stored.target == target
+                && stored.kind == spec.kind && stored.supplyEnabled && !stored.retired,
+            "yield market pin mismatch"
+        );
+    }
+
+    function _reportYield(Core memory core) internal view {
+        YieldBook.Spec[] memory specs = YieldBook.specs();
+        for (uint256 i; i < specs.length; ++i) {
+            (address asset, uint256 seed) = YieldBook.asset(specs[i], address(core.usdt));
+            bytes32 id = YieldBook.id(specs[i], asset);
+            Y.Market memory m = core.yields.market(id);
+            console.log(
+                string.concat(
+                    "YIELD_MARKET ",
+                    vm.toString(id),
+                    " ",
+                    YieldBook.protocol(specs[i].kind),
+                    " ",
+                    specs[i].symbol,
+                    " ",
+                    vm.toString(specs[i].aprBps),
+                    " ",
+                    vm.toString(m.target),
+                    " ",
+                    vm.toString(m.receipt),
+                    " ",
+                    vm.toString(asset),
+                    " ",
+                    vm.toString(seed)
+                )
+            );
+        }
     }
 
     // ---------------------------------------------------------------- per asset
@@ -685,6 +845,12 @@ contract DeployTestnet is Script {
         );
         require(core.registry.operator() == TestnetBook.OPERATOR, "registry operator");
         require(
+            address(core.executor.yieldRegistry()) == address(core.yields)
+                && core.yields.marketCount() == YieldBook.COUNT
+                && core.yields.reader() == expectedYieldView(),
+            "yield registry pins"
+        );
+        require(
             core.router.owner() == TestnetBook.OWNER && core.router.pendingOwner() == address(0),
             "router owner"
         );
@@ -781,8 +947,9 @@ contract DeployTestnet is Script {
     /// @dev `MANIFEST <key> <address>` lines are what `scripts/testnet/deploy-97.sh` turns into the manifest.
     function _report(Core memory core, TestnetAssets.AssetSpec[] memory specs, AssetOut[] memory out)
         internal
-        pure
+        view
     {
+        _verifyYieldView(core.yields.reader());
         console.log("");
         _line("role.deployer", TestnetBook.DEPLOYER);
         _line("role.owner", TestnetBook.OWNER);
@@ -796,6 +963,9 @@ contract DeployTestnet is Script {
         _line("registry", address(core.registry));
         _line("router", address(core.router));
         _line("executor", address(core.executor));
+        _line("yieldRegistry", address(core.yields));
+        _line("yieldView", core.yields.reader());
+        _reportYield(core);
         _line("usdt", address(core.usdt));
         _line("feed.USDT/USD", address(core.usdtUsdFeed));
         _line("paymaster", address(core.paymaster));

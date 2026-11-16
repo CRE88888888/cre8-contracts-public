@@ -56,7 +56,12 @@ case "$MODE" in
     cast rpc anvil_nodeInfo >/dev/null 2>&1 || { echo "$ETH_RPC_URL is not an anvil fork"; exit 1; }
     for a in "$DEPLOYER" "$OWNER"; do cast rpc anvil_impersonateAccount "$a" >/dev/null; done
     # The fork inherits whatever the real DEPLOYER holds; give it enough for a full run (fork-only tBNB).
-    [ "$(cast balance "$DEPLOYER")" -ge 2000000000000000000 ] || cast rpc anvil_setBalance "$DEPLOYER" 0x8AC7230489E80000 >/dev/null # 10 tBNB
+    DEPLOYER_BALANCE="$(cast balance "$DEPLOYER")"
+    # Wei balances can exceed Bash's signed 64-bit range (e.g. the 10 tBNB fork grant).
+    if ! python3 -c 'import sys; sys.exit(0 if int(sys.argv[1]) >= 2 * 10**18 else 1)' "$DEPLOYER_BALANCE"; then
+      cast rpc anvil_setBalance "$DEPLOYER" 0x8AC7230489E80000 >/dev/null # 10 tBNB, fork only
+    fi
+    unset TESTNET_DEPLOYER_KEY TESTNET_OWNER_KEY
     SIGNERS=(--unlocked --sender "$DEPLOYER")
     KEY_ENV=()
     ;;
@@ -74,6 +79,21 @@ case "$MODE" in
   *) echo "usage: deploy-97.sh fork|public"; exit 1 ;;
 esac
 [ "$(cast chain-id)" = "97" ] || { echo "$ETH_RPC_URL is not chain 97"; exit 1; }
+
+# Deploy the stateless library once at a CREATE2 address, then pin that address when linking.
+# Foundry's default nonce-based library deployment would otherwise change addresses on every rerun.
+env -u DAPP_LIBRARIES ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/testnet/DeployYieldView.s.sol --rpc-url "$ETH_RPC_URL" \
+  --broadcast --slow --gas-estimate-multiplier 300 "${SIGNERS[@]}" >"$LOG" 2>&1 \
+  || { tail -40 "$LOG"; exit 1; }
+YIELD_VIEW="$(awk '/^[[:space:]]*YIELD_VIEW / {print $2}' "$LOG")"
+[ -n "$YIELD_VIEW" ] || { echo "missing yield view address"; exit 1; }
+LIBRARY_TRANSACTIONS=0
+LIBRARY_GAS=0
+if ! grep -q "No transactions to broadcast" "$LOG"; then
+  read -r LIBRARY_TRANSACTIONS LIBRARY_GAS < <(python3 -c 'import json; r=json.load(open("broadcast/DeployYieldView.s.sol/97/run-latest.json"))["receipts"]; assert all(int(x["status"],16)==1 for x in r); print(len(r),sum(int(x["gasUsed"],16) for x in r))')
+fi
+echo "DEPLOY_RECEIPTS library: $LIBRARY_TRANSACTIONS transactions, $LIBRARY_GAS gas ($YIELD_VIEW)"
+export DAPP_LIBRARIES="src/atp/yield/YieldView.sol:YieldView:$YIELD_VIEW"
 
 # Pools whose observationCardinality is still 1. The TWAP adapter needs >= 2, which only an observation written
 # in a later second than the pool's initialization provides; when the first mints land in that same second the
@@ -95,21 +115,34 @@ thin_pools() {
 run=0
 thin_runs=0
 last_pending=""
+last_phase=""
+total_transactions="$LIBRARY_TRANSACTIONS"
+total_gas="$LIBRARY_GAS"
 while :; do
   run=$((run + 1))
   echo "== DeployTestnet ($MODE, $ETH_RPC_URL) run $run =="
   # `env` with an empty KEY_ENV (fork mode) adds nothing.
-  env ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow "${SIGNERS[@]}" >"$LOG" 2>&1 \
+  # Simulation shares one timestamp; mining can enter an interest-mint branch absent in the estimate.
+  # Keep the transaction budget generous without discounting any protocol minimum or actual gasUsed.
+  env ${KEY_ENV[@]+"${KEY_ENV[@]}"} forge script script/DeployTestnet.s.sol --rpc-url "$ETH_RPC_URL" --broadcast --slow --gas-estimate-multiplier 300 "${SIGNERS[@]}" >"$LOG" 2>&1 \
     || { tail -80 "$LOG"; echo "deploy failed (last 80 lines of the forge log above; the log is removed on exit)"; exit 1; }
-  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS|PENDING_HANDOVER" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
+  grep -E "NEW|TOPUP|No transactions to broadcast|ONCHAIN EXECUTION|Paid:|PENDING_MARKETS|PENDING_YIELD_MARKETS|PENDING_HANDOVER" "$LOG" | grep -vE "^\s*(pool|deploy) +NEW" || true
+  if ! grep -q "No transactions to broadcast" "$LOG"; then
+    read -r RUN_TX RUN_GAS < <(python3 -c 'import json; r=json.load(open("broadcast/DeployTestnet.s.sol/97/run-latest.json"))["receipts"]; print(len(r),sum(int(x["gasUsed"],16) for x in r))')
+    total_transactions=$((total_transactions + RUN_TX))
+    total_gas=$((total_gas + RUN_GAS))
+    echo "DEPLOY_RECEIPTS run $run: $RUN_TX transactions, $RUN_GAS gas"
+  fi
   echo "new contracts and pools this run: $(grep -cE "^\s*(pool|deploy) +NEW" "$LOG" || true)"
   # No PENDING_MARKETS line on the last run: grep exits 1, which pipefail + set -e must not turn into an abort.
-  PENDING="$(grep -E "^\s*PENDING_MARKETS " "$LOG" | awk '{print $2}' | tail -1 || true)"
+  PENDING="$(grep -E "^\s*PENDING_(YIELD_)?MARKETS " "$LOG" | awk '{print $2}' | tail -1 || true)"
+  PHASE="$(grep -E "^\s*PENDING_(YIELD_)?MARKETS " "$LOG" | awk '{print $1}' | tail -1 || true)"
   if [ -n "$PENDING" ]; then
-    if [ -n "$last_pending" ] && [ "$PENDING" -ge "$last_pending" ]; then
+    if [ "$PHASE" = "$last_phase" ] && [ -n "$last_pending" ] && [ "$PENDING" -ge "$last_pending" ]; then
       echo "no progress: still $PENDING markets pending after run $run"; exit 1
     fi
     last_pending="$PENDING"
+    last_phase="$PHASE"
     echo "$PENDING markets pending -> next run"
     [ "$MODE" = fork ] && cast rpc anvil_mine 1 >/dev/null
     continue
@@ -132,6 +165,7 @@ while :; do
   break
 done
 unset KEY_ENV SIGNERS
+echo "DEPLOY_TOTAL: $total_transactions transactions, $total_gas gas"
 
 echo "== manifest + eth_getCode =="
 BLOCK="$(cast block-number)"
@@ -142,6 +176,18 @@ entries = [l.split()[1:3] for l in open(log) if l.strip().startswith("MANIFEST "
 if not entries:
     sys.exit("no MANIFEST lines in the deploy log")
 roles, contracts, assets, bad = {}, {}, {}, []
+yield_markets = []
+for line in open(log):
+    if not line.strip().startswith("YIELD_MARKET "): continue
+    _, ident, protocol, symbol, apr, target, receipt, asset, seed = line.split()
+    for addr in (target, receipt):
+        code = subprocess.run(["cast", "code", addr, "--rpc-url", rpc], capture_output=True, text=True).stdout.strip()
+        if code in ("", "0x"): bad.append(f"yield {ident} {addr}")
+    yield_markets.append({"marketId": ident, "protocol": protocol, "symbol": symbol, "aprBps": int(apr),
+        "target": target, "receipt": receipt, "asset": asset, "backgroundSupplyAssets": seed,
+        "rateLabel": "模擬利率", "rateType": "fixed_simulated_APR", "ownerAdjustable": True})
+if len(yield_markets) != 30 or len({m["marketId"] for m in yield_markets}) != 30:
+    sys.exit("yield manifest must contain the 30 distinct rows in C3's final table")
 for key, addr in entries:
     if key.startswith("role."):
         roles[key[5:]] = addr
@@ -167,6 +213,8 @@ manifest = {
     "roles": roles,
     "contracts": contracts,
     "assets": assets,
+    "yieldMarkets": yield_markets,
+    "yieldMarketCountNote": "C3 table heading says 32, but has 30 rows (21 Venus, 4 Lista, 5 Aave); no unspecified markets added",
 }
 json.dump(manifest, open(path, "w"), indent=2)
 open(path, "a").write("\n")

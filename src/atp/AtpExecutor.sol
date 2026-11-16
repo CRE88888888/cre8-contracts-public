@@ -12,6 +12,9 @@ import { IUniversalRouter } from "./interfaces/IUniversalRouter.sol";
 import { IOracleFloor } from "./interfaces/IOracleFloor.sol";
 import { IPermit2 } from "./interfaces/IPermit2.sol";
 import { AtpRegistry } from "./AtpRegistry.sol";
+import { AtpYieldRegistry } from "./yield/AtpYieldRegistry.sol";
+import { YieldTypes as Y } from "./yield/YieldTypes.sol";
+import { YieldActions } from "./yield/YieldActions.sol";
 
 /// @title AtpExecutor
 /// @notice The only contract that moves user funds for an ATP rebalance. One call per user operation:
@@ -58,6 +61,8 @@ contract AtpExecutor is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    /// @notice Fixed execution-quote tolerance for signed yield minima; no administrative override.
+    uint256 public constant YIELD_QUOTE_TOLERANCE_BPS = 10;
     /// @dev Canonical Uniswap Permit2, the same address on every chain it is deployed to, BSC mainnet (56)
     /// and testnet (97) included. Read only by the constructor; see the pin there for why it exists.
     address internal constant CANONICAL_PERMIT2 = 0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768;
@@ -249,6 +254,8 @@ contract AtpExecutor is ReentrancyGuard {
             if (permit2_ != CANONICAL_PERMIT2) revert InvalidConfig();
         }
 
+        yieldRegistry = new AtpYieldRegistry(registry_, address(this));
+        emit YieldRegistrySet(address(yieldRegistry));
         registry = registry_;
         universalRouter = universalRouter_;
         oracle = oracle_;
@@ -327,10 +334,101 @@ contract AtpExecutor is ReentrancyGuard {
     }
 
     function _requireNotProtocol(address target) internal view {
+        if (target == address(yieldRegistry) || yieldRegistry.isYieldProtocol(target)) {
+            revert BadVenue(target);
+        }
         if (
             target == address(this) || target == address(registry) || target == address(oracle)
                 || target == address(permit2) || target == numeraire
         ) revert BadVenue(target);
+    }
+
+    AtpYieldRegistry public immutable yieldRegistry;
+    error YieldMinimum(uint256 supplied, uint256 required);
+    event YieldRegistrySet(address indexed yieldRegistry);
+    event SupplyExecuted(
+        address indexed account,
+        bytes32 indexed marketId,
+        uint256 assets,
+        uint256 shares,
+        uint256 remainingReceipts
+    );
+    event WithdrawExecuted(
+        address indexed account,
+        bytes32 indexed marketId,
+        uint256 shares,
+        uint256 assets,
+        uint256 remainingReceipts
+    );
+
+    function executeSupply(
+        address account,
+        bytes32 marketId,
+        uint256 assets,
+        uint256 minShares,
+        uint256 deadline
+    ) external nonReentrant {
+        _yieldCaller(account, deadline);
+        if (globalPaused) revert ExecutorPaused();
+        if (assets == 0 || minShares == 0) revert ZeroAmount();
+        Y.Market memory m = yieldRegistry.beforeSupply(account, marketId, assets);
+        uint256 value = assets;
+        if (m.asset != numeraire) (, value) = oracle.previewSwap(m.asset, numeraire, assets);
+        uint256 minimum = 50 * 10 ** IERC20Metadata(numeraire).decimals();
+        if (value < minimum) revert YieldMinimum(value, minimum);
+        uint256 quote = yieldRegistry.quoteSupply(marketId, account, assets);
+        uint256 floor = Math.mulDiv(quote, BPS_DENOMINATOR - YIELD_QUOTE_TOLERANCE_BPS, BPS_DENOMINATOR);
+        if (quote == 0 || minShares < floor) revert YieldMinimum(minShares, floor);
+        uint256 beforeUnits = yieldRegistry.units(marketId, account);
+        uint256 received = YieldActions.supply(m, account, assets, minShares);
+        yieldRegistry.recordSupply(account, marketId, beforeUnits);
+        emit SupplyExecuted(account, marketId, assets, received, IERC20(m.receipt).balanceOf(account));
+    }
+
+    /// @notice Pure redemption ignores enrollment, retirement, supply cooldown, budgets and swap quotas.
+    function executeWithdraw(
+        address account,
+        bytes32 marketId,
+        uint256 shares,
+        uint256 minAssets,
+        uint256 deadline
+    ) external nonReentrant {
+        _yieldCaller(account, deadline);
+        if (globalPaused) revert ExecutorPaused();
+        if (shares == 0 || minAssets == 0) revert ZeroAmount();
+        Y.Market memory m = yieldRegistry.market(marketId);
+        uint256 quote = yieldRegistry.quoteWithdraw(marketId, shares);
+        uint256 floor = Math.mulDiv(quote, BPS_DENOMINATOR - YIELD_QUOTE_TOLERANCE_BPS, BPS_DENOMINATOR);
+        if (quote == 0 || minAssets < floor) revert YieldMinimum(minAssets, floor);
+        uint256 beforeUnits = yieldRegistry.units(marketId, account);
+        uint256 trackedBefore = yieldRegistry.accountUnits(account, marketId);
+        uint256 received = YieldActions.withdraw(m, account, shares, minAssets);
+        yieldRegistry.recordWithdraw(account, marketId, beforeUnits, trackedBefore);
+        emit WithdrawExecuted(account, marketId, shares, received, IERC20(m.receipt).balanceOf(account));
+    }
+
+    function _yieldCaller(address account, uint256 deadline) private view {
+        if (msg.sender != account) revert NotAccount();
+        if (account.code.length == 0) revert NotContract();
+        if (block.timestamp > deadline) revert DeadlineExpired();
+    }
+
+    /// @notice Use eth_call: accrue and validate every held receipt before returning the canonical NAV.
+    /// A failed risk/identity/rate read reverts; no "zero receipt value" fallback exists.
+    function previewAccountValue(address account) external nonReentrant returns (uint256) {
+        if (!registry.isEnrolled(account)) revert NotEnrolled();
+        yieldRegistry.syncAccount(account);
+        return _accountValue(account, registry.enrollments(account));
+    }
+
+    /// @notice Same fresh snapshot as executeRebalance, including receipt claims, without broadcasting.
+    function previewBuyAllowance(address account)
+        external
+        nonReentrant
+        returns (uint256 cap, uint256 bought, uint64 windowEndsAt)
+    {
+        yieldRegistry.syncAccount(account);
+        return this.buyAllowance(account);
     }
 
     // ---- execution ----
@@ -352,6 +450,14 @@ contract AtpExecutor is ReentrancyGuard {
         if (!registry.isEnrolled(account)) revert NotEnrolled();
         if (enrollment.paused) revert Paused();
         uint16 feeBps = registry.effectiveFeeBps(enrollment.strategyId);
+        {
+            for (uint256 i; i < steps.length; ++i) {
+                if (steps[i].tokenOut != numeraire) {
+                    yieldRegistry.syncAccount(account);
+                    break;
+                }
+            }
+        }
         (bool hasBuy, uint256 cap, BuyWindow memory window) = _openBuyWindow(account, enrollment, steps);
 
         uint256 count = steps.length;
@@ -521,11 +627,32 @@ contract AtpExecutor is ReentrancyGuard {
         for (uint256 i; i < assets.length; ++i) {
             address asset = assets[i];
             if (asset == numeraire) continue;
+            if (yieldRegistry.receiptMarket(asset) != bytes32(0)) {
+                continue;
+            }
             uint256 balance = _balanceOrZero(asset, account);
             if (balance == 0) continue;
             try oracle.previewSwap(asset, numeraire, balance) returns (uint256 quoted, uint256) {
                 value += quoted;
             } catch { }
+        }
+        {
+            bytes32[] memory positions = yieldRegistry.accountMarkets(account);
+            for (uint256 i; i < positions.length; ++i) {
+                bytes32 id = positions[i];
+                Y.Market memory m = yieldRegistry.market(id);
+                uint256 held = IERC20(m.receipt).balanceOf(account);
+                if (held == 0) continue;
+                uint256 underlying = yieldRegistry.receiptAssets(id, account);
+                if (underlying == 0) revert NoFloor();
+                if (m.asset == numeraire) {
+                    value += underlying;
+                } else {
+                    (uint256 quoted,) = oracle.previewSwap(m.asset, numeraire, underlying);
+                    if (quoted == 0) revert NoFloor();
+                    value += quoted;
+                }
+            }
         }
     }
 
@@ -554,6 +681,10 @@ contract AtpExecutor is ReentrancyGuard {
         uint16 feeBps
     ) internal view returns (uint256 minGross) {
         if (step.amountIn == 0) revert ZeroAmount();
+        if (
+            yieldRegistry.receiptMarket(step.tokenIn) != bytes32(0)
+                || yieldRegistry.receiptMarket(step.tokenOut) != bytes32(0)
+        ) revert AssetNotAllowed();
         if (step.tokenIn == step.tokenOut) revert SameToken();
         if (
             !registry.isAssetAllowed(enrollment.strategyId, enrollment.version, step.tokenIn)
@@ -562,6 +693,9 @@ contract AtpExecutor is ReentrancyGuard {
 
         Venue memory venue = venues[step.venue];
         if (venue.kind == VenueKind.NONE) revert VenueNotAllowed(step.venue);
+        // Re-check dynamically: a market may have been registered after this venue was configured.
+        _requireNotProtocol(step.venue);
+        _requireNotProtocol(venue.spender);
         // Never call or approve one of this step's own tokens or the account: the allowance this step grants
         // must only ever be spendable by a swap venue.
         if (

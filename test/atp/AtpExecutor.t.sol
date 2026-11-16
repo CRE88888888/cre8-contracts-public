@@ -123,11 +123,12 @@ contract AtpExecutorHarness is AtpExecutor {
         IUniversalRouter router_,
         IOracleFloor oracle_,
         address permit2_,
-        address feeRecipient_
+        address feeRecipient_,
+        address numeraire_
     )
         // The numeraire only drives the buy limit (AtpExecutorBuyLimit.t.sol) and the minimum batch fee
         // (AtpExecutorMinFee.t.sol, off here); any token with decimals will do for the decoder / swap-leg tests.
-        AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_, address(new MockERC20()), 10_000, 0)
+        AtpExecutor(registry_, router_, oracle_, permit2_, feeRecipient_, numeraire_, 10_000, 0)
     { }
 
     function checkCommands(bytes calldata commands, bytes[] calldata inputs) external view {
@@ -169,17 +170,24 @@ contract AtpExecutorTest is Test {
     /// @dev Canonical Uniswap Permit2, the address the executor's constructor pins on chain ids 56 and 97.
     address internal constant CANONICAL_PERMIT2 = 0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768;
 
+    MockERC20 internal harnessNumeraire;
     AtpRegistry internal registry;
     AtpExecutorHarness internal executor;
     MockPermit2 internal permit2;
     SwapRouterStub internal routerStub;
 
     function setUp() public {
+        harnessNumeraire = new MockERC20();
         registry = new AtpRegistry();
         permit2 = new MockPermit2();
         routerStub = new SwapRouterStub();
         executor = new AtpExecutorHarness(
-            registry, routerStub, new MockOracleFloor(), address(permit2), FEE_RECIPIENT
+            registry,
+            routerStub,
+            new MockOracleFloor(),
+            address(permit2),
+            FEE_RECIPIENT,
+            address(harnessNumeraire)
         );
     }
 
@@ -382,7 +390,12 @@ contract AtpExecutorTest is Test {
         // Build every stub first: `vm.expectRevert` binds to the very next external call.
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
         new AtpExecutorHarness(
-            freshRegistry, IUniversalRouter(address(0)), oracleStub, address(permit2), FEE_RECIPIENT
+            freshRegistry,
+            IUniversalRouter(address(0)),
+            oracleStub,
+            address(permit2),
+            FEE_RECIPIENT,
+            address(harnessNumeraire)
         );
     }
 
@@ -390,14 +403,18 @@ contract AtpExecutorTest is Test {
         MockUniversalRouter routerStub_ = new MockUniversalRouter();
         MockOracleFloor oracleStub = new MockOracleFloor();
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(0), FEE_RECIPIENT);
+        new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, address(0), FEE_RECIPIENT, address(harnessNumeraire)
+        );
     }
 
     function test_constructor_rejectsZeroFeeRecipient() public {
         MockUniversalRouter routerStub_ = new MockUniversalRouter();
         MockOracleFloor oracleStub = new MockOracleFloor();
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), address(0));
+        new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, address(permit2), address(0), address(harnessNumeraire)
+        );
     }
 
     // ---- constructor: Permit2 is pinned on the BSC chain ids ----
@@ -411,7 +428,9 @@ contract AtpExecutorTest is Test {
         vm.chainId(56);
 
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+        new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT, address(harnessNumeraire)
+        );
     }
 
     function test_constructor_rejectsNonCanonicalPermit2OnBscTestnet() public {
@@ -420,7 +439,9 @@ contract AtpExecutorTest is Test {
         vm.chainId(97);
 
         vm.expectRevert(AtpExecutor.InvalidConfig.selector);
-        new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+        new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT, address(harnessNumeraire)
+        );
     }
 
     /// @dev A bare EVM has nothing at the canonical address, so the mock's runtime code is etched there:
@@ -431,8 +452,9 @@ contract AtpExecutorTest is Test {
         vm.etch(CANONICAL_PERMIT2, address(permit2).code);
         vm.chainId(56);
 
-        AtpExecutorHarness pinned =
-            new AtpExecutorHarness(registry, routerStub_, oracleStub, CANONICAL_PERMIT2, FEE_RECIPIENT);
+        AtpExecutorHarness pinned = new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, CANONICAL_PERMIT2, FEE_RECIPIENT, address(harnessNumeraire)
+        );
         assertEq(address(pinned.permit2()), CANONICAL_PERMIT2, "canonical Permit2 accepted on BSC");
     }
 
@@ -443,8 +465,9 @@ contract AtpExecutorTest is Test {
         MockOracleFloor oracleStub = new MockOracleFloor();
         vm.chainId(1);
 
-        AtpExecutorHarness offBsc =
-            new AtpExecutorHarness(registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT);
+        AtpExecutorHarness offBsc = new AtpExecutorHarness(
+            registry, routerStub_, oracleStub, address(permit2), FEE_RECIPIENT, address(harnessNumeraire)
+        );
         assertEq(address(offBsc.permit2()), address(permit2), "off BSC only code length is checked");
     }
 
