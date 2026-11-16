@@ -1,10 +1,21 @@
 {
   "chainId": 97,
-  "mode": "fork",
-  "note": "fork = verified on a local anvil fork of chain 97; the public deployment lands on the same CREATE2 addresses",
-  "verifiedAtBlock": 142969857,
-  "generatedAt": "2026-11-16T00:32:16Z",
-  "gitCommit": "f60dd99bb0b275e2cb1f9cca823e841cb7c695cb",
+  "mode": "public",
+  "note": "deployed on public BSC testnet (chain 97)",
+  "verifiedAtBlock": 143098069,
+  "generatedAt": "2026-11-16T16:42:07Z",
+  "gitCommit": "92e6963848d106ab9dc86334928af11b708c1dfa",
+  "versioning": {
+    "enrollAbi": "enroll(address,uint256,uint16)",
+    "publicationDelaySeconds": 86400,
+    "publicationIntervalSeconds": 604800,
+    "consent": "account sudo enroll, or account approveEnrollment(uint256,uint16) then operator first enroll",
+    "settingsAbi": "publishSettingsVersion(uint256,address[],uint16[],bytes32,bytes32,uint16,uint64)",
+    "performanceFeeBpsRange": [
+      500,
+      2000
+    ]
+  },
   "roles": {
     "deployer": "0x55662B4183fcA1230694D5D57F56E4F2E0e3008a",
     "owner": "0x09BBB9A06a0C49Ad24bddB18808944041783054e",
@@ -17,10 +28,10 @@
   },
   "contracts": {
     "ownedDeployer": "0xC92079CCB13Ebd608D5Cd03f5e302DcDE5b37096",
-    "registry": "0x7D39178401923140dF8b5A559a02682326F17350",
+    "registry": "0x8b970a9C5DF5B54EC9Db677fD78B6CeC77C1631f",
     "router": "0x8e9371550fC397144D198A7C159C2DA5D143239E",
-    "executor": "0xE3725CBdC1B4BE58ed9b49E6f863cDDE654bbfce",
-    "yieldRegistry": "0x80d3A6AD26dBE4b33bC6fe4abD38b1E1D78cBd14",
+    "executor": "0x35477567b09f760C82981612379011edea540451",
+    "yieldRegistry": "0x37Bd15E1Df1178b07Ca5Eb223f63d5b51DCecD5d",
     "yieldView": "0xC8EEBa84f9C74B2D879dFaEdb02a0a523aA02657",
     "usdt": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
     "feed.USDT/USD": "0x1F720990C22C7496EDa9156eAD91Ca334eF097dB",
