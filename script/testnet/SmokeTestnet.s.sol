@@ -85,10 +85,9 @@ contract SmokeTestnet is Script {
         vm.startBroadcast();
         _strategy(env, tokens);
         if (vm.envOr("TESTNET_SMOKE_PREPARE", false)) {
-            require(env.registry.activeVersion(env.strategyId) == 0, "smoke prepare: version already active");
             vm.stopBroadcast();
             console.log(
-                "SMOKE_PENDING strategy; wait 24h, refresh prices, rerun with TESTNET_SMOKE_STRATEGY_ID",
+                "SMOKE_PENDING strategy (first version is effective at once, #58); rerun with TESTNET_SMOKE_STRATEGY_ID",
                 env.strategyId
             );
             return;

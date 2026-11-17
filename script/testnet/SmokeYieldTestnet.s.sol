@@ -79,8 +79,10 @@ contract SmokeYieldTestnet is Script {
             ? _strategy(executor.registry(), specs, executor.numeraire(), smokeOwner)
             : 0;
         if (preparePhase) {
-            require(executor.registry().activeVersion(strategy) == 0, "yield prepare: version already active");
-            console.log("YIELD_PENDING strategy; wait 24h and rerun with TESTNET_YIELD_STRATEGY_ID", strategy);
+            console.log(
+                "YIELD_PENDING strategy (first version is effective at once, #58); rerun with TESTNET_YIELD_STRATEGY_ID",
+                strategy
+            );
             return;
         }
         if (supplyPhase) {

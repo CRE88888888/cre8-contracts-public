@@ -9,7 +9,7 @@
 - `settingsHash` 是規範化、完整鏈下設定（各資產的策略與參數、基金規則）的承諾；backend／app 應共同訂定編碼並在送交易前核對內容。鏈上將它與資產、權重、排程、費率一起保存：
   `configHash = keccak256(abi.encode(assets,weightsBps,scheduleHash,settingsHash,performanceFeeBps))`。
 - `Version` 原先四欄不變，依序追加 `bytes32 settingsHash,uint16 performanceFeeBps,bytes32 configHash`。需要同步更新回傳 tuple 的 ABI 解碼。
-- **第一版也要等 24 小時。** `activeAt=0` 表示選擇合約允許的最早時間；其他值必須 ≥ `block.timestamp+86400`。owner 和創作者都不能繞過。
+- **改版要等 24 小時；第一版立即生效（#58）。** 已有生效中版本時，`activeAt=0` 表示選擇合約允許的最早時間，其他值必須 ≥ `block.timestamp+86400`，owner 和創作者都不能繞過。還沒有任何生效中版本時（新基金的第一版，或第一版在生效前取消後重發），不可能有已加入的人需要通知，最早時間就是 `block.timestamp`：`activeAt=0` 在同一筆交易生效、可立即 enroll；也可指定未來時間（不得早於當下）。
 - 唯一例外：與上一個**已生效版本**相比，資產（包含順序）、權重、scheduleHash、settingsHash 全相同，且績效費嚴格更低，允許 `activeAt=block.timestamp`。相同費率、調高或混合變更仍等 24 小時。績效費限制 500–2000 bps。
 - 所有發版（含費率調降與已取消的發版）都占用 7 天間隔；取消不重設時間。這是對「兩次發版至少 7 天」的保守解讀。
 - 同時只有一個尚未生效版本。`cancelVersion(id)` 只准 provider／owner 在 `timestamp < activeAt` 取消；恰好生效時不能取消。編號 append-only，不因取消而重用；`versionCount` 包含取消紀錄，`cancelledVersion(id,n)` 可查。
@@ -50,7 +50,7 @@ ledger 應讀 `version(id,0).performanceFeeBps` 及 `configHash`，不可另開�
 - #54 審查回歸：`FOUNDRY_PROFILE=ci forge test --match-path test/atp/AtpHistoricalAssetLimit.t.sol -vv`。128 資產聯集（含 USDT）、所有非 USDT 歷史資產皆有持倉，以正式 oracle router／TWAP 合約及模擬池、冷 storage 量測單步買入 **7,105,243 gas**，斷言 <12,000,000；不含 fixture 部署及 Kernel UserOp。原審查的兩輪各 90 個耗盡 `balanceOf` gas 的資產，第二輪聯集 183 個在發版時被拒絕；回到乾淨版本後單步買入 **10,259,895 gas**，在 16,777,216 預算內完成。另以呼叫次數驗證零持倉歷史資產不讀價格。
 - `scripts/rehearse-mainnet-fork.sh`、`scripts/drill-ops-fork.sh` 只接受 anvil。版本 fixture 在凍結價格快照的一天前發布，再推進 24 小時回到原價格快照；此期間沒有 quote／swap，不改 oracle／feed。這驗證真實通知期，同時不把 fork 上不會更新的 Chainlink 價格推到過期。只能在自己埠使用。
 - chain 97 的 `scripts/testnet/deploy-97.sh fork` 驗證固定延遲與費率上下限，manifest 追加 `versioning` 介面資訊。部署本身不建立策略，因此不需跳過通知期。
-- `SmokeTestnet` 以 `TESTNET_SMOKE_PREPARE=true` 首次執行發布策略，印 `SMOKE_PENDING`，不執行買賣。等待 ≥24 小時、刷新模擬價格與池子近期 observation，再以 `TESTNET_SMOKE_STRATEGY_ID=<id>` 重跑完成交易；`fork-e2e.sh` 已同步為兩階段流程，在前一天準備兩份策略，回到原價格快照後進行原本的暖機與 smoke。沒有即時生效捷徑。
+- `SmokeTestnet` 以 `TESTNET_SMOKE_PREPARE=true` 首次執行發布策略，印 `SMOKE_PENDING`，不執行買賣，再以 `TESTNET_SMOKE_STRATEGY_ID=<id>` 重跑完成交易。#58 起第一版立即生效，不必等 24 小時；兩階段流程保留，`fork-e2e.sh` 仍在前一天準備兩份策略，結果相同。不帶 `TESTNET_SMOKE_PREPARE` 時一次跑完。
 - `SmokeYieldTestnet` 以 `TESTNET_YIELD_PHASE=prepare` 首輪印 `YIELD_PENDING`；待生效後用 `TESTNET_YIELD_STRATEGY_ID=<id>` 重跑 supply，再照原流程進行 exit。兩支腳本都核對既有策略的資產與權重。
 - `kernel-smoke.ts` 已確認是本機 anvil 才操作時間 fixture，並由 owner 的 sudo UserOp 呼叫三參數 enroll；沒有 operator 代替用戶同意。
 

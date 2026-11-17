@@ -4,7 +4,7 @@
 
 ## 帳戶與本金
 
-1. 創作者透過 registry 的 `publishSettingsVersion` 發布設定，`performanceFeeBps` 必須是 500–2000 bps（5%–20%），且包含在整份 `configHash`。ledger 直接讀 `version(strategyId,0)`，遵守 P11 的 24 小時通知期、7 天發版間隔與取消規則；只有其餘設定完全相同的純降費可立即生效。不需在 ledger 登記費率或同步資產，也沒有即時覆寫入口。
+1. 創作者透過 registry 的 `publishSettingsVersion` 發布設定，`performanceFeeBps` 必須是 500–2000 bps（5%–20%），且包含在整份 `configHash`。ledger 直接讀 `version(strategyId,0)`，遵守 P11 的改版 24 小時通知期（第一版立即生效，#58）、7 天發版間隔與取消規則；只有其餘設定完全相同的純降費可立即生效。不需在 ledger 登記費率或同步資產，也沒有即時覆寫入口。
 2. 基金帳戶透過主人 sudo UserOp 呼叫 `start()`；必須已 enroll 且策略已有生效版本。初始本金為 0，既有餘額不補登本金。重複 start 不會洗掉有效本金。
 3. 現金帳戶 approve 剛好的 USDT，再 `deposit(fundAccount, amount)`。ledger 核對實際入帳與付款方實際扣款相等後加本金。任意外部付款人可存入 ACTIVE 帳戶；禁止基金帳戶自己對自己存入，避免同一筆餘額反覆製造本金。前端的測試幣 welcome／每日額度也必須經這條路；直接打進基金不會算本金。
 4. 原樣 ERC20 轉入不增加本金；在服務估值集合中的資產因此算獲利。合約無法攔截或對外部 ERC20 的直接轉帳自行發事件；後端需索引原 ERC20 `Transfer`。不在策略歷史資產集合的代幣，以及未經 executor 建立的外送生息收據，不屬於此服務的估值集合（與既有 yield registry 的 tracked claim 語意一致）。它們不會補本金；主人可直接原樣領回。

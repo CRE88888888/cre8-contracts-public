@@ -230,7 +230,8 @@ contract AtpRegistry {
         );
     }
 
-    /// @notice Publish the complete settings commitment. Only a provable fee-only decrease can be immediate.
+    /// @notice Publish the complete settings commitment. A strategy's first effective version and a provable
+    /// fee-only decrease can be immediate; every other change waits VERSION_DELAY.
     function publishSettingsVersion(
         uint256 id,
         address[] calldata assets,
@@ -282,7 +283,9 @@ contract AtpRegistry {
                         abi.encode(prior.assets, prior.weightsBps, prior.scheduleHash, prior.settingsHash)
                     );
         }
-        uint256 earliest = block.timestamp + (feeOnlyDecrease ? 0 : VERSION_DELAY);
+        // No effective version means nobody can be enrolled yet, so there is no one to notify: the first
+        // version (or a republish after cancelling it) may take effect at once. Changes keep VERSION_DELAY.
+        uint256 earliest = current == 0 || feeOnlyDecrease ? block.timestamp : block.timestamp + VERSION_DELAY;
         if (earliest > type(uint64).max) revert ActivationTooSoon(earliest);
         if (activeAt == 0) activeAt = uint64(earliest);
         if (activeAt < earliest) revert ActivationTooSoon(earliest);

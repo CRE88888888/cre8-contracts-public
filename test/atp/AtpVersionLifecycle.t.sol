@@ -23,14 +23,66 @@ contract AtpVersionLifecycleTest is Test {
         id = registry.registerStrategy("P11", "version lifecycle", true);
     }
 
-    function test_firstPublicationCannotExecuteBefore24Hours() public {
+    function test_firstPublicationIsExecutableAtOnce() public {
         address[] memory assets = new address[](1);
         assets[0] = ASSET;
         uint16[] memory weights = new uint16[](1);
         weights[0] = 10_000;
         registry.publishVersion(id, assets, weights, bytes32(0), 0);
-        assertEq(registry.activeVersion(id), 0, "a publication must wait 24 hours");
-        assertFalse(registry.isAssetAllowed(id, 1, ASSET), "future version is not executable");
+        assertEq(registry.activeVersion(id), 1, "no effective version, so no notice period (#58)");
+        assertTrue(registry.isAssetAllowed(id, 1, ASSET));
+    }
+
+    // ---- #58: no effective version means no one to notify, so the first version takes effect at once ----
+
+    function test_firstVersionZeroActiveAtIsImmediate_andEnrollable() public {
+        uint256 t = vm.getBlockTimestamp();
+        assertEq(_publish(1_000, 0), 1);
+        assertEq(registry.version(id, 1).activeAt, t, "first version: earliest is now");
+        assertEq(registry.activeVersion(id), 1);
+        assertEq(registry.pendingVersion(id), 0);
+        assertTrue(registry.isAssetAllowed(id, 1, ASSET));
+        assertTrue(registry.isAssetAllowed(id, 0, ASSET));
+        registry.enroll(address(this), id, 1);
+        assertEq(registry.enrollments(address(this)).version, 1);
+    }
+
+    function test_firstVersionCannotBeBackdated_butMayBeScheduled() public {
+        vm.warp(1_700_000_000); // activeAt = t - 1 must be a real past time, not the zero "earliest" sentinel
+        uint256 t = vm.getBlockTimestamp();
+        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.ActivationTooSoon.selector, t));
+        _publish(1_000, uint64(t - 1));
+        _publish(1_000, uint64(t + 1 hours));
+        assertEq(registry.activeVersion(id), 0, "explicit future activeAt is honoured");
+        assertEq(registry.pendingVersion(id), 1);
+        vm.warp(t + 1 hours);
+        assertEq(registry.activeVersion(id), 1);
+    }
+
+    function test_firstVersionRepublishAfterCancelIsStillImmediate() public {
+        uint256 t = vm.getBlockTimestamp();
+        _publish(1_000, uint64(t + 1 days));
+        registry.cancelVersion(id);
+        vm.warp(t + 7 days);
+        assertEq(_publish(900, 0), 2);
+        assertEq(registry.activeVersion(id), 2, "still no effective version, so no notice period");
+        assertEq(registry.version(id, 2).activeAt, t + 7 days);
+        registry.enroll(address(this), id, 2);
+    }
+
+    function test_changeAfterImmediateFirstVersionStillWaits24Hours() public {
+        _publish(1_000, 0);
+        registry.enroll(address(this), id, 1);
+        vm.warp(vm.getBlockTimestamp() + 7 days);
+        uint256 t = vm.getBlockTimestamp();
+        vm.expectRevert(abi.encodeWithSelector(AtpRegistry.ActivationTooSoon.selector, t + 1 days));
+        _publish(1_001, uint64(t + 1 days - 1));
+        _publish(1_001, 0);
+        assertEq(registry.version(id, 2).activeAt, t + 1 days);
+        assertEq(registry.activeVersion(id), 1, "a change keeps the 24-hour notice");
+        assertEq(registry.pendingVersion(id), 2);
+        vm.warp(t + 1 days);
+        assertEq(registry.activeVersion(id), 2);
     }
 
     function _publish(uint16 fee, uint64 at) internal returns (uint16) {
@@ -66,12 +118,14 @@ contract AtpVersionLifecycleTest is Test {
     }
 
     function test_ownerCannotShortenNotice_andZeroMeansEarliest() public {
+        _first();
+        vm.warp(vm.getBlockTimestamp() + 6 days);
         vm.expectRevert(
             abi.encodeWithSelector(AtpRegistry.ActivationTooSoon.selector, vm.getBlockTimestamp() + 1 days)
         );
         _publish(1_000, uint64(vm.getBlockTimestamp() + 1 days - 1));
         _publish(1_000, 0);
-        assertEq(registry.version(id, 1).activeAt, vm.getBlockTimestamp() + 1 days);
+        assertEq(registry.version(id, 2).activeAt, vm.getBlockTimestamp() + 1 days);
     }
 
     function test_pendingCannotBeReplaced_evenAfter7Days() public {
@@ -83,7 +137,7 @@ contract AtpVersionLifecycleTest is Test {
 
     function test_cancelPreservesHistoryAndPublicationClock() public {
         uint256 t = vm.getBlockTimestamp();
-        _publish(1_000, 0);
+        _publish(1_000, uint64(t + 1 days));
         registry.cancelVersion(id);
         assertTrue(registry.cancelledVersion(id, 1));
         assertEq(registry.versionCount(id), 1);
@@ -99,7 +153,7 @@ contract AtpVersionLifecycleTest is Test {
     }
 
     function test_cancelOnlyBeforeBoundary_andAuthorized() public {
-        _publish(1_000, 0);
+        _publish(1_000, uint64(vm.getBlockTimestamp() + 1 days));
         vm.prank(address(0xBAD));
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.NotStrategyProvider.selector, id));
         registry.cancelVersion(id);
@@ -188,7 +242,7 @@ contract AtpVersionLifecycleTest is Test {
     }
 
     function test_zeroVersionAndEnrollmentBeforeActivationRejected() public {
-        _publish(1_000, 0);
+        _publish(1_000, uint64(vm.getBlockTimestamp() + 1 days));
         vm.expectRevert(abi.encodeWithSelector(AtpRegistry.VersionNotPublished.selector, id));
         registry.enroll(address(this), id, 1);
         vm.warp(vm.getBlockTimestamp() + 1 days);

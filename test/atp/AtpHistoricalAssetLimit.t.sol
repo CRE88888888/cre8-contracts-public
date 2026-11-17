@@ -53,16 +53,15 @@ contract AtpHistoricalAssetLimitTest is Test {
         assertEq(registry.historicalAssets(id).length, 0);
 
         _publish(id, _assets(0, 128), false);
-        assertEq(registry.historicalAssets(id).length, 0, "pending assets are not admitted");
-        vm.warp(vm.getBlockTimestamp() + 1 days);
-        assertEq(registry.historicalAssets(id).length, 128);
+        assertEq(registry.historicalAssets(id).length, 128, "first version is effective at once (#58)");
     }
 
     function test_maturedUnmaterializedHistoryCountsAt128_and129RevertsAtomically() public {
         address[] memory first = _assets(0, 127);
         _publish(id, first, false);
         vm.warp(vm.getBlockTimestamp() + 7 days);
-        // No enrollment or other state-changing activation has materialized the first version.
+        // The first version materializes at publication (#58); the second matures below without being
+        // materialized by any enrollment or other state-changing activation.
         address[] memory next = _assets(126, 2);
         _publish(id, next, true);
         assertEq(registry.historicalAssets(id).length, 127);

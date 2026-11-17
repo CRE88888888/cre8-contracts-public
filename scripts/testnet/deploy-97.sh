@@ -217,6 +217,7 @@ manifest = {
     "versioning": {
         "enrollAbi": "enroll(address,uint256,uint16)",
         "publicationDelaySeconds": 86400,
+        "firstVersionDelaySeconds": 0,
         "publicationIntervalSeconds": 604800,
         "consent": "account sudo enroll, or account approveEnrollment(uint256,uint16) then operator first enroll",
         "settingsAbi": "publishSettingsVersion(uint256,address[],uint16[],bytes32,bytes32,uint16,uint64)",
