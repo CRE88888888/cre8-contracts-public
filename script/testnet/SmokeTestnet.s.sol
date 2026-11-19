@@ -34,9 +34,9 @@ contract SmokeAccount {
 /// @title SmokeTestnet
 /// @notice Chain 97 acceptance run for cre8-contracts#30, after `DeployTestnet` and the 30-minute TWAP
 /// warm-up. Since cre8-contracts#45 (no asset-count ceiling) it uses one strategy whose version holds USDT and
-/// all 92 assets of cre8-contracts#39: one fresh contract account gets the faucet's welcome grant (sent by
+/// all 105 assets (cre8-contracts#39, #61): one fresh contract account gets the faucet's welcome grant (sent by
 /// OPERATOR, the faucet; cre8-contracts#47 removed the self-service claim), enrolls,
-/// buys 100 USDT worth of every asset through the executor and the Pancake Universal Router, sells everything
+/// buys 90 USDT worth of every asset through the executor and the Pancake Universal Router, sells everything
 /// back and withdraws its USDT. Buys and sales go in batches of `SMOKE_STEPS_PER_BATCH` steps (default 16), the
 /// way the backend splits a large rebalance. The executor enforces the oracle floor (and, since #24,
 /// `amountOutMin`) on every step; this script also prints each fill against its floor, and `SMOKE_TX <label>
@@ -46,8 +46,9 @@ contract SmokeAccount {
 /// @dev `TESTNET_EXECUTOR` locates everything else: registry, router and USDT from the executor, the tokens
 /// from `TestnetBook` (CREATE2 addresses of DEPLOYER).
 contract SmokeTestnet is Script {
-    uint256 internal constant TRADE_USDT = 100e18;
-    /// @dev The faucet's welcome grant (`TestnetUSDT.WELCOME_AMOUNT`). 92 buys of 100 USDT (9,200) stay under the
+    /// @dev 90, not 100, since #61: 105 buys of 100 USDT (10,500) would exceed the welcome grant and the buy cap.
+    uint256 internal constant TRADE_USDT = 90e18;
+    /// @dev The faucet's welcome grant (`TestnetUSDT.WELCOME_AMOUNT`). 105 buys of 90 USDT (9,450) stay under the
     /// executor's buy cap, 100% of the account value per 24 hours (about 10,000 less fees and pool fees).
     uint256 internal constant CLAIM_USDT = 10_000e18;
     uint256 internal constant DEFAULT_STEPS_PER_BATCH = 16;
@@ -196,7 +197,14 @@ contract SmokeTestnet is Script {
                 bought[i] = IERC20(tokens[i]).balanceOf(address(env.account)) - before[k];
                 require(bought[i] >= floors[k], string.concat(specs[i].symbol, ": buy below floor"));
                 console.log(
-                    string.concat("SMOKE ", specs[i].symbol, " buy 100 USDT -> ", vm.toString(bought[i])),
+                    string.concat(
+                        "SMOKE ",
+                        specs[i].symbol,
+                        " buy ",
+                        vm.toString(TRADE_USDT / 1e18),
+                        " USDT -> ",
+                        vm.toString(bought[i])
+                    ),
                     string.concat("(floor ", vm.toString(floors[k]), ")")
                 );
             }
@@ -237,7 +245,7 @@ contract SmokeTestnet is Script {
         });
     }
 
-    /// @dev One strategy over USDT + every asset (93 with the 92 of #39), equal weights with the remainder on USDT.
+    /// @dev One strategy over USDT + every asset (106 with the 105 of #39 and #61), equal weights with the remainder on USDT.
     function _strategy(Env memory env, address[] memory tokens) internal {
         uint256 count = tokens.length;
         address[] memory assets = new address[](count + 1);

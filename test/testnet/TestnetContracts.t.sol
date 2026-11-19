@@ -393,7 +393,9 @@ contract TestnetContractsTest is Test {
     function test_specs_testnetExtension() public pure {
         TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
         assertEq(t.length, TestnetAssets.COUNT);
-        assertEq(TestnetAssets.COUNT, 38 + 40 + 14, "launch + showcase-fund tokens + crypto");
+        assertEq(
+            TestnetAssets.COUNT, 38 + 40 + 14 + 13, "launch + showcase-fund tokens + crypto + #61 lineup"
+        );
         uint256 bStocks;
         for (uint256 i; i < t.length; ++i) {
             bytes memory sym = bytes(t[i].symbol);
@@ -417,18 +419,20 @@ contract TestnetContractsTest is Test {
             assertEq(t[i].maxFeedAge, 0, t[i].symbol);
             assertTrue(t[i].decimals == 18 || t[i].decimals == 9, t[i].symbol); // TONCOIN: 9, as on BSC
         }
-        assertEq(bStocks, 24 + 20, "bStock mocks: 24 launch + 20 showcase-fund tokens");
+        assertEq(bStocks, 24 + 20 + 13, "bStock mocks: 24 launch + 20 showcase-fund tokens + 13 lineup (#61)");
     }
 
     /// @dev #39: the testnet-only entries are exactly the issue's list, in this order: the 40 other tokens of the
-    /// 16 showcase funds (ASCII order), then the 14 crypto. Nothing else rides along.
+    /// 16 showcase funds (ASCII order), then the 14 crypto; then #61's 13 launch-lineup bStocks. Nothing else
+    /// rides along.
     function test_specs_testnetExtension_exactList() public pure {
         string memory want = "ABBVon ALABB AMATB AMDB APHon APLDon AVGOB AXPon BEB BLKon CBRSB CEGon CIENon COHRB "
             "CORZon CRDOB CRMB CRWVB CVXon GEVB GLDon GOOGon GPROB IEFon IRENB IVVon KOon LLYB MAon NBISB NEMon ORCLB "
             "PANWon PYPLB SHAZB STXB UBERon VRTon VSTB Von "
-            "ADA LINK BCH NEAR UNI ZEC TONCOIN DOT SHIB PEPE AAVE Cake FIL ATOM ";
+            "ADA LINK BCH NEAR UNI ZEC TONCOIN DOT SHIB PEPE AAVE Cake FIL ATOM "
+            "AMCB ANTB BMNRB BNCB COINB CYPHB GMEB MRVLB PDDB PENGB RDDTB SOXLB TQQQB ";
         TestnetAssets.AssetSpec[] memory t = TestnetAssets.specs();
-        assertEq(t.length - TestnetAssets.LAUNCH_COUNT, 40 + 14, "testnet-only count");
+        assertEq(t.length - TestnetAssets.LAUNCH_COUNT, 40 + 14 + 13, "testnet-only count");
         string memory got;
         for (uint256 i = TestnetAssets.LAUNCH_COUNT; i < t.length; ++i) {
             got = string.concat(got, t[i].symbol, " ");

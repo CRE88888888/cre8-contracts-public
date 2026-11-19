@@ -100,7 +100,7 @@ fork 不在 8547 時加 `FORK_RPC=http://127.0.0.1:<埠>`；在還沒合併的�
 
 1. 跑兩次 `deploy-97.sh fork`。第二次必須沒有交易，manifest 也不能變。
 2. 把 fork 的時間往前推 30 分鐘做 TWAP 暖機，再由 keeper 推一次價。
-3. `SmokeTestnet`（#45 起）：一個策略版本包含 USDT＋全部 92 個資產（共 93 個），一個新帳戶由 operator 發迎新 10,000 USDT（`welcomeFor`，#47）、enroll，每個資產經 executor 用 100 USDT 買入（合計 9,200，在 executor 每 24 小時「帳戶價值 100%」的買入上限內）、全部賣回，最後把 USDT 領回 EOA。買和賣都照後端的做法分批，每批最多 16 步（`SMOKE_STEPS_PER_BATCH` 可改），每一步都要過 oracle 地板。最後印出發版本、每一批與領出的 gas（見第 8 節）。
+3. `SmokeTestnet`（#45 起）：一個策略版本包含 USDT＋全部 92 個資產（共 93 個），一個新帳戶由 operator 發迎新 10,000 USDT（`welcomeFor`，#47）、enroll，每個資產經 executor 用 100 USDT 買入（合計 9,200，在 executor 每 24 小時「帳戶價值 100%」的買入上限內；#61 起 105 個資產改為每個 90 USDT，合計 9,450）、全部賣回，最後把 USDT 領回 EOA。買和賣都照後端的做法分批，每批最多 16 步（`SMOKE_STEPS_PER_BATCH` 可改），每一步都要過 oracle 地板。最後印出發版本、每一批與領出的 gas（見第 8 節）。
 4. `PokePoolsTestnet` 兩輪（#39）：keeper 經 Pancake V3 SwapRouter（和 backend 價格 keeper 同一個）在每個池子做一筆會動 tick 的 swap（1,000 USDT 等值，約 4 bps）。第一輪順便 mint 庫存、approve；第二輪把時間往後推 1 小時再做，就是「每小時每池一筆」的穩定成本，腳本印出總 gas（見第 3 節）。之後再推一次價。
 5. `kernel-smoke`：
    - 在本機起 alto（埠 3047），建立 Kernel v3.3 帳戶；
@@ -209,3 +209,20 @@ scripts/testnet/deploy-97.sh public     # 預設 RPC: data-seed-prebsc-1-s1；�
 設計、ABI／事件、風控／退出、主網准入界線與本機驗收方法見 [生息手冊](yield-97.zh-TW.md)。C3 最新表格實際為 30 列（表頭稱 32），全部 20 個資產存在；依逐列內容部署，不補未知市場。
 
 2026-11-16 審查修正後完整 fork 驗收（腳本 `84e70fd`）：部署 1,916 筆／2,105,225,790 gas，2／11 tBNB 各自冪等重跑 0 交易且 manifest／餘額不變；92 資產買賣、30 市場完整退出及 Kernel session＋paymaster 存領全過。按 deployer 1.343 tBNB，含既有 0.98 分發／存款，0.1／0.2 gwei 需求為 1.190522579／1.401045158；詳細 ABI、地址、gas、餘裕與先失敗證據見生息手冊「審查修正後驗收」，不能沿用 §3 的歷史數字。
+
+## 11. 追加 13 個首發基金模擬資產（#61，只在 fork 演練，公開鏈尚未廣播）
+
+首發 21 檔基金（docs `research/2026-11-20-launch-lineup`）比現有清單多 13 個 bStock：AMCB、ANTB、BMNRB、BNCB、COINB、CYPHB、GMEB、MRVLB、PDDB、PENGB、RDDTB、SOXLB、TQQQB。`TestnetAssets` 加在第 92–104 筆（共 105 個），規則同 #39 的測試網專用資產：`maxSlippageBps` 300、沒有 secondary。symbol、名稱、decimals、`uiMultiplier` 讀自主網區塊 134535867（只讀），與 CSV 相符；起始價照 CSV（幣安現貨 × `uiMultiplier`）；**ANTB 沒有報價，用純測試常數 300 USDT**；fee tier 照 #39 規則（MRVLB 主網 10000 池有 5,403 USDT，其他 2500）。
+
+做法沿用 `DeployTestnet`／`deploy-97.sh` 的重跑：已完成的 92 個市場不送交易，只補新的。差別在 #47 之後 deployer 已不是 USDT minter，新池的 USDT 那邊沒辦法鑄，所以加了 `_lendUsdtMinter`：有未完成市場且 USDT 已移交時，由 owner 暫時把 deployer 設為 USDT minter，在移交那一輪（第 4 步）收回，`_verify` 的「沒有殘留 minter」照舊檢查。`KEEPER_USDT_STOCK` 隨池數改為 2,200,000（20 輪 × 1,000 × 105）；只在 keeper 低於一半時補。`SmokeTestnet` 每個資產改買 90 USDT（105 × 100 會超過迎新 10,000 與買入上限）。
+
+`deploy-97.sh` 新增 `TESTNET_MANIFEST`，只接受 `deployments/testnet-97.json` 或 `deployments/*draft*.json`，演練寫 `deployments/testnet-97-draft-61.json`，不覆蓋正式 manifest：
+
+```bash
+FORK_RPC=http://127.0.0.1:8547 TESTNET_ALLOW_UNMERGED=1 TESTNET_MANIFEST=deployments/testnet-97-draft-61.json \
+  scripts/testnet/deploy-97.sh fork
+```
+
+fork 區塊 143672040（2026-11-20）實測：三輪、**236 筆交易、284,613,580 gas**。deployer 221 筆（13 個代幣、13 個池子、流動性與 poke、移交、keeper 補 USDT 庫存），owner 15 筆（借出／收回 USDT minter、13 個 `setOracle`）。gas price 0.1 gwei 時 gas 約 0.0285 tBNB（owner 0.0017、deployer 0.0268）；另外 `_fundRoles` 會把 keeper 從 0.061 補到 0.3 tBNB（0.2388），所以 **deployer 要約 0.27 tBNB**，fork 當時公開鏈上只有 0.0445。重跑「No transactions to broadcast」、manifest 不變；既有 92 個資產、合約、角色、30 個生息市場的地址全部相同；16 檔基金（策略 1–16 的版本數、生效版本、費率、設定）與 92 個 oracle／secondary 綁定在演練前後相同。
+
+**fork 驗收時發現（與 #61 無關）：** 公開鏈 keeper 約 47 小時沒有推價、也沒有調池（feed `updatedAt`、池子最後 observation 都約 170,000 秒前），既有 92 個 oracle 目前全部 `TwapUnavailable`；回放價格比固定基準高約 0.4%。fork 上先照 keeper 的做法 `PokePoolsTestnet` 調池、把 12 個 feed 以公開鏈最後的值重推，`SmokeTestnet` 105 個資產全部經 executor 買入、賣回（來回成本 68.26 USDT）。用 `PushFeedsTestnet` 推回固定基準價會和回放後的池價差 0.4%，tier S 的 USDC／DAI 會被地板擋下。

@@ -76,8 +76,9 @@ interface ITestnetPositionNft {
 
 /// @title DeployTestnet
 /// @notice BSC TESTNET (chain 97) ONLY (cre8-contracts#30). Deploys the whole CRE8 stack against mock assets:
-/// - testnet USDT (numeraire, capped faucet) and 92 mock assets (`TestnetAssets`: the 38 launch assets and,
-///   testnet only, the other showcase-fund tokens and crypto of cre8-contracts#39);
+/// - testnet USDT (numeraire, capped faucet) and 105 mock assets (`TestnetAssets`: the 38 launch assets and,
+///   testnet only, the other showcase-fund tokens and crypto of cre8-contracts#39 and the launch-lineup bStocks
+///   of #61);
 /// - one Pancake V3 pool per asset against USDT, full-range liquidity, observation room for the 30-minute TWAP;
 /// - the registry, oracle router and executor with `DeployAtpMainnet`'s parameters;
 /// - mock USD push feeds as the secondary source of the same 11 assets as mainnet;
@@ -145,8 +146,10 @@ contract DeployTestnet is YieldViewPin {
     /// @dev Per recipient per 24 hours, the parameter table's daily claim (cre8-contracts#47).
     uint256 internal constant FAUCET_DAILY_LIMIT = 1_000e18;
     /// @dev KEEPER's USDT stock, minted once at the hand-over (KEEPER is no USDT minter, cre8-contracts#47):
-    /// `PokePoolsTestnet` keeps 20 pokes of 1,000 USDT for each of the 92 pools (1.84M); the rest is headroom.
-    uint256 internal constant KEEPER_USDT_STOCK = 2_000_000e18;
+    /// `PokePoolsTestnet` keeps 20 pokes of 1,000 USDT for each of the 105 pools (2.1M, #61; 2M for the 92 of #39);
+    /// the rest is headroom. The hand-over tops KEEPER up only below half of this, so a chain that already holds
+    /// the #39 stock is not topped up by the raise.
+    uint256 internal constant KEEPER_USDT_STOCK = 2_200_000e18;
     /// @dev A pool's price may sit at most this far from its spec price (cre8-contracts#47): anyone can create
     /// the pool first, at any price, from the public CREATE2 addresses.
     uint256 internal constant MAX_POOL_PRICE_DEVIATION_BPS = 100;
@@ -209,6 +212,9 @@ contract DeployTestnet is YieldViewPin {
         vm.startBroadcast(TestnetBook.DEPLOYER);
         _gasPolicy();
         Core memory core = _core();
+        vm.stopBroadcast();
+        _lendUsdtMinter(core, specs);
+        vm.startBroadcast(TestnetBook.DEPLOYER);
         uint256 started;
         uint256 pending;
         for (uint256 i; i < specs.length; ++i) {
@@ -263,10 +269,17 @@ contract DeployTestnet is YieldViewPin {
         if (!_poolsTouched) _handOverMarkets(core, specs, out);
         vm.stopBroadcast();
 
-        // 4. OWNER accepts.
+        // 4. OWNER accepts, and takes back the USDT mint `_lendUsdtMinter` lent for new markets (#61) once no
+        // pool needs DEPLOYER's mint any more.
         vm.startBroadcast(TestnetBook.OWNER);
         if (core.registry.pendingOwner() == TestnetBook.OWNER) core.registry.acceptOwnership();
         if (core.router.pendingOwner() == TestnetBook.OWNER) core.router.acceptOwnership();
+        if (
+            !_poolsTouched && core.usdt.owner() == TestnetBook.OWNER
+                && core.usdt.isMinter(TestnetBook.DEPLOYER)
+        ) {
+            core.usdt.setMinter(TestnetBook.DEPLOYER, false);
+        }
         vm.stopBroadcast();
 
         if (_poolsTouched) {
@@ -285,6 +298,23 @@ contract DeployTestnet is YieldViewPin {
         if (key == 0) return;
         require(vm.addr(key) == expected, string.concat(name, " does not derive the expected address"));
         vm.rememberKey(key);
+    }
+
+    /// @dev Markets added after the hand-over (cre8-contracts#61): DEPLOYER is no USDT minter any more (#47) but
+    /// still seeds each new pool's USDT side, so OWNER, which owns USDT then, makes it a minter again for the runs
+    /// that build them. Step 4 revokes it in the run that hands the new tokens and LP NFTs over, so `_verify`'s
+    /// "no minter left" holds again. On the first deployment DEPLOYER owns USDT and this does nothing.
+    function _lendUsdtMinter(Core memory core, TestnetAssets.AssetSpec[] memory specs) internal {
+        address deployer = TestnetBook.DEPLOYER;
+        if (core.usdt.owner() == deployer || core.usdt.isMinter(deployer)) return;
+        for (uint256 i; i < specs.length; ++i) {
+            if (!_marketDone(core, specs[i])) {
+                vm.startBroadcast(core.usdt.owner());
+                core.usdt.setMinter(deployer, true);
+                vm.stopBroadcast();
+                return;
+            }
+        }
     }
 
     // ---------------------------------------------------------------- GasPolicy

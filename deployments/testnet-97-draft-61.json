@@ -1,0 +1,989 @@
+{
+  "chainId": 97,
+  "mode": "fork",
+  "note": "fork = verified on a local anvil fork of chain 97; the public deployment lands on the same CREATE2 addresses",
+  "verifiedAtBlock": 143672583,
+  "generatedAt": "2026-11-19T17:01:11Z",
+  "gitCommit": "6e924064ccc6959286082fbf020911eea0fea4ce",
+  "versioning": {
+    "enrollAbi": "enroll(address,uint256,uint16)",
+    "publicationDelaySeconds": 86400,
+    "firstVersionDelaySeconds": 0,
+    "publicationIntervalSeconds": 604800,
+    "consent": "account sudo enroll, or account approveEnrollment(uint256,uint16) then operator first enroll",
+    "settingsAbi": "publishSettingsVersion(uint256,address[],uint16[],bytes32,bytes32,uint16,uint64)",
+    "performanceFeeBpsRange": [
+      500,
+      2000
+    ]
+  },
+  "roles": {
+    "deployer": "0x55662B4183fcA1230694D5D57F56E4F2E0e3008a",
+    "owner": "0x09BBB9A06a0C49Ad24bddB18808944041783054e",
+    "operator": "0xd8CE3295e05cA138e0d0d7214C4FD630c43F9d7F",
+    "keeper": "0xa38dDFB9FDF0043Cf61B00E1a8d12FA1431f92d5",
+    "paymasterSigner": "0xF5645Ff8Fa773246010F7C9DDDFF8e590e800495",
+    "feeRecipient": "0x3b5EDE5aF574e7d8f3B72143E09DC242dD1F0462",
+    "bundlerExecutor": "0xcc0ea01356d75aa5295d364344753f136b77ee28",
+    "bundlerUtility": "0x6735c14bf84c8cB0d64BF2FB51b7587AdE7b2960"
+  },
+  "contracts": {
+    "ownedDeployer": "0xC92079CCB13Ebd608D5Cd03f5e302DcDE5b37096",
+    "registry": "0x7ff384fC959bf70fF7b2f011C6A84a36244264EA",
+    "router": "0x8e9371550fC397144D198A7C159C2DA5D143239E",
+    "executor": "0xB65Ec2EC6f5aB0a345b50cAA454cf792C1EF2bB9",
+    "yieldRegistry": "0xA234531b1ace7B7106562A5554f1F8b173F7087b",
+    "yieldView": "0xC8EEBa84f9C74B2D879dFaEdb02a0a523aA02657",
+    "usdt": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+    "feed.USDT/USD": "0x1F720990C22C7496EDa9156eAD91Ca334eF097dB",
+    "paymaster": "0x797bB6961A570BD68b0550C7F0e9F16D12101b1b",
+    "gasPolicy": "0xaeFC5AbC67FfD258abD0A3E54f65E70326F84b23",
+    "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "v3Factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+    "positionManager": "0x427bF5b37357632377eCbEC9de3626C71A5396c1",
+    "universalRouter": "0x9A082015c919AD0E47861e5Db9A1c7070E81A2C7",
+    "permit2": "0x31c2F6fcFf4F8759b3Bd5Bf0e1084A055615c768"
+  },
+  "assets": {
+    "AAPLB": {
+      "token": "0xe74be2091540eBaE4A045D8313952B5Da0a4f076",
+      "pool": "0xa0eb036D24b8864F0Aa00DEb7d032E9C854EC073",
+      "oracle": "0xa807535fd1a8E26D3529A111e06F10a8634A3124"
+    },
+    "AMZNB": {
+      "token": "0x0c0013994C9927656238CBFcF0C5d15C30222df9",
+      "pool": "0x12691CdD5B83EC693D5e12c521C4C708077b4fa9",
+      "oracle": "0x58C6915993Dffe8c87835328dC197F6df89e4C33"
+    },
+    "AVAX": {
+      "token": "0x5117576756FCbAB8F96d8a4Ec8968dadeB3a9092",
+      "pool": "0xEe99edf854025113E54ED299D046cE9d9d2369C4",
+      "oracle": "0x96885F812b2CcedADa6F4d3f4eF5e9cE42C0383b",
+      "feed": "0x81fd4E18132D97763b1FC44585577c87b7F89498",
+      "secondary": "0xD512b65fe68387A3b3de8dC8c67EA21929938E75"
+    },
+    "BABAB": {
+      "token": "0x169cc77A8CEA0f375Ff20f324DCF4C5CD64DAd1e",
+      "pool": "0x4c2f742618B555B3DE7549fe49E50B73731B993B",
+      "oracle": "0x162AC642E430174cD4aA6EF8130146299D99AfA0"
+    },
+    "BTCB": {
+      "token": "0x2bacAAd9Ebc8a2827689F7ABbFFCBFcBE63c70c1",
+      "pool": "0x3711A5DF914435Fbe9021658a2DD84C4be10000C",
+      "oracle": "0xF7e753EE2201cbA25a86c023a1c330443AaE267e",
+      "feed": "0xEBBFaA1D78Dc3A3262988580cD619a8A2D511F03",
+      "secondary": "0xa9B206f0D995d95d68304DbccE204528f5B46FF0"
+    },
+    "CRCLB": {
+      "token": "0x5eb65E289a8A49d37ABA782a380aA33f886787d2",
+      "pool": "0xB09beA8719E90F94E3D270FDFb45959DC313F719",
+      "oracle": "0x31bb222DE91660e43d2487Fe9ef47a24EC74f62b"
+    },
+    "DJTB": {
+      "token": "0xBf69Ed967C8F9b3Fb7E2BB81FFe38a16c12620D9",
+      "pool": "0x8eA223e9F68E8ec76adCc44f6728Ed7444232dF5",
+      "oracle": "0xf28c49a50743e3bd6661700264871902695983b2"
+    },
+    "DOGE": {
+      "token": "0xCCF96D9561E93AF8a1c24D9b23C4091f2299dfA5",
+      "pool": "0x9C57e947DbfBF65E7305b1eE27DCBf679B23Bc8c",
+      "oracle": "0xf9943DC8F2E98140fAEd032D1138e7381FB0951c",
+      "feed": "0x5F587Fd533D76a142d5170E808cbd08AFBa711C9",
+      "secondary": "0xa61914D6B37B4f82bC8E1F1323F6041f5a097dE8"
+    },
+    "ETH": {
+      "token": "0x6A42bf6aD662Aa00De6D00A3Da448f4B20b95F3b",
+      "pool": "0xf1AbCeC90B2C74369E87FeA308e25055ddB97c15",
+      "oracle": "0x2d50Fe498458cB8a69D1f6c5Ef3DfaD8682E3AA8",
+      "feed": "0xAFE3cBbF2840C7fb3C2DF3e553Bae8A024743320",
+      "secondary": "0xbC46f270B1536b3B200F8AB06cB331bd10441556"
+    },
+    "EWYB": {
+      "token": "0x4B56EeB8188De1a1694B9079b22F18DD95e3872D",
+      "pool": "0x2F42b035EAFb2380df3760EeE2c1406D5ed8f0B8",
+      "oracle": "0x21ea1170FE37C36bB8A2e882f807Af106157dF1b"
+    },
+    "GOOGLB": {
+      "token": "0x779B65299F72836Bb2B6704Fc4Dd440BB8a44bc6",
+      "pool": "0xA382E13033D7815300d07d0d29373b03dAd7fB0d",
+      "oracle": "0x20A6F085F62F55421b1e92C43f4A37887a0803F6"
+    },
+    "HOODB": {
+      "token": "0x47bB06F7Cbf4916c2e5e7De7EA7c679d54a3e469",
+      "pool": "0x5F3daBD10643BBc91BFc552Fc57FAeE4E89783B9",
+      "oracle": "0x61CD951E4b33aB100dE50c04363301e07C46D953"
+    },
+    "INTCB": {
+      "token": "0x10245CC0e9d01055943EfEF39020cF8567171f03",
+      "pool": "0x0B7966487F05889058A2b7B7989D8BB2b6926545",
+      "oracle": "0x6D283CD885A44287D0067D2542985be0601AE248"
+    },
+    "METAB": {
+      "token": "0xD19Fd9F3702c25Bd8c71f638D90b93986aF011c2",
+      "pool": "0xd27f07698D8e84a973332DaD5D283Ba1a7332F85",
+      "oracle": "0xcE0D897c8Dd83Af2CEdE63Caf8589EC6Ac372CcE"
+    },
+    "MRNAB": {
+      "token": "0x58Aa989F7dEcEB57A9F36bb5245D070Bd3f0e357",
+      "pool": "0x0071FF90Ecc7d0713D5F6137dafF42bAa8854F98",
+      "oracle": "0xA78066a5A4AD67390F5cC42Ddbbc22d35A87E19d"
+    },
+    "MSFTB": {
+      "token": "0x728537c8B32bDDFC41fB8C82049C0157778aA584",
+      "pool": "0xF9b1FDFe7221B0063Bb2b5AA301613a9Fb0dA8Fe",
+      "oracle": "0x0fAd0037F991cf04e02dE1c6B7161135F6FE8c02"
+    },
+    "MSTRB": {
+      "token": "0x4a77Cda9a91376A6d6e0f69f807335E0dab8FC5F",
+      "pool": "0xA7526bDCB95d62FE27f3510a720aD4942558C7D1",
+      "oracle": "0x6D6944CBaC93C20305654e6e14C297616e5b5802"
+    },
+    "MUB": {
+      "token": "0x1B3b4D9d5008b048632FF4A5b7eC995e605D8a92",
+      "pool": "0xb4F96A06b412e59128Bd0E1D2df96B8c25398D6e",
+      "oracle": "0xd3E8db878c5d0c61BE76d733749B19f59E016c63"
+    },
+    "NFLXB": {
+      "token": "0x11980583D92FD8d1e1c97f29A2677bCE1Fd47d64",
+      "pool": "0x78B91e58F58cC7570b3C04fe991EDD4e92aE40cB",
+      "oracle": "0x91111495f6527a0807e8e15bDFD2C8a0058f574C"
+    },
+    "NOKB": {
+      "token": "0x9635B105852d3e38050a9A32Dbf5545719c85343",
+      "pool": "0x02aBc0302d68B138D851DDa6A0f8ca208d6c9e92",
+      "oracle": "0xA413ecC597D2d4dB7006235Fa43aA90cbe6CF6C4"
+    },
+    "NVDAB": {
+      "token": "0x5d63B93E50ef9F8851E1DE71d8255c2F0BEaB397",
+      "pool": "0xd99019faf6548F371253740bb3Da5FCbce844F01",
+      "oracle": "0xe538ca5EbFc9FacD364f2403946164D5E8CE3dC5"
+    },
+    "QQQB": {
+      "token": "0x6a8be9e4f52925A6DbA021bcB8728891a3777D3e",
+      "pool": "0x8A98CC388989d99A88FCED5eD38b2855D496C9D7",
+      "oracle": "0x4dd887CA39Ac138e737aB8d3f6deF5466416D833"
+    },
+    "SGOVon": {
+      "token": "0xdd4b48b8D50a93Daabc78E923E3364d4305d9714",
+      "pool": "0x83ec9F6Fb0b38cbF966104EC56fAe728a3531cB9",
+      "oracle": "0x73d2151A761658f22F20FcDf88be895551B5d0FD"
+    },
+    "SKHYB": {
+      "token": "0x2CA74A25cc86EF38b0D34e8e479C799695D323C5",
+      "pool": "0x7EC056fc2b4F0a2D10573c2545A409817dF08d94",
+      "oracle": "0x7AF62832C963dd1b8a2B14077f69fA7811F35add"
+    },
+    "SNDKB": {
+      "token": "0xE0135453761a1eE81Cac538581674FAB3232aFcC",
+      "pool": "0x7302CbE2304845F15501c68312b2359112d8E288",
+      "oracle": "0x032dB2ea5bC620f761bb16dc3713489e846a06e1"
+    },
+    "SOL": {
+      "token": "0x16d201D507dFD0f459662Bb2c3d061784C2264ed",
+      "pool": "0xd662EeAf195a0b271b0D243A2FD3f1c7a8893fD5",
+      "oracle": "0x8204272A1DF40381AD04226ea4b4174a2f5b7eC9",
+      "feed": "0x750f2E36e290243d710BaAc4a5A38bCB7e5D54eD",
+      "secondary": "0x47be87cAb157cb241773eFdEeb4AedB42Aae8bda"
+    },
+    "SPCXB": {
+      "token": "0xe7020b7E3adaDD3E701A704817b52917C0cC6cE2",
+      "pool": "0xd843B70146E3E9912c2b4a6277Fd43fecDDEB701",
+      "oracle": "0xfB18550828EDFf9636822065FC8FA4d503A957C7"
+    },
+    "SPYB": {
+      "token": "0xeE59f124652b4d9bEaf15d58F84e638bE541592E",
+      "pool": "0x11759131F549B5Fe53c6849A34e9e186328eCC99",
+      "oracle": "0xd98296c2215133f7fA8698F05e3b6Aa3703cD21d"
+    },
+    "TLTon": {
+      "token": "0x4082047eAccD3C993C078F2586AE5c6B92d16012",
+      "pool": "0x54a5A35452BeFff979958856518DFcAFcEab12C5",
+      "oracle": "0x8fCDD50c6b1eB21b732e2e4ECfF28F6856F3D9A1"
+    },
+    "TRX": {
+      "token": "0xE3148b7ab627C5Ea9e1D3E3808D888AC44b643d4",
+      "pool": "0x4F524B6409cdbDdf3c61EfC8a0F6aDDe342Eae42",
+      "oracle": "0x1d48c63e6a4aB82487C58bB9fE7e418131956b18",
+      "feed": "0x9d190BDa7723C04cCd74f35e4E55D155Dfe4b482",
+      "secondary": "0x256CBfA516aBe700d267bF75D62Ac0760fE6c504"
+    },
+    "TSLAB": {
+      "token": "0x587Cb8fe057344490a28390c7986E1BeFf5aD36e",
+      "pool": "0x36B230a9D9C2Bb2ffdf1Fe057cc6d45530651B90",
+      "oracle": "0xf99284cb93bE6E54ED4CB3EFd2177722973F627f"
+    },
+    "TSMB": {
+      "token": "0x5790Eb27BeCe957F098fA8191B3CC6bC4850157f",
+      "pool": "0x79ff7f705085B2f8fD3FcC28DaBb438F6512232F",
+      "oracle": "0x3e02bBC9f9E97dD30CE74576e70cD8DF2B2a9737"
+    },
+    "WBNB": {
+      "token": "0xbe3f4C2e58E74fbce8E1C5E9360D7ABe85aEC0F7",
+      "pool": "0xc8DdB20011305cDD05B991Eb3F45e42651501B17",
+      "oracle": "0x9D4ac375A7c14E272188395D29549B4C95148A99",
+      "feed": "0x2b79C52c5bAF25581A027e7E89dDc1De36D12b62",
+      "secondary": "0x5c0c4b4213641dd94071793890F8C6adaCE09A18"
+    },
+    "XAUt": {
+      "token": "0x75D1d411aFe409F8cD56446b2E9F4A0B8E8a4D4C",
+      "pool": "0xC7d10d53674E178Fb6F1488ee307d26CF93D4A20",
+      "oracle": "0x111C55b53A99440fBc47C95539B5496F496A98E1"
+    },
+    "XRP": {
+      "token": "0x37acA01e7cAe39A0ACaF2d240d5466eAeD1D7901",
+      "pool": "0x4e14904468Acc195ed192EAb3fe093Ee39506EA4",
+      "oracle": "0x1f48A5BF360068803f016a3BA074789dc9E4Bc76",
+      "feed": "0xA7E390e5602163cabE9aC19D13b7975df40f026D",
+      "secondary": "0x5682d5D7Fbb1B190a594B7423e8084Aa3960eB72"
+    },
+    "USDC": {
+      "token": "0x9Cf576bEFE4EA79B92b60c564fbC71C886bfE194",
+      "pool": "0x535B9CAdF47e9E41Dd2B17A23B7AAEAE3a9d9DAd",
+      "oracle": "0x9A1699B611BCB8455157ECeCeECDB4727d5A04fa",
+      "feed": "0xcFf097A7d3350Ac1410D469b1274635EBE1A3d62",
+      "secondary": "0x13516f83C86ede05e29E22935Ec6dFE65413ECc5"
+    },
+    "DAI": {
+      "token": "0xED2E4c1a957662C4C95A6F8cb02df9C3F119B08c",
+      "pool": "0x99558C42969d257A60507123DFad12880eA70053",
+      "oracle": "0x6Ef0415c4919e2801A5E6610B3d5CbE7A381639F",
+      "feed": "0xbf84d12dF08957b33584Ae61f4bdf3547B61A19d",
+      "secondary": "0xeb5f1463552c78368A22CAe2CD1A46264a8F65c6"
+    },
+    "LTC": {
+      "token": "0xe2bd04B678F547FF82cF630Ad502aB46720A6E6D",
+      "pool": "0xd75a7ED058108C3B0A36b2a3371A0A8aF0B7C030",
+      "oracle": "0xd1dF19e4C0Cf6A3ea5EBa755a2f39646db1d317c",
+      "feed": "0xC67306cB5E540c143B8894462BB0128baA775056",
+      "secondary": "0xA663752e055C626AAd06111205727554e510AfAE"
+    },
+    "ABBVon": {
+      "token": "0x5A5c59F17574157958badb349Bf5D28C379ddbe1",
+      "pool": "0x04C47B2eaC25C3d7C68224269cB6F50fD2c337e1",
+      "oracle": "0x89fC2C67319Ca74fbDcF33aF4468c9ac45e43fB1"
+    },
+    "ALABB": {
+      "token": "0x961D5542671d2E8D3bec7af13f19C385AAA486DF",
+      "pool": "0x8aC631470fD11268a4374581534CcCAd007cc510",
+      "oracle": "0xd43B04422a77A17F3a4B545AfA4B7c0396f9D7c4"
+    },
+    "AMATB": {
+      "token": "0xC510De52596ca9854E476306deF86a8C53545183",
+      "pool": "0x32fd592d6d0153483c0D9A7898d29cDf938E6628",
+      "oracle": "0xFae8A3568A1C61E457f273a0c436A834Bd964773"
+    },
+    "AMDB": {
+      "token": "0x8a50b09BE476697e11e826Bdc22D31ce9d7F2D5B",
+      "pool": "0xddB138f216cF286DAc74552b147dFda18124b14F",
+      "oracle": "0x11D0870C8C9230d06eb2433E4C8Bd666C5069Ad4"
+    },
+    "APHon": {
+      "token": "0xc8193CdfA83AcdeDEF06fc5D402651CE03E063d7",
+      "pool": "0x4C211e0A691C1dbacCBc9EEFaF53d50A1Be65319",
+      "oracle": "0x6E94BEeC117A9a8A3d13Ba30d5D4608880264FFB"
+    },
+    "APLDon": {
+      "token": "0xee8DE9FA8Da8c5D72EE5405ade1db95312440721",
+      "pool": "0x16ebb01Fba2132373D8DB3eF2116877432A445A5",
+      "oracle": "0x89B11Da1060b183d0fB12d541F045A404AB95674"
+    },
+    "AVGOB": {
+      "token": "0xe6F77231BBa44AA3bB86cfb8a1cB5F0d2a14d68b",
+      "pool": "0x389302C161f90efb4b55d363a619DDFb69B511d4",
+      "oracle": "0x4098eDd8e20d9449b8Ff78a2C67593c07DDdCE99"
+    },
+    "AXPon": {
+      "token": "0xe438F13E4b63356259559AF5852C2aA2185130ec",
+      "pool": "0x2f01c5B7c9Ea153017B64147FC75af000fcD32aF",
+      "oracle": "0x640A2f501aF830a1963F4DACd21d7eCaAb4FA981"
+    },
+    "BEB": {
+      "token": "0xe5daC8758c0207481CA306E86692F57d5E13F8ab",
+      "pool": "0x80b8Aae7C1DA5B957F5F1f1e1713A09c152B6077",
+      "oracle": "0xc590C4Fa99c762ad9688C045c46eccc37652B2DD"
+    },
+    "BLKon": {
+      "token": "0xCCbb02fd8f8f588adFB26CF7f95b82e70a57a934",
+      "pool": "0xa52b6749C4b439e1054B13179d016E5506EBc84E",
+      "oracle": "0x7fC0aeA0F8FBFb31ffAa2873dAfFA226eB10fC83"
+    },
+    "CBRSB": {
+      "token": "0xd55BAbCe7B68ed90e9cA61abbEA1bc6553CC7C70",
+      "pool": "0x09c9Ec4Fc13a1902CfBb27d27FbFD0d89dc2c910",
+      "oracle": "0x0A67310cbb507481e51D7c9f6b5cF7ca54174aB9"
+    },
+    "CEGon": {
+      "token": "0xB7969dA31c0A6241d3004C3f734fEFb897FCb924",
+      "pool": "0xb99DDAa66A286D59a295D0472e46323d86efd89E",
+      "oracle": "0x43c4EcC856D24242d7E4e4eCa4A3935116DC40C6"
+    },
+    "CIENon": {
+      "token": "0x9184d33424e330f95bCA1e40109797AA08417438",
+      "pool": "0xC002EB1EB744fa8D00D6b4A279494eeBFDA835C2",
+      "oracle": "0xbE5BaBBeC8cC296DbD3a7491EE17a01a41F51e05"
+    },
+    "COHRB": {
+      "token": "0xb2EB9B1b88bA8264B131C3529f559B26aF272B7D",
+      "pool": "0xfcf1Ba397D442Ac0f89c859100c22ce38b97290B",
+      "oracle": "0xCF416C08F991e230FAF06B30cC0D902A49DdDf2C"
+    },
+    "CORZon": {
+      "token": "0x76Bd5c8d5bbbb4067298253C8cc3F2db21D58854",
+      "pool": "0x7e13506F48f71608CF22D56D498C51A615122712",
+      "oracle": "0xf9Df9E7AcA49e02B1Cc094f867AE90B1787258f9"
+    },
+    "CRDOB": {
+      "token": "0xE7F69457b587183b8ddC06c5b42A2d20B46E1987",
+      "pool": "0x4B7E374767FfD73c6A378c9517659b806467CD69",
+      "oracle": "0x3Dd52EC9F3908a31a79637D68f9d258287DF7086"
+    },
+    "CRMB": {
+      "token": "0x1f32B7D0c62e09AD55b97cA6Aa62383c8C968CF5",
+      "pool": "0xDC5502624db6D27BE6D1a748cE5DA7D824A6dc34",
+      "oracle": "0xA7f05ce8F9337E45Bb3C8EB2ee0286118146E4E4"
+    },
+    "CRWVB": {
+      "token": "0x89D58DD2468711C82310047D86f39D4eA58951eD",
+      "pool": "0x27F4351E8BA2e6f697692881e8c933a76697c94e",
+      "oracle": "0x9375aE7D9A310Ef45206E4739d04Cc7F8e1856a8"
+    },
+    "CVXon": {
+      "token": "0xCc6414c038011a60F4537E948D5ec201a81e2280",
+      "pool": "0x089BC22c05973Da37e130B1BaabE282d7E7a9248",
+      "oracle": "0x989C777d1Cd39F31B8a5F7db4b56AbA0b91f6851"
+    },
+    "GEVB": {
+      "token": "0x4FF5AB0cB11f34993638515A3b9A028dF51F42dD",
+      "pool": "0x874C02C81F649D10c3C1884991927C3aA7577D62",
+      "oracle": "0x6Bd8F397d9CFc37B8312008CB36833f91aF0546d"
+    },
+    "GLDon": {
+      "token": "0x7dB43D35c2189dD02eb8c7447d870B4fE9b5aBFB",
+      "pool": "0xd37c8CdBf25C20309B08A465BDDb7A85D2aA260a",
+      "oracle": "0xe598B6A8FaB84e94c1bc3BCE059e53062Ed39934"
+    },
+    "GOOGon": {
+      "token": "0x08f7a7cb550775B82B481D8587477273E867Ed9C",
+      "pool": "0x72DB5dEa45e88b5817e09cfCDf7a3d5f86bAdDae",
+      "oracle": "0x7f490BFBB4b8e891719019D4a912144aE47F50C5"
+    },
+    "GPROB": {
+      "token": "0x8bb9B683BbA797c4393C2D4Ac6408dff7369BC3D",
+      "pool": "0x045AbFD79fd8935A655eE05453cf3A2174987fDA",
+      "oracle": "0x98c3aeFE68c07ac2Bff54eFc01c1D5D23a22c1Af"
+    },
+    "IEFon": {
+      "token": "0x17d654ff3A60dC796a98a35a0c2eAcC572c30dC3",
+      "pool": "0x972f05a6b0D53b2D92b8cffc698b0009C3d55456",
+      "oracle": "0xa6F806E8b58579dC0EaDd02e576D0923a1C5353d"
+    },
+    "IRENB": {
+      "token": "0x8024d2Cb004914c391a9DC2Bb6DA230ca4179d52",
+      "pool": "0x9E8DA58d378cd66d3dd1a54CA0D10a155Ca966D5",
+      "oracle": "0xfF69dB3cEa6CBC2DB51eEFe881781b7e9D3011D3"
+    },
+    "IVVon": {
+      "token": "0x7Eb69C0d3326ADC83B8E8068AE05700C2d030b01",
+      "pool": "0xf0d2CEc239dB1C639637F6F28B95fcE0E01021C8",
+      "oracle": "0xaAca64dBd6Cc7FaDb721d070E05732DE428127D6"
+    },
+    "KOon": {
+      "token": "0xf329154Ab96244F117248a7C3cf82a7A5eFFb3b6",
+      "pool": "0x11deF2B327F132D46AB780BD490900636041e240",
+      "oracle": "0xB35C0c0bb536032098d80fE76e5fF745eDc3376F"
+    },
+    "LLYB": {
+      "token": "0x703f2F23959d1b79f4a858bC84C7845DcBC17eAf",
+      "pool": "0x07f5D4c7992aB12bBd0B8ecc209Ed75f4C2760b8",
+      "oracle": "0x2bFBcd5456e25336f8eD546eA187612138B00aa3"
+    },
+    "MAon": {
+      "token": "0x49dd99a62646140ce0b68732b6A2953B95E296EF",
+      "pool": "0x5164c3c8C49AFC2D3748B2bc79d8AB5E78bC900d",
+      "oracle": "0x0F13fDDaf8E03640e6d2106df0712E314407a3e5"
+    },
+    "NBISB": {
+      "token": "0x2c4158fDE426B3D3c7381b4272727cB6504aa184",
+      "pool": "0xcdB5Ce81cb39b1581312e4BB499c48b3E8e00981",
+      "oracle": "0xe8EfE35e9940b36f9fCB75dEE309d7033d238f69"
+    },
+    "NEMon": {
+      "token": "0xAdbAa06290CdD1661b1ACf0f573ac7BaE1477923",
+      "pool": "0xbaE3E8c03592577f633f1f7F50c9A4423b1F9283",
+      "oracle": "0x8BCEA613e39B8E1823D998409DB544a6E763AAd1"
+    },
+    "ORCLB": {
+      "token": "0x290Ed74a4B81507341100DB493D323972Aa32596",
+      "pool": "0xe8238B95Eeee92cb3aB357835596770813aD3145",
+      "oracle": "0xF60C4695E5c49BA8CB6C5324b80dF13E755720e9"
+    },
+    "PANWon": {
+      "token": "0xbB5d4C0f2315A2FED7533f5A671c793ec83De837",
+      "pool": "0xF9335aB544fDf87896A9d5bC35029caf40aa5080",
+      "oracle": "0x7E17452Bba2EaAF5682051B4Cfbb3255a526d564"
+    },
+    "PYPLB": {
+      "token": "0x11A9001EB0A46DA74B1fFd99d0E7Bf3A34d7447b",
+      "pool": "0x00f204f173AAe340ee8Fa8c0baD34c4d35Dbb79D",
+      "oracle": "0x1C8904eB473E0DB6bE539860e7BE5656ABf1D5a2"
+    },
+    "SHAZB": {
+      "token": "0x83156eAD0CC7043F30a52518c78A2a1c2c31F8B5",
+      "pool": "0xAF6A3A67B22df81EAAE2391047163463A0243921",
+      "oracle": "0xf02C536De0741E831Effab1Ca4d6622c1eBaA0fd"
+    },
+    "STXB": {
+      "token": "0x0B26eFdDf3b0c7b4cd7bD0739c73dd05cE3613da",
+      "pool": "0x454b7bD5C93b0f83DB452614C0753c117Ea7cD08",
+      "oracle": "0x83fE94548AD2014d49a5A657489e9B7A352D2F2D"
+    },
+    "UBERon": {
+      "token": "0xd135e14cA3D2784f6145F16B0909541ec9582931",
+      "pool": "0xD6e1e0E512fB1aD5643A614f82E6808e07498CE4",
+      "oracle": "0xAf83d3fbc9a0afC6C18805a509322AA463D1E84F"
+    },
+    "VRTon": {
+      "token": "0x981977a27e3193f1699f9882Ca02A8f50c00684c",
+      "pool": "0x4e8B7B4Afa83252652367E5686BB750b54410623",
+      "oracle": "0x76D69c96F75eaCF7DC11711B4272e89ae34b4a87"
+    },
+    "VSTB": {
+      "token": "0xc480848007322BE7Ae4BB0f1B1073e49218029C8",
+      "pool": "0xc115BAa562FdBb2CfB675DaDb38F25B6FC258c72",
+      "oracle": "0x70a24baC8c25a031b848a23A19c6994a4829D8DF"
+    },
+    "Von": {
+      "token": "0x5d9B5eECE54660EE028ce2FCCC9e7eE4986d1b58",
+      "pool": "0x835394e0642215AC650D0CCA993f3d74d0Dfd97D",
+      "oracle": "0xc5eE3257EAd461922039BFB65644aC6B4FB9C5aD"
+    },
+    "ADA": {
+      "token": "0x867cD6BB9e2627a03814e202B11759FDf955d172",
+      "pool": "0x7FFBad38E3a37EAA6A16a67a2874545CDE827544",
+      "oracle": "0x2EE7D78Fe0aB4D7e8eecf58007c992C96AECA2a4"
+    },
+    "LINK": {
+      "token": "0x723e405f4e2437e250355541Fefc24bf4cE44740",
+      "pool": "0xa54BB985777773b92B4a3460f50ad61e8d0ed632",
+      "oracle": "0xCe396afDca085Cd4Ecd82C40EC3b33891388aAF3"
+    },
+    "BCH": {
+      "token": "0x3F2905ce60D4F01e62d7fEEfa4AfF977BC377c90",
+      "pool": "0x0FB54b54A4fFf8C9B0eEb4bbc2C43a197149b0e0",
+      "oracle": "0x61bf510b889E1af24CFD7F7818Da1FEbaCBa609a"
+    },
+    "NEAR": {
+      "token": "0x230400b7fa9Ae881d40b79476cc956cC4E979993",
+      "pool": "0xc9Db9FD8026Fdb26D00D526Eb21f74340b766470",
+      "oracle": "0x29316420557E5EE7f95Ea2BF9B6A5C15c20eFd94"
+    },
+    "UNI": {
+      "token": "0x38D82cA0b87815A1740B200771Df30eD3B10D9b8",
+      "pool": "0x54DCeA6c655bAfc94Cb15177083234c1e9631c15",
+      "oracle": "0x43fE41141c8335946391DB50202D14cBb49831cC"
+    },
+    "ZEC": {
+      "token": "0x93AFB889a7A8feC56A160d3605892F0e0751bB73",
+      "pool": "0x458b5295b3cfEF8c8135c227366546beDbe51093",
+      "oracle": "0x209Efc9C49CC4775E256221EE37DA2a3d3313FC1"
+    },
+    "TONCOIN": {
+      "token": "0x74E4A11A24cD0fe978C984a59D2A7079F8c2e3EF",
+      "pool": "0x789c47c1e155d5f570A3b3d6C61Dc9B9490D396E",
+      "oracle": "0x3DF8c4e6BAd499EB7280a816314C6378079700dD"
+    },
+    "DOT": {
+      "token": "0xb68D847d182e4568ff4620ff3023eCd8C9B99506",
+      "pool": "0x036e890661B14d0eB612A1B17d9ec0c002500805",
+      "oracle": "0xCC34CF8Eacc971b92C0055E7FADfB54879EEA6a7"
+    },
+    "SHIB": {
+      "token": "0x127C1A2532fCf935058EAc9D04fCF6F7825e139A",
+      "pool": "0x20dcC50ADb0932fA537e5c2f4698BC132217dE8c",
+      "oracle": "0xf6963B915718098dbFE51e58dB836FF529211fd9"
+    },
+    "PEPE": {
+      "token": "0x935F9257683d15f694A47b9036Bff7faaEc85A99",
+      "pool": "0xD273bA8EaE524D36CEce734342670430De518e15",
+      "oracle": "0xbBc5E70e887661998f45aD40210a0d73e23f3dA9"
+    },
+    "AAVE": {
+      "token": "0xe1058EC3999A770e3fFAE507E154761753E63dBE",
+      "pool": "0x9f34B0eb5B36da11aC16Db01F9AC694B4b9F3448",
+      "oracle": "0x7f9eFa4fEA8A739431e7D1077fbFdf45D61f0C8f"
+    },
+    "Cake": {
+      "token": "0x8e074498DfF76847f0CB6790d0aEc1295e2D80De",
+      "pool": "0xC12578823106b489149Fb6a3B68bE625dE18D911",
+      "oracle": "0x02aF24832e0165433fe4cA458B3D0278AbC4Ec98"
+    },
+    "FIL": {
+      "token": "0xcbA5D83434b978b860dD7e0F1E16eefD16840c2E",
+      "pool": "0xdB2075eC28c587ecCf9b037ECFA6F797E8f26c0d",
+      "oracle": "0x34e607007ADF8afdA207b90627781b438aaA2934"
+    },
+    "ATOM": {
+      "token": "0x5DB3B368E2FB73f87A889d1fAeFb9ee1Ae363eEb",
+      "pool": "0x03C39F325356b9A6866788710e7194781B467754",
+      "oracle": "0xE34dA280118cB6cfdAeFB2c514Cc53cE171bDC5a"
+    },
+    "AMCB": {
+      "token": "0x4AAF0123B58892D1fb6B5FEc38a9bF778049b94A",
+      "pool": "0xa103AB1524AC7b0bFa9793178Cc51483f7b8b482",
+      "oracle": "0xb4438CF14fc83C497151eb354d346f9245890d43"
+    },
+    "ANTB": {
+      "token": "0x4D6C73BC22F83074aba8601d919cFEA744899798",
+      "pool": "0xdDd410a38626Da560b49eC44D4dbF4B5c20106a9",
+      "oracle": "0x31291e814474815BeD1024e53fF53513062B2792"
+    },
+    "BMNRB": {
+      "token": "0xd416e9E9699a0150d2A5b3aA8DBD416058bDbc7e",
+      "pool": "0x73b1fE21D4be8724c28b0CD719f7136f38cf01c9",
+      "oracle": "0x404A248Eca83fcA35568914ace6Bb94258C49D88"
+    },
+    "BNCB": {
+      "token": "0x4B761cAFbdAba93D23e1e7FE07B2FAd5a6106713",
+      "pool": "0x7aBd3c8F284E64D25a8A58F03a688d90EE7d2dB2",
+      "oracle": "0xB2ee6e04F7963D7eCE5D7Aed3b64A34Ba89C115E"
+    },
+    "COINB": {
+      "token": "0x585173422c84d80481Fd260CDc20E68dfD7099d7",
+      "pool": "0xB6Cf3487debCbA25C77328CB5538023D3a3220F1",
+      "oracle": "0x4FB3CE3696c7109037b1c1902dD5947ee22AF863"
+    },
+    "CYPHB": {
+      "token": "0x7584DeddEABd63Ebe33a641b4dbb81CA41e8A603",
+      "pool": "0xba42AE3aa3cf0EAC84C76873A6fEa84F61EEbE5a",
+      "oracle": "0xb207E2CdD6832C180b2c9573BA17B70346330145"
+    },
+    "GMEB": {
+      "token": "0x7036C9bcb891291D5Ba68c70536B99DcB6D529dE",
+      "pool": "0x5a6D6ff05a6991278a1D071aeC146985B293B917",
+      "oracle": "0x1675D024a6616F57b7AC0e05a600509CcE7D6ecf"
+    },
+    "MRVLB": {
+      "token": "0x53FAB7d8a7C53403C2cc315499D19320911C4DA7",
+      "pool": "0x56040029BC662215BecB8f79682BC7B4C641D775",
+      "oracle": "0xE714714c12A288DF18cc277A89aDb10C7D99F6BD"
+    },
+    "PDDB": {
+      "token": "0x73D9908EDEd64F0B6674164269BF61fe7f2279E8",
+      "pool": "0xe44a4E9ceB38A04800180A40f79058B637FBBa7f",
+      "oracle": "0x6bCB19E99354af3123AF694C22603E5131453201"
+    },
+    "PENGB": {
+      "token": "0x854798eDf972e627908e8c98e5fF69588FE8E644",
+      "pool": "0x5707CA049b6A423662Fe34a9358895F3a1080374",
+      "oracle": "0x2357D66d82B97a9760276AF05E9d818Bb3BBA16C"
+    },
+    "RDDTB": {
+      "token": "0xBd7D0075C8A4A1F2335461bB5B04F983A8b56932",
+      "pool": "0x4A951E58EFaF9032eb9B5921Bb3A840EA328b6eD",
+      "oracle": "0x49Ce9523eCfC89D050227409f2105bbA49bd435A"
+    },
+    "SOXLB": {
+      "token": "0xD54d97Fc8861a8DBB0f59fF1b79492C270159595",
+      "pool": "0x1758639C470Dd7FB90147De884A95401606992A9",
+      "oracle": "0xC10588CD5EB031534337F5089f5256C3BA155C46"
+    },
+    "TQQQB": {
+      "token": "0xb82d787D3cEbaA1d8410C262fB062c31076816f8",
+      "pool": "0xe425151662d075823152a250b28c758923C45894",
+      "oracle": "0xF4cF6B466dE47CE98059984f77A9ac6Ec9cf4824"
+    }
+  },
+  "yieldMarkets": [
+    {
+      "marketId": "0x4fbf813d1a8016e09de9898087e51c37410abe16e07297332468ecfdbb795a1c",
+      "protocol": "Venus",
+      "symbol": "USDT",
+      "aprBps": 500,
+      "target": "0xB0941BBacA5C192058B8b7a18fE06bfe1670411d",
+      "receipt": "0xB0941BBacA5C192058B8b7a18fE06bfe1670411d",
+      "asset": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+      "backgroundSupplyAssets": "1000000000000000000000000",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x22be6327eec096857c8abcd447d7884724f1ed9ad2a7e0b5e5e183b56d8d0e6d",
+      "protocol": "Lista",
+      "symbol": "USDT",
+      "aprBps": 300,
+      "target": "0x4e1fb4a2f848CF27d9dD21Bd03A8605f79CF9571",
+      "receipt": "0x4e1fb4a2f848CF27d9dD21Bd03A8605f79CF9571",
+      "asset": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+      "backgroundSupplyAssets": "1000000000000000000000000",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xd8d1aa9bf198bd630398717140b9cca53021e94f87201dd267d0b0b7af408656",
+      "protocol": "Aave",
+      "symbol": "USDT",
+      "aprBps": 300,
+      "target": "0xd2c46C65752B9Ec203CDe7c985a6C83077890631",
+      "receipt": "0xd73186D21BcE5A520b52478BfB8d9013C9c1622F",
+      "asset": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+      "backgroundSupplyAssets": "1000000000000000000000000",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x86028bb42e3fedebf63e04f4e98b7ee98fc922409988fdd2d35a109b298fcdf1",
+      "protocol": "Venus",
+      "symbol": "WBNB",
+      "aprBps": 2,
+      "target": "0x2245b8361746e4Fc234726C3F1FC77D564a7f941",
+      "receipt": "0x2245b8361746e4Fc234726C3F1FC77D564a7f941",
+      "asset": "0xbe3f4C2e58E74fbce8E1C5E9360D7ABe85aEC0F7",
+      "backgroundSupplyAssets": "1627532644236011763805",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xf3a8ab0377c834f4024db51e944aaa9f6f7f642856fe995587ffe11c42c806bc",
+      "protocol": "Lista",
+      "symbol": "WBNB",
+      "aprBps": 21,
+      "target": "0xBB4934BEDfA171Cb8543880C87679ed17F4695b2",
+      "receipt": "0xBB4934BEDfA171Cb8543880C87679ed17F4695b2",
+      "asset": "0xbe3f4C2e58E74fbce8E1C5E9360D7ABe85aEC0F7",
+      "backgroundSupplyAssets": "1627532644236011763805",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x6aa3e5dbc81480accf0a338a24367a2e6b3d0d9874fc3b9bde4b918c43f7a47b",
+      "protocol": "Aave",
+      "symbol": "WBNB",
+      "aprBps": 1,
+      "target": "0x437Bdf68ae99b85fd06129534DF2333E7EfABd38",
+      "receipt": "0x3d21E7F91BB0AF8E1DbFc9d10cBE3E7f3A9F629D",
+      "asset": "0xbe3f4C2e58E74fbce8E1C5E9360D7ABe85aEC0F7",
+      "backgroundSupplyAssets": "1627532644236011763805",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x1366522ac71738f2e373778c53558fc58f1d7768d4fda08693779622862b77c8",
+      "protocol": "Venus",
+      "symbol": "BTCB",
+      "aprBps": 12,
+      "target": "0x19bE53353F2Ca877FC27851F10CA1F86Eb581b75",
+      "receipt": "0x19bE53353F2Ca877FC27851F10CA1F86Eb581b75",
+      "asset": "0x2bacAAd9Ebc8a2827689F7ABbFFCBFcBE63c70c1",
+      "backgroundSupplyAssets": "14897867668200650440",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xe8ed3e5fb1e683eaf595cbf0e373a03782747f9e5d4590d27fca5858f789873e",
+      "protocol": "Lista",
+      "symbol": "BTCB",
+      "aprBps": 1,
+      "target": "0x08eFA9aE96aa1aa50a834E0e5F9819C096bA8C79",
+      "receipt": "0x08eFA9aE96aa1aa50a834E0e5F9819C096bA8C79",
+      "asset": "0x2bacAAd9Ebc8a2827689F7ABbFFCBFcBE63c70c1",
+      "backgroundSupplyAssets": "14897867668200650440",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x852104ab4ac3d397cee636b2ed0eb82808d0e41882e595622627414848b87af3",
+      "protocol": "Aave",
+      "symbol": "BTCB",
+      "aprBps": 1,
+      "target": "0x4B6dBD4ca4A7DC174CDd85c48788b9fe07A05516",
+      "receipt": "0x705a437ef9898bE322EF2E713490C9211Cb188d0",
+      "asset": "0x2bacAAd9Ebc8a2827689F7ABbFFCBFcBE63c70c1",
+      "backgroundSupplyAssets": "14897867668200650440",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xdb9ad324e7c1f7da2fad2ecbb44d44e2a56f99e90b9704de7a5273b8c925e89b",
+      "protocol": "Venus",
+      "symbol": "ETH",
+      "aprBps": 34,
+      "target": "0x5daD691860ba337469B6A12E5605fe076e905B0A",
+      "receipt": "0x5daD691860ba337469B6A12E5605fe076e905B0A",
+      "asset": "0x6A42bf6aD662Aa00De6D00A3Da448f4B20b95F3b",
+      "backgroundSupplyAssets": "524568149271112556587",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xdb77bf0d637dbb6f3170165b0fb394bac85687dfffec22a6c72cab8388d1d8d1",
+      "protocol": "Aave",
+      "symbol": "ETH",
+      "aprBps": 57,
+      "target": "0xb22cae5ab49755fd7A36C88DB8CF25A17F6627AF",
+      "receipt": "0x9F7964da6b814E96C7C0d51Bf8900d7d5c4bDa34",
+      "asset": "0x6A42bf6aD662Aa00De6D00A3Da448f4B20b95F3b",
+      "backgroundSupplyAssets": "524568149271112556587",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xc5fd35a0f849969ddc877677630f2077d3c25b9e43843eb4a1fd6b90b46d5e82",
+      "protocol": "Venus",
+      "symbol": "USDC",
+      "aprBps": 460,
+      "target": "0x572c120860E621ab84962498c16A186EE6aba188",
+      "receipt": "0x572c120860E621ab84962498c16A186EE6aba188",
+      "asset": "0x9Cf576bEFE4EA79B92b60c564fbC71C886bfE194",
+      "backgroundSupplyAssets": "999270532511266775254064",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x1084fe3d3a43315e2fabc46d1d13da74440070053c60cf5d2134c2f05c379f17",
+      "protocol": "Lista",
+      "symbol": "USDC",
+      "aprBps": 230,
+      "target": "0xF80584ddc017a765CEF7bBc95aEdd2f318e943eD",
+      "receipt": "0xF80584ddc017a765CEF7bBc95aEdd2f318e943eD",
+      "asset": "0x9Cf576bEFE4EA79B92b60c564fbC71C886bfE194",
+      "backgroundSupplyAssets": "999270532511266775254064",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x003dcc7dad5533b9a9caa130b2abc9745f896dfa3a0ea8360b6adf2d856107dc",
+      "protocol": "Aave",
+      "symbol": "USDC",
+      "aprBps": 344,
+      "target": "0xb4224d4935e8d78E6Bb01ee8Cff7a34f69645E63",
+      "receipt": "0x622C7754E34679CB9cDC591565bdBD3436520E2a",
+      "asset": "0x9Cf576bEFE4EA79B92b60c564fbC71C886bfE194",
+      "backgroundSupplyAssets": "999270532511266775254064",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x7266d8868c4e456b9978098450abb8272442fba960f5423485592bb1be6d66e4",
+      "protocol": "Venus",
+      "symbol": "XRP",
+      "aprBps": 5,
+      "target": "0x0f76e222b49d92fbB9cfae0114CE77150E4bb019",
+      "receipt": "0x0f76e222b49d92fbB9cfae0114CE77150E4bb019",
+      "asset": "0x37acA01e7cAe39A0ACaF2d240d5466eAeD1D7901",
+      "backgroundSupplyAssets": "1006993570346053340449421",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x9754a319c3714c6cc4a263ae8db98fd78a070de4d84b943b1a0418f4a8575cf1",
+      "protocol": "Venus",
+      "symbol": "DOGE",
+      "aprBps": 1,
+      "target": "0x9026E8dA989C124b08C5Bd6B0802E3c0D0eEAA7b",
+      "receipt": "0x9026E8dA989C124b08C5Bd6B0802E3c0D0eEAA7b",
+      "asset": "0xCCF96D9561E93AF8a1c24D9b23C4091f2299dfA5",
+      "backgroundSupplyAssets": "1594110717365763",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x970245132a016c2e4453eb3ba515acd7036133f449ca88c46065183b00164687",
+      "protocol": "Venus",
+      "symbol": "LTC",
+      "aprBps": 4,
+      "target": "0x8Cf79B49A990196Dc9a877Dab40211689748689B",
+      "receipt": "0x8Cf79B49A990196Dc9a877Dab40211689748689B",
+      "asset": "0xe2bd04B678F547FF82cF630Ad502aB46720A6E6D",
+      "backgroundSupplyAssets": "20678289243774284065930",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x19f1b78c50f14f3d4bf711a60983ac5f759d8087b5a226737cb6958b6e7c63e3",
+      "protocol": "Venus",
+      "symbol": "SOL",
+      "aprBps": 35,
+      "target": "0x6E0745d0D1641800915C7c7BAb2889A8b4cD34a9",
+      "receipt": "0x6E0745d0D1641800915C7c7BAb2889A8b4cD34a9",
+      "asset": "0x16d201D507dFD0f459662Bb2c3d061784C2264ed",
+      "backgroundSupplyAssets": "13192507711020757091632",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x0835df8e4c7a84ec41a6c1130fd14abe4ac651d8f425dd699cfbc015a247d468",
+      "protocol": "Venus",
+      "symbol": "LINK",
+      "aprBps": 5,
+      "target": "0xA409E7176A5aA3B8766eaE44ef93E12fb3eECD5C",
+      "receipt": "0xA409E7176A5aA3B8766eaE44ef93E12fb3eECD5C",
+      "asset": "0x723e405f4e2437e250355541Fefc24bf4cE44740",
+      "backgroundSupplyAssets": "109559024924678170364283",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x6dc34bc9bda2c529d5d9450cf1971f15449a2d41def340fa26e84d16ed54c7b2",
+      "protocol": "Venus",
+      "symbol": "ADA",
+      "aprBps": 4,
+      "target": "0x73360c1f8f62F202A414926d7d517D8dc9d99fc6",
+      "receipt": "0x73360c1f8f62F202A414926d7d517D8dc9d99fc6",
+      "asset": "0x867cD6BB9e2627a03814e202B11759FDf955d172",
+      "backgroundSupplyAssets": "6659385738259502943448496",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xaf444c0d70d4fcc72aa1022c97af8cc23ac168db3508141029bb969f26a8b594",
+      "protocol": "Venus",
+      "symbol": "TRX",
+      "aprBps": 1,
+      "target": "0xb5fA880F8807CEbCeDa47113F333502BA856aea9",
+      "receipt": "0xb5fA880F8807CEbCeDa47113F333502BA856aea9",
+      "asset": "0xE3148b7ab627C5Ea9e1D3E3808D888AC44b643d4",
+      "backgroundSupplyAssets": "3200952603494",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x4b7f99e568779ac9a111fb9b97a3abfc8ea93f1cdc29d812ac0597d4d69ff66e",
+      "protocol": "Venus",
+      "symbol": "DAI",
+      "aprBps": 253,
+      "target": "0x6C782136ccBcb935931a2777d370C07a8e699689",
+      "receipt": "0x6C782136ccBcb935931a2777d370C07a8e699689",
+      "asset": "0xED2E4c1a957662C4C95A6F8cb02df9C3F119B08c",
+      "backgroundSupplyAssets": "998462367953351838169219",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xb94138f0886e7ecccc93fffb91186a07fa6c0fbb262d17ff51abfb706ac96265",
+      "protocol": "Venus",
+      "symbol": "UNI",
+      "aprBps": 5,
+      "target": "0x797096542BAe79b8e9eED2DbD6b0B825bE3c6c26",
+      "receipt": "0x797096542BAe79b8e9eED2DbD6b0B825bE3c6c26",
+      "asset": "0x38D82cA0b87815A1740B200771Df30eD3B10D9b8",
+      "backgroundSupplyAssets": "199013292097779210673480",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x72cb94c7499cc00fb48146b62ff08a2cbb4d0a43236aceb0484663898a38f87d",
+      "protocol": "Venus",
+      "symbol": "BCH",
+      "aprBps": 15,
+      "target": "0x1aaC02943D573Be9322e792e20E292421c86fFCC",
+      "receipt": "0x1aaC02943D573Be9322e792e20E292421c86fFCC",
+      "asset": "0x3F2905ce60D4F01e62d7fEEfa4AfF977BC377c90",
+      "backgroundSupplyAssets": "4894762604013705335291",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x8facc7eb856a69497e2adfb88eb8a0900bef58f666a39fde5aa58089de2bfbac",
+      "protocol": "Venus",
+      "symbol": "AAVE",
+      "aprBps": 1,
+      "target": "0x4F968AF4DbB791BD47af5516F4088B41bf2152FF",
+      "receipt": "0x4F968AF4DbB791BD47af5516F4088B41bf2152FF",
+      "asset": "0xe1058EC3999A770e3fFAE507E154761753E63dBE",
+      "backgroundSupplyAssets": "9446438692612884942376",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xf514defa424d6706374b14a65363e97a7c75d8ad10baf82f70da1c08d47d5d1e",
+      "protocol": "Venus",
+      "symbol": "DOT",
+      "aprBps": 1,
+      "target": "0x4c2ab82e72753D624540274A09cC668A1d502632",
+      "receipt": "0x4c2ab82e72753D624540274A09cC668A1d502632",
+      "asset": "0xb68D847d182e4568ff4620ff3023eCd8C9B99506",
+      "backgroundSupplyAssets": "1390304295901243905253542",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x536e9e7a5d340d0126f443a84300541ba58c9fa052ef6bfe88e8c97a35f2387c",
+      "protocol": "Venus",
+      "symbol": "FIL",
+      "aprBps": 1,
+      "target": "0xC48177374C71D047Ed0C2f3501cCE84fD7775e88",
+      "receipt": "0xC48177374C71D047Ed0C2f3501cCE84fD7775e88",
+      "asset": "0xcbA5D83434b978b860dD7e0F1E16eefD16840c2E",
+      "backgroundSupplyAssets": "1626825705147601896228041",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0xb1e8cae1c2221a858555caa6f14df11ec869190327eb027e6eb322fa6f769b06",
+      "protocol": "Venus",
+      "symbol": "NVDAB",
+      "aprBps": 1,
+      "target": "0xA2A6cF661913C901688918F0ebb0947e0Df22227",
+      "receipt": "0xA2A6cF661913C901688918F0ebb0947e0Df22227",
+      "asset": "0x5d63B93E50ef9F8851E1DE71d8255c2F0BEaB397",
+      "backgroundSupplyAssets": "6157142593265317431486",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x2c08255c983c5e2ca01797250e763fdee7617c0999bc82d8b3e5e6cbd1afd138",
+      "protocol": "Venus",
+      "symbol": "TSLAB",
+      "aprBps": 1,
+      "target": "0x0bCC51d353283cD6b8928b8Bd615775cD8228ccB",
+      "receipt": "0x0bCC51d353283cD6b8928b8Bd615775cD8228ccB",
+      "asset": "0x587Cb8fe057344490a28390c7986E1BeFf5aD36e",
+      "backgroundSupplyAssets": "2573717709494187258553",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    },
+    {
+      "marketId": "0x513ae7eb922dfe932167bd6ea8a72235c516425acf8b129bfc50d3fc700a0870",
+      "protocol": "Venus",
+      "symbol": "SPCXB",
+      "aprBps": 1,
+      "target": "0x1C13C50c6B61162b97f629D26ef0fE82715F99dD",
+      "receipt": "0x1C13C50c6B61162b97f629D26ef0fE82715F99dD",
+      "asset": "0xe7020b7E3adaDD3E701A704817b52917C0cC6cE2",
+      "backgroundSupplyAssets": "7349266543198988740923",
+      "rateLabel": "\u6a21\u64ec\u5229\u7387",
+      "rateType": "fixed_simulated_APR",
+      "ownerAdjustable": true
+    }
+  ],
+  "yieldMarketCountNote": "C3 table heading says 32, but has 30 rows (21 Venus, 4 Lista, 5 Aave); no unspecified markets added"
+}

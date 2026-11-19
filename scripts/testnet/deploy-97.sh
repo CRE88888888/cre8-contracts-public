@@ -18,6 +18,9 @@
 # 要部署別的版本，請另開 worktree：git worktree add <目錄> origin/main。
 # 只有 fork 模式可以用 TESTNET_ALLOW_UNMERGED=1 跳過「HEAD 必須是 origin/main」（測未合併的分支用；
 # 這時地址可能和 manifest 不同）；工作目錄必須乾淨這一條任何模式都不能跳過。
+#
+# TESTNET_MANIFEST=<路徑> 改寫 manifest 的輸出位置（只限 deployments/ 底下、檔名含 draft），用來在 fork 上演練
+# 追加資產而不覆蓋正式的 deployments/testnet-97.json（#61）。未設時照舊寫 deployments/testnet-97.json。
 set -euo pipefail
 
 MODE="${1:?usage: deploy-97.sh fork|public}"
@@ -25,7 +28,13 @@ cd "$(dirname "$0")/../.."
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || { echo "refusing: not a git checkout. Addresses are only reproducible from a clean origin/main checkout."; exit 1; }
 # The manifest is this script's own output (a rerun rewrites its timestamp), so it is the one file excluded.
-DIRTY="$(git status --porcelain -- . ':(exclude)deployments/testnet-97.json')"
+MANIFEST="${TESTNET_MANIFEST:-deployments/testnet-97.json}"
+case "$MANIFEST" in
+  deployments/testnet-97.json) ;;
+  deployments/*draft*.json) ;;
+  *) echo "refusing: TESTNET_MANIFEST must be deployments/testnet-97.json or deployments/*draft*.json"; exit 1 ;;
+esac
+DIRTY="$(git status --porcelain -- . ':(exclude)deployments/testnet-97.json' ":(exclude)$MANIFEST")"
 if [ -n "$DIRTY" ]; then
   echo "refusing: the working tree has uncommitted changes, which change the CREATE2 addresses:"
   echo "$DIRTY"
@@ -46,7 +55,6 @@ fi
 KEYS="${CRE8_TESTNET_KEYS:-$HOME/.cre8-testnet}"
 DEPLOYER=0x55662B4183fcA1230694D5D57F56E4F2E0e3008a
 OWNER=0x09BBB9A06a0C49Ad24bddB18808944041783054e
-MANIFEST=deployments/testnet-97.json
 LOG="$(mktemp -t cre8-deploy-97.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
 

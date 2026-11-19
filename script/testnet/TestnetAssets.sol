@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 /// @title TestnetAssets
-/// @notice The testnet asset list (chain 97 only), 92 mocks plus testnet USDT. Mainnet still admits only the 38
+/// @notice The testnet asset list (chain 97 only), 105 mocks plus testnet USDT. Mainnet still admits only the 38
 /// of `AtpMainnetSpecs`.
 /// - Entries 0-37 (`LAUNCH_COUNT`) are the 38 launch assets as testnet mocks (cre8-contracts#30): the list,
 ///   order, `maxSlippageBps` tier (cre8-contracts#25: S 50 / A 100 / B 300) and secondary-feed choice of
@@ -21,6 +21,12 @@ pragma solidity ^0.8.26;
 ///   0xBf5140A22578168FD562DCcF235E5D43A02ce9B1, not CoinGecko's `uniswap` BSC address, whose on-chain symbol is
 ///   NUNI); the others are the `binance-smart-chain` platform address of the coin (or of its `binance-peg-*`
 ///   entry) in CoinGecko's coin list, 2026-11-15.
+/// - Entries 92-104 (cre8-contracts#61) are the 13 bStocks the 21 launch-lineup funds hold that the list lacked
+///   (docs `research/2026-11-20-launch-lineup/新增模擬資產.csv`), in the issue's order. Testnet only, like 38-91
+///   (tier B, no secondary feed). Symbol, name, decimals and `uiMultiplier` read from the BSC token, read-only, at
+///   block 134535867 (2026-11-20); they match the CSV. Price: the CSV's starting price per raw token (Binance spot
+///   ticker x `uiMultiplier`, 2026-11-19 16:12 UTC), except ANTB, which has no quote: a pure test constant of 300
+///   USDT. Fee tier: the #39 rule below (mainnet USDT pool with >= 1,000 USDT, else 2500), read at the same block.
 /// - Entries 38-91 are testnet only: `maxSlippageBps` 300, no secondary feed. Symbol, name, decimals and
 ///   bStock `uiMultiplier` were read from the BSC token, read-only, at block 133693735 (2026-11-15). Price and
 ///   fee tier: a mainnet Pancake V3 pool against USDT that holds at least 1,000 USDT gives its fee and spot price
@@ -49,7 +55,7 @@ library TestnetAssets {
         uint256 uiMultiplier;
     }
 
-    uint256 internal constant COUNT = 92;
+    uint256 internal constant COUNT = 105;
     /// @dev The first entries are the mainnet launch assets, in `AtpMainnetSpecs` order.
     uint256 internal constant LAUNCH_COUNT = 38;
 
@@ -576,5 +582,117 @@ library TestnetAssets {
             AssetSpec("Cake", "PancakeSwap Token (testnet)", 18, 2500, 1615720000000000000, 300, false, 0, 0); // 1.61572 USDT; mainnet pool 2500 (496744 USDT in pool)
         s[90] = AssetSpec("FIL", "Filecoin (testnet)", 18, 2500, 614694000000000000, 300, false, 0, 0); // 0.614694 USDT; CoinGecko filecoin 2026-11-15
         s[91] = AssetSpec("ATOM", "Cosmos Token (testnet)", 18, 2500, 1280000000000000000, 300, false, 0, 0); // 1.28 USDT; CoinGecko cosmos 2026-11-15
+        // ---- cre8-contracts#61: the 13 tokens the 21 launch-lineup funds add (see the header) ----
+        s[92] = AssetSpec(
+            "AMCB",
+            "AMC Entertainment Holdings (testnet)",
+            18,
+            2500,
+            2920000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 2.92 USDT; Binance spot AMCBUSDT; mainnet pool 2500 (24792 USDT in pool)
+        s[93] = AssetSpec(
+            "ANTB", "Anthropic (testnet)", 18, 2500, 300000000000000000000, 300, false, 0, 1000000000000000000
+        ); // 300 USDT; TEST CONSTANT: no Binance spot quote and no mainnet pool with USDT depth (docs launch-lineup), not a market price
+        s[94] = AssetSpec(
+            "BMNRB",
+            "BitMine Immersion Technologies (testnet)",
+            18,
+            2500,
+            15710000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 15.71 USDT; Binance spot; mainnet pool 2500 (10388 USDT in pool)
+        s[95] = AssetSpec(
+            "BNCB",
+            "CEA Industries (testnet)",
+            18,
+            2500,
+            3530000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 3.53 USDT; Binance spot; mainnet pool 2500 (31369 USDT in pool)
+        s[96] = AssetSpec(
+            "COINB", "Coinbase (testnet)", 18, 2500, 112370000000000000000, 300, false, 0, 1000000000000000000
+        ); // 112.37 USDT; Binance spot; no mainnet pool >= 1,000 USDT, fee 2500
+        s[97] = AssetSpec(
+            "CYPHB",
+            "Cypherpunk Technologies (testnet)",
+            18,
+            2500,
+            1850000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 1.85 USDT; Binance spot; no mainnet pool >= 1,000 USDT, fee 2500
+        s[98] = AssetSpec(
+            "GMEB", "GameStop (testnet)", 18, 2500, 26310000000000000000, 300, false, 0, 1000000000000000000
+        ); // 26.31 USDT; Binance spot; mainnet pool 2500 (86890 USDT in pool)
+        s[99] = AssetSpec(
+            "MRVLB",
+            "Marvell Technology (testnet)",
+            18,
+            10000,
+            147983000000000000000,
+            300,
+            false,
+            0,
+            1000153284671603306
+        ); // 147.983 USDT; Binance spot 147.96 x uiMultiplier; mainnet pool 10000 (5403 USDT in pool)
+        s[100] = AssetSpec(
+            "PDDB",
+            "PDD Holdings Inc (testnet)",
+            18,
+            2500,
+            86360000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 86.36 USDT; Binance spot; mainnet pool 2500 (101386 USDT in pool)
+        s[101] = AssetSpec(
+            "PENGB",
+            "Penguin Solutions Inc (testnet)",
+            18,
+            2500,
+            45030000000000000000,
+            300,
+            false,
+            0,
+            1000000000000000000
+        ); // 45.03 USDT; Binance spot; no mainnet pool >= 1,000 USDT, fee 2500
+        s[102] = AssetSpec(
+            "RDDTB", "Reddit (testnet)", 18, 2500, 92970000000000000000, 300, false, 0, 1000000000000000000
+        ); // 92.97 USDT; Binance spot; no mainnet pool >= 1,000 USDT, fee 2500
+        s[103] = AssetSpec(
+            "SOXLB",
+            "Semicon Bull 3X ETF (testnet)",
+            18,
+            2500,
+            50872500000000000000,
+            300,
+            false,
+            0,
+            1000441939278863313
+        ); // 50.8725 USDT; Binance spot 50.85 x uiMultiplier; mainnet pool 2500 (20937 USDT in pool)
+        s[104] = AssetSpec(
+            "TQQQB",
+            "ProShares UltraPro QQQ (testnet)",
+            18,
+            2500,
+            53091500000000000000,
+            300,
+            false,
+            0,
+            1001347622058686173
+        ); // 53.0915 USDT; Binance spot 53.02 x uiMultiplier; mainnet pool 2500 (29570 USDT in pool)
     }
 }
