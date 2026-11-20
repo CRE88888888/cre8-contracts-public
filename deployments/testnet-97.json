@@ -2,9 +2,9 @@
   "chainId": 97,
   "mode": "public",
   "note": "deployed on public BSC testnet (chain 97)",
-  "verifiedAtBlock": 143191994,
-  "generatedAt": "2026-11-17T04:29:01Z",
-  "gitCommit": "8864bdd46996ef4629cf9ac46ff161b3d3b04d8e",
+  "verifiedAtBlock": 143775403,
+  "generatedAt": "2026-11-20T05:37:10Z",
+  "gitCommit": "cc53e91a833c62d3efe3c8e4c76d3dde2ab8ecf7",
   "versioning": {
     "enrollAbi": "enroll(address,uint256,uint16)",
     "publicationDelaySeconds": 86400,
@@ -526,6 +526,71 @@
       "token": "0x5DB3B368E2FB73f87A889d1fAeFb9ee1Ae363eEb",
       "pool": "0x03C39F325356b9A6866788710e7194781B467754",
       "oracle": "0xE34dA280118cB6cfdAeFB2c514Cc53cE171bDC5a"
+    },
+    "AMCB": {
+      "token": "0x4AAF0123B58892D1fb6B5FEc38a9bF778049b94A",
+      "pool": "0xa103AB1524AC7b0bFa9793178Cc51483f7b8b482",
+      "oracle": "0xb4438CF14fc83C497151eb354d346f9245890d43"
+    },
+    "ANTB": {
+      "token": "0x4D6C73BC22F83074aba8601d919cFEA744899798",
+      "pool": "0xdDd410a38626Da560b49eC44D4dbF4B5c20106a9",
+      "oracle": "0x31291e814474815BeD1024e53fF53513062B2792"
+    },
+    "BMNRB": {
+      "token": "0xd416e9E9699a0150d2A5b3aA8DBD416058bDbc7e",
+      "pool": "0x73b1fE21D4be8724c28b0CD719f7136f38cf01c9",
+      "oracle": "0x404A248Eca83fcA35568914ace6Bb94258C49D88"
+    },
+    "BNCB": {
+      "token": "0x4B761cAFbdAba93D23e1e7FE07B2FAd5a6106713",
+      "pool": "0x7aBd3c8F284E64D25a8A58F03a688d90EE7d2dB2",
+      "oracle": "0xB2ee6e04F7963D7eCE5D7Aed3b64A34Ba89C115E"
+    },
+    "COINB": {
+      "token": "0x585173422c84d80481Fd260CDc20E68dfD7099d7",
+      "pool": "0xB6Cf3487debCbA25C77328CB5538023D3a3220F1",
+      "oracle": "0x4FB3CE3696c7109037b1c1902dD5947ee22AF863"
+    },
+    "CYPHB": {
+      "token": "0x7584DeddEABd63Ebe33a641b4dbb81CA41e8A603",
+      "pool": "0xba42AE3aa3cf0EAC84C76873A6fEa84F61EEbE5a",
+      "oracle": "0xb207E2CdD6832C180b2c9573BA17B70346330145"
+    },
+    "GMEB": {
+      "token": "0x7036C9bcb891291D5Ba68c70536B99DcB6D529dE",
+      "pool": "0x5a6D6ff05a6991278a1D071aeC146985B293B917",
+      "oracle": "0x1675D024a6616F57b7AC0e05a600509CcE7D6ecf"
+    },
+    "MRVLB": {
+      "token": "0x53FAB7d8a7C53403C2cc315499D19320911C4DA7",
+      "pool": "0x56040029BC662215BecB8f79682BC7B4C641D775",
+      "oracle": "0xE714714c12A288DF18cc277A89aDb10C7D99F6BD"
+    },
+    "PDDB": {
+      "token": "0x73D9908EDEd64F0B6674164269BF61fe7f2279E8",
+      "pool": "0xe44a4E9ceB38A04800180A40f79058B637FBBa7f",
+      "oracle": "0x6bCB19E99354af3123AF694C22603E5131453201"
+    },
+    "PENGB": {
+      "token": "0x854798eDf972e627908e8c98e5fF69588FE8E644",
+      "pool": "0x5707CA049b6A423662Fe34a9358895F3a1080374",
+      "oracle": "0x2357D66d82B97a9760276AF05E9d818Bb3BBA16C"
+    },
+    "RDDTB": {
+      "token": "0xBd7D0075C8A4A1F2335461bB5B04F983A8b56932",
+      "pool": "0x4A951E58EFaF9032eb9B5921Bb3A840EA328b6eD",
+      "oracle": "0x49Ce9523eCfC89D050227409f2105bbA49bd435A"
+    },
+    "SOXLB": {
+      "token": "0xD54d97Fc8861a8DBB0f59fF1b79492C270159595",
+      "pool": "0x1758639C470Dd7FB90147De884A95401606992A9",
+      "oracle": "0xC10588CD5EB031534337F5089f5256C3BA155C46"
+    },
+    "TQQQB": {
+      "token": "0xb82d787D3cEbaA1d8410C262fB062c31076816f8",
+      "pool": "0xe425151662d075823152a250b28c758923C45894",
+      "oracle": "0xF4cF6B466dE47CE98059984f77A9ac6Ec9cf4824"
     }
   },
   "yieldMarkets": [
