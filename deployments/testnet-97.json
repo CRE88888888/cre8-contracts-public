@@ -985,5 +985,117 @@
       "ownerAdjustable": true
     }
   ],
-  "yieldMarketCountNote": "C3 table heading says 32, but has 30 rows (21 Venus, 4 Lista, 5 Aave); no unspecified markets added"
+  "yieldMarketCountNote": "C3 table heading says 32, but has 30 rows (21 Venus, 4 Lista, 5 Aave); no unspecified markets added",
+  "borrow": {
+    "note": "#64 strategy earn simulation (chain 97 only). Each collateral asset has one fixed market; leveraged ETFs are not listed. LTV lines derived on chain: target=min(tier cap, F/2), deleverage=2F/3.",
+    "executor": "0x16ab59A8bacB578C6437528AC0961e234e4b717b",
+    "registry": "0x973341a0bA6A725630F2a4F66D7dbba92fEA4E00",
+    "lendingOracle": "0xc5E37daC4B0c662fD9B848e9882A453A00Fd2E50",
+    "venusComptroller": "0x93AB77260c8C62b26698bBB0ee8da3E175b9ad8D",
+    "vUSDT": "0xC0a352E6Aa517910b4F2CFc277B6161042CEa366",
+    "listaMoolah": "0x993237aC050512f3749bfEE2dE759b6B86Aea653",
+    "earnVault": {
+      "address": "0x2e915B874a5a544736f5afD97f3Fa1Dd45d417a9",
+      "yieldMarketId": "0xb2a013f0c2e1f9e7e5ccab3c3ceda82661e64f3efb736fa9ce9bdca51d98959c",
+      "aprBps": 450,
+      "incentiveBps": 50,
+      "supplyEnabledForCashEarn": false
+    },
+    "capPerMarketUsdt": "100000000000000000000000",
+    "limits": {
+      "maxBorrowUtilizationBps": 8500,
+      "maxVaultSupplyUtilizationBps": 9000,
+      "vaultExitUtilizationBps": 9500
+    },
+    "rateLabel": "\u6a21\u64ec\u5229\u7387",
+    "markets": [
+      {
+        "marketId": "0xfa06dd03eff35e3337a8b5b93a8a7943155b4f20e4d19bb0583db20bdd9f5415",
+        "collateral": "NVDAB",
+        "collateralToken": "0x5d63B93E50ef9F8851E1DE71d8255c2F0BEaB397",
+        "protocol": "Venus",
+        "tier": "STOCK",
+        "factorBps": 6000,
+        "targetLtvBps": 3000,
+        "deleverageLtvBps": 4000,
+        "borrowAprBps": 250,
+        "borrowIncentiveBps": 0,
+        "collateralIncentiveBps": 50,
+        "collateralVToken": "0x212EB4b5eEcb8a089A5079623B7f68A932315476"
+      },
+      {
+        "marketId": "0x00f2152bbbefde7b3e65c4b7de0af83a87875c02b6c84ef96410ac14edd850fe",
+        "collateral": "TSLAB",
+        "collateralToken": "0x587Cb8fe057344490a28390c7986E1BeFf5aD36e",
+        "protocol": "Venus",
+        "tier": "STOCK",
+        "factorBps": 6000,
+        "targetLtvBps": 3000,
+        "deleverageLtvBps": 4000,
+        "borrowAprBps": 250,
+        "borrowIncentiveBps": 0,
+        "collateralIncentiveBps": 50,
+        "collateralVToken": "0xbd0A5EaE45C3cb3b477abAb2c2cDb266180efF9c"
+      },
+      {
+        "marketId": "0x4632539a0ba6e5e9843b401d97b66b8b34d23fdab2005feacefd5452055c410e",
+        "collateral": "SPCXB",
+        "collateralToken": "0xe7020b7E3adaDD3E701A704817b52917C0cC6cE2",
+        "protocol": "Venus",
+        "tier": "STOCK",
+        "factorBps": 5000,
+        "targetLtvBps": 2500,
+        "deleverageLtvBps": 3333,
+        "borrowAprBps": 250,
+        "borrowIncentiveBps": 0,
+        "collateralIncentiveBps": 50,
+        "collateralVToken": "0x45E9cF220A38630a551AFe2a10d1F2126A749a5d"
+      },
+      {
+        "marketId": "0xd8def95e75d2489c340ac4d9769646707cf55d17d7aa7f8644c89b64b41844e7",
+        "collateral": "QQQB",
+        "collateralToken": "0x6a8be9e4f52925A6DbA021bcB8728891a3777D3e",
+        "protocol": "Lista",
+        "tier": "INDEX_LARGE_CAP",
+        "factorBps": 7000,
+        "targetLtvBps": 3500,
+        "deleverageLtvBps": 4666,
+        "borrowAprBps": 250,
+        "borrowIncentiveBps": 50,
+        "collateralIncentiveBps": 100
+      },
+      {
+        "marketId": "0x208d888e7c3d5ef4d9ccc51083daffe7ddfbce978d339ce258544022cfd9804a",
+        "collateral": "MSTRB",
+        "collateralToken": "0x4a77Cda9a91376A6d6e0f69f807335E0dab8FC5F",
+        "protocol": "Lista",
+        "tier": "CRYPTO_LINKED",
+        "factorBps": 5000,
+        "targetLtvBps": 2000,
+        "deleverageLtvBps": 3333,
+        "borrowAprBps": 250,
+        "borrowIncentiveBps": 50,
+        "collateralIncentiveBps": 100
+      }
+    ],
+    "deployedAtBlocks": [
+      144259996,
+      144260395
+    ],
+    "demo": {
+      "account": "0x5683Cf2f1e038e8c4444Bf853A31dBF4C841BF54",
+      "market": "NVDAB/Venus",
+      "txs": {
+        "supplyCollateral": "0xbe76b51149b4da1baf9cfdb698f30606c58676e01d8b1ec1c1839fec34ace167",
+        "borrowIntoVault": "0xe74e681ce7f3f09b17c5723de5ef47124573a4b8fdfec04630c99b84cbaa0e33",
+        "priceDrop": "0x3008e1fa239753aefa51bf8e0fff82e89ac34c9b02ac955356b55c207b927841",
+        "deleverage": "0x2be7ae36653252d1c6ec26f0965245c627e6c4686edea0fe3bbd19172bf6714b",
+        "priceRestore": "0xd8ab2e2f70b2d5d2216560bcb036be29b9406a4e6db5806a7d584eb59ef2499e",
+        "repayFromVault": "0xa05b8c8d093d2b4e6730f30e4560bf4f03d95f6bb5cad27cbdaab17f273f33f6",
+        "withdrawCollateral": "0x3c70187fa6dcde8b458c13b51f51550bd8773126a9657c84c0daeaa374f5fad4",
+        "claimCollateralIncentive": "0xdfb5c99bb854d486e993821875c9294498ba3c93404b731e930640b336fc4fd9",
+        "claimVaultIncentive": "0x1e2e3d63463d098d482c8ea931d5b8b509f91c6032837798f163c93bcb9a6d7c"
+      }
+    }
+  }
 }
