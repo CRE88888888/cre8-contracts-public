@@ -42,6 +42,14 @@ LTV ＝ 負債價值 ÷ 抵押價值，用市場自己的 oracle（也就是會�
 | SPCXB | Venus | 50% | 個股 | 25% | 33.3% |
 | QQQB | Lista | 70% | 指數 | 35% | 46.7% |
 | MSTRB | Lista | 50% | 幣價連動 | 20% | 33.3% |
+| BTCB、WBNB（#67） | Lista | 80% | 幣價連動 | 20% | 53.3% |
+| SPYB、EWYB、XAUt（#67） | Lista | 70% | 指數 | 35% | 46.7% |
+| AAPLB、MSFTB、GOOGLB、AMZNB、METAB、TSMB、AVGOB（#67） | Lista | 60% | 大型股（類別上限 35%，F/2 先卡住） | 30% | 40% |
+| NFLXB、INTCB、SKHYB、MUB、SNDKB、ANTB、BABAB、PDDB、CRCLB、HOODB（#67） | Lista | 60% | 個股 | 30% | 40% |
+| GMEB（#67） | Lista | 50% | 個股 | 25% | 33.3% |
+| COINB、BMNRB、BNCB（#67） | Lista | 50% | 幣價連動 | 20% | 33.3% |
+
+#67（2026-11-23）補上 21 檔首發基金裡其餘的非槓桿持股，共 31 個市場。已部署的 `AtpBorrowRegistry` 最多 32 個市場（`MAX_MARKETS`，合約不改），所以這些沒有上：槓桿類 TQQQB、SOXLB（§D 不開放）；DOGE（波動特別大，§D）；只在基金裡占 5% 衛星部位的小型股 AMCB、DJTB、CYPHB、PENGB、MRVLB、RDDTB（每檔對基金淨加息影響 < 0.1%）。留一個空位給日後換市場（`setCollateralMarket` 要先登記新市場）。新市場一律用 Lista：Lista 每個市場獨立，Venus 的健康度是整個帳戶一起算，同一檔基金多個 Venus 抵押品會互相占用額度。新市場的模擬利率與既有 Lista 市場相同（借款 2.5%、借款激勵 0.5%、抵押激勵 1%），每個市場背景流動性 25 萬 USDT。
 
 模擬利率（owner 可調）：借款 2.5%；策略 vault 4.5%＋激勵 0.5%；Venus 抵押激勵 0.5%；Lista 抵押激勵 1%、借款激勵 0.5%。這些是「接近真實」的測試值，不是產品決定。背景流動性：vUSDT 50 萬、每個 Lista 市場 25 萬、策略 vault 25 萬。
 
@@ -105,3 +113,9 @@ fork 實測（2026-11-23）：部署 59 筆、32,288,031 gas（最大單筆 8,78
 ## 7. 已知限制：策略 vault 份額與 `AtpExecutor.executeWithdraw`
 
 策略 vault 登記在既有 `AtpYieldRegistry`（供借款合約讀使用率與利率），`supplyEnabled = false` 擋住現金生息存入，但既有 `AtpExecutor.executeWithdraw` 沒有「只限現金生息」的檢查：**若帳戶曾對 `AtpExecutor` approve 策略 vault 份額**，session key 可把策略份額贖回成帳戶現金。錢仍在同一個投資組合帳戶，不會到別的帳戶或用戶錢包，但會跟現金混在一起、借款部位失去 vault 還款來源。`AtpExecutor` 已部署不改，所以後端必須：只對 `AtpBorrowExecutor` approve 策略 vault 份額、絕不對 `AtpExecutor` approve；session policy 不允許對策略 vault 的 market id 呼叫 `executeWithdraw`。主網要在下一版 executor 或 registry 擋掉。
+
+## 8. #67 補齊首發基金市場（2026-11-23）
+
+OWNER 從部署者轉入 0.01 tBNB（`0x33b85c0cbc0f51d8024b6d51d96eca3e23850ba0e4bc86d1db934ce54bc93300`）後重跑同一支冪等腳本：26 個新 Lista 市場（每個：設 oracle 價、`createMarket`、激勵、25 萬 USDT 背景流動性、`registerMarket`），183 筆、21,921,393 gas（最大單筆約 32 萬），區塊 144321385–144323209，全部成功。第一次執行到第 25 個市場時本機磁碟滿、forge 寫不進 broadcast 檔而中斷，清出空間後重跑，腳本從斷點接著補完。再跑一次沒有交易。既有 5 個市場的價格與參數沒有動。
+
+驗證：`marketCount()` = 31；31 個市場 `status(id, 0).gate` 全部 0（可借）；目標 LTV／減倉線見 `deployments/testnet-97.json` 的 `borrow.markets`（新列有 `addedIn: "#67"`）。fork 演練：同一腳本 184 筆、21,586,460 gas，再跑一次 0 筆。

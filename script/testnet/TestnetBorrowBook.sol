@@ -9,6 +9,11 @@ import { TestnetAssets } from "./TestnetAssets.sol";
 /// ~2.5%, USDT vault ~4.5%); the CRE8 LTV lines are not here: the registry derives them from the factor
 /// (target F/2, deleverage 2F/3). Leveraged ETFs (TQQQB, SOXLB) and very volatile assets are deliberately absent. Target LTV per class
 /// (registry): index 35%, stock 30%, crypto-linked 20%, each also <= F/2.
+/// @dev #67 adds the other holdings of the 21 launch funds (backend `strategies`, 2026-11-23). The deployed
+/// registry admits at most 32 markets (`AtpBorrowRegistry.MAX_MARKETS`), so the 5% satellite-only small caps
+/// (AMCB, DJTB, CYPHB, PENGB, MRVLB, RDDTB) and DOGE (very volatile, EARN_UX §D) are left out, and one slot is
+/// kept free for replacing a market. Rows 0-4 are the #64 markets and must not move: a market id is derived
+/// from the row (kind, collateral).
 library TestnetBorrowBook {
     struct Spec {
         string symbol;
@@ -33,7 +38,7 @@ library TestnetBorrowBook {
     uint256 internal constant VENUS_SEED = 500_000e18;
     uint256 internal constant LISTA_SEED = 250_000e18;
     uint256 internal constant VAULT_SEED = 250_000e18;
-    uint256 internal constant COUNT = 5;
+    uint256 internal constant COUNT = 31;
 
     /// @dev One row per asset: the asset's designated market. Venus factors follow Venus' live bStock
     /// collateral factors (TSLAB / NVDAB 60%, SPCXB 50%).
@@ -44,6 +49,39 @@ library TestnetBorrowBook {
         s[2] = Spec("SPCXB", BT.Kind.VENUS, BT.Tier.STOCK, 0.5e18, 50);
         s[3] = Spec("QQQB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.7e18, 100);
         s[4] = Spec("MSTRB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.5e18, 100);
+        // #67: every new row is a Lista market (isolated per market; Venus health is account-wide, so mixing more
+        // Venus collateral in one portfolio would let one asset's borrowing use another's headroom).
+        // Crypto majors: 80% LLTV like Lista's BTCB / WBNB markets; the crypto-linked 20% cap applies.
+        s[5] = Spec("BTCB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.8e18, 100);
+        s[6] = Spec("WBNB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.8e18, 100);
+        // Index ETFs and gold: 70% LLTV, target 35%.
+        s[7] = Spec("SPYB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.7e18, 100);
+        s[8] = Spec("EWYB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.7e18, 100);
+        s[9] = Spec("XAUt", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.7e18, 100);
+        // Large caps: bStock LLTV 60% like Venus' NVDAB / TSLAB, so F/2 = 30% binds under the 35% class cap.
+        s[10] = Spec("AAPLB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[11] = Spec("MSFTB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[12] = Spec("GOOGLB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[13] = Spec("AMZNB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[14] = Spec("METAB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[15] = Spec("TSMB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        s[16] = Spec("AVGOB", BT.Kind.LISTA, BT.Tier.INDEX_LARGE_CAP, 0.6e18, 100);
+        // Other stocks: 60% LLTV, target 30%; GMEB (meme stock) 50%, target 25%, like SPCXB.
+        s[17] = Spec("NFLXB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[18] = Spec("INTCB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[19] = Spec("SKHYB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[20] = Spec("MUB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[21] = Spec("SNDKB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[22] = Spec("ANTB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[23] = Spec("BABAB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[24] = Spec("PDDB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[25] = Spec("CRCLB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[26] = Spec("HOODB", BT.Kind.LISTA, BT.Tier.STOCK, 0.6e18, 100);
+        s[27] = Spec("GMEB", BT.Kind.LISTA, BT.Tier.STOCK, 0.5e18, 100);
+        // Stocks that move with crypto prices: 50% LLTV, target 20% (class cap), like MSTRB.
+        s[28] = Spec("COINB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.5e18, 100);
+        s[29] = Spec("BMNRB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.5e18, 100);
+        s[30] = Spec("BNCB", BT.Kind.LISTA, BT.Tier.CRYPTO_LINKED, 0.5e18, 100);
     }
 
     /// @notice The strategy earn vault's market id in `AtpYieldRegistry` (supply disabled there: strategy only).
