@@ -56,9 +56,12 @@ contract RoutingDemoAccount {
 
 /// @notice Chain 97: one routing v2 rehearsal by a demo account owned by OWNER, each step its own transaction.
 /// QQQB: open on Lista borrowing USDC into the USDC earn vault -> partial repay -> migrate to the Lista USD1
-/// market (other loan token, one call) -> switch the deposit to Venus vUSD1 -> the owner tightens the route's
-/// lines -> anyone deleverages -> lines back -> close. NVDAB: open on Venus borrowing USDT into Aave -> migrate to Lista (same token) ->
-/// close. Then rewards: claim to the box, collect into the account, sweep to the owner's recipient.
+/// market (other loan token, one call) -> switch the deposit to Venus vUSD1 -> (local fork only: the owner
+/// tightens the route's lines -> anyone deleverages -> lines back) -> close. NVDAB: open on Venus borrowing
+/// USDT into Aave -> migrate to Lista (same token) -> close. Then rewards: claim to the box, collect into the
+/// account, sweep to the owner's recipient.
+/// The deleverage drill changes the lines of a route every account on the chain shares, so it only runs
+/// against a local Anvil fork; on the public chain the script skips it and never touches a shared setting.
 /// Env: TESTNET_EXECUTOR, ROUTING_EXECUTOR; optional ROUTING_DEMO_COLLATERAL (raw, default 5e18).
 contract RoutingDemoTestnet is Script {
     uint256 internal constant MAX = type(uint256).max;
@@ -93,6 +96,7 @@ contract RoutingDemoTestnet is Script {
         c.amount = vm.envOr("ROUTING_DEMO_COLLATERAL", uint256(5e18));
         c.usdt = c.core.numeraire();
         _tokens(c);
+        bool fork = _isLocalFork();
 
         bytes memory code = abi.encodePacked(type(RoutingDemoAccount).creationCode, abi.encode(TB.OWNER));
         c.account = RoutingDemoAccount(TB.create2Address("routing.demo.account.v1", code));
@@ -127,13 +131,17 @@ contract RoutingDemoTestnet is Script {
             )
         );
         _call(c, abi.encodeCall(c.lend.executeSwitchVault, (a, vaultUsd1, venusUsd1, MAX, MAX)));
-        // Deleverage drill. Not by moving the price: the lending oracle is shared with the v1 positions on
-        // this chain. The owner tightens this one route's lines under the open position (target 10%,
-        // deleverage 20%; the position sits near 25%), anyone repays from the box back to the target, and the
-        // owner puts the lines back.
-        c.credit.setLtvConfig(qqqUsd1, 0.1e18, 0.2e18);
-        uint256 repaid = c.lend.executeDeleverage(a, qqqUsd1, venusUsd1, MAX);
-        c.credit.setLtvConfig(qqqUsd1, 0, 0);
+        // Deleverage drill, on a local fork only. The owner tightens this route's lines under the open
+        // position (target 10%, deleverage 20%; the position sits near 25%), anyone repays from the box back
+        // to the target, and the owner puts the lines back. The route is the one every account uses: on the
+        // public chain anyone could deleverage a real position on it between those transactions, so there
+        // the step is skipped (neither the lines nor the shared lending oracle are ever moved).
+        uint256 repaid;
+        if (fork) {
+            c.credit.setLtvConfig(qqqUsd1, 0.1e18, 0.2e18);
+            repaid = c.lend.executeDeleverage(a, qqqUsd1, venusUsd1, MAX);
+            c.credit.setLtvConfig(qqqUsd1, 0, 0);
+        }
         // Close: the box's vUSD1 first, a little of the account's own USD1 for share rounding.
         _mint(c.usd1, a, 1e18);
         _call(c, abi.encodeCall(c.lend.executeReduce, (a, qqqUsd1, venusUsd1, MAX, MAX, 1e18, MAX)));
@@ -177,7 +185,9 @@ contract RoutingDemoTestnet is Script {
         require(IERC20(c.reward).balanceOf(TB.OWNER) >= collected && collected >= 1e18, "rewards");
         console.log("ROUTING_DEMO_ACCOUNT", a);
         console.log("ROUTING_DEMO_BOX", box);
-        console.log("ROUTING_DEMO_DELEVERAGE_REPAID", repaid);
+        console.log(
+            fork ? "ROUTING_DEMO_DELEVERAGE_REPAID" : "ROUTING_DEMO_DELEVERAGE_SKIPPED_NOT_A_FORK", repaid
+        );
         console.log("ROUTING_DEMO_REWARD_COLLECTED", collected);
     }
 
@@ -224,6 +234,15 @@ contract RoutingDemoTestnet is Script {
         address[5] memory tokens = [c.qqq, c.nvda, c.usdt, c.usdc, c.usd1];
         for (uint256 i; i < tokens.length; ++i) {
             c.account.execute(tokens[i], abi.encodeCall(IERC20.approve, (address(c.lend), MAX)));
+        }
+    }
+
+    /// @dev Whether the RPC is a local Anvil node (a fork of chain 97). A public node rejects the method.
+    function _isLocalFork() private returns (bool) {
+        try vm.rpc("anvil_nodeInfo", "[]") returns (bytes memory) {
+            return true;
+        } catch {
+            return false;
         }
     }
 

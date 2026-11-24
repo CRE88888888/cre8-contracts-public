@@ -62,10 +62,21 @@ contract AtpBorrowLensV2 is IAtpBorrowLensV2 {
     function routeDebt(bytes32 id, address account) public view returns (uint256 owed) {
         R.Route memory r = borrowRegistry.route(id);
         owed = RouteReader.debt(r, _core(r), account);
-        if (r.venue == R.Venue.VENUS) {
+        if (r.venue == R.Venue.VENUS && owed != 0) {
             uint256 all = borrowRegistry.venusPrincipal(account, r.loan);
+            if (all == 0) {
+                // No principal left in the token (interest that outlived it): the debt is one route's only,
+                // the account's first Venus position in the loan token. Not a position, not its debt.
+                bytes32[] memory ids = borrowRegistry.accountRoutes(account);
+                for (uint256 i; i < ids.length; ++i) {
+                    if (ids[i] == id) return owed;
+                    R.Route memory other = borrowRegistry.route(ids[i]);
+                    if (other.venue == R.Venue.VENUS && other.loan == r.loan) break;
+                }
+                return 0;
+            }
             uint256 mine = borrowRegistry.principal(account, id);
-            if (all != 0 && mine < all) owed = Math.mulDiv(owed, mine, all, Math.Rounding.Ceil);
+            if (mine < all) owed = Math.mulDiv(owed, mine, all, Math.Rounding.Ceil);
         }
     }
 

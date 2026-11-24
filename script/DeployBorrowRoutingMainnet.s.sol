@@ -50,7 +50,8 @@ interface IOwned2Step {
 ///    contracts against this repository's build, their wiring, the allowlists equal to the spec exactly (no
 ///    route or vault more or less), the safety lines of every route, the rate reporter (ATP_RATE_REPORTER,
 ///    never the operator key), and that ATP_SAFE owns the registry with no pending handover. Reverts on the
-///    first mismatch.
+///    first mismatch. Env: ATP_EXECUTOR is required and must be the core recorded in
+///    `deployments/mainnet.json` (it is never read from the contracts being verified).
 ///
 /// Nothing in this script moves funds, and nothing here was broadcast.
 contract DeployBorrowRoutingMainnet is Script, BorrowRoutingMainnetSpecs {
@@ -323,12 +324,37 @@ contract DeployBorrowRoutingMainnet is Script, BorrowRoutingMainnetSpecs {
     /// @notice Read everything back from chain. Reverts on the first mismatch with what `run()` deploys and
     /// what the spec lists. With ATP_SAFE set, also requires the Safe to own the registry with no pending
     /// handover (the routing registry has no owner of its own: it follows `AtpRegistry.owner()`).
+    /// ATP_EXECUTOR is required: the core is never taken from the contracts being verified, and it must be
+    /// the `AtpExecutor` (with its `AtpRegistry`) this repository records in `deployments/mainnet.json`.
     function verify(address executor) public view {
+        address core = vm.envAddress("ATP_EXECUTOR");
+        _requireManifestCore(core);
+        _verify(executor, core);
+    }
+
+    /// @dev The anchor of `verify`: `core` is the live core recorded in `deployments/mainnet.json` for this
+    /// chain, and its registry is the recorded one. A routing stack bound to any other core fails here or in
+    /// `_verifyWiring`, whatever its own getters say.
+    function _requireManifestCore(address core) internal view {
+        string memory json = vm.readFile(string.concat(vm.projectRoot(), "/deployments/mainnet.json"));
+        require(vm.parseJsonUint(json, ".chainId") == block.chainid, "deployments/mainnet.json: other chain");
+        require(
+            core == vm.parseJsonAddress(json, ".contracts.AtpExecutor"),
+            "ATP_EXECUTOR is not the AtpExecutor in deployments/mainnet.json"
+        );
+        require(
+            address(IRoutingCore(core).registry()) == vm.parseJsonAddress(json, ".contracts.AtpRegistry"),
+            "ATP_EXECUTOR.registry() is not the AtpRegistry in deployments/mainnet.json"
+        );
+    }
+
+    /// @dev `verify` against a given core. Only `verify` (core from ATP_EXECUTOR, anchored to the manifest)
+    /// and fork tests (a stand-in core passed explicitly) reach this.
+    function _verify(address executor, address core) internal view {
         IAtpBorrowExecutorV2 lend = IAtpBorrowExecutorV2(executor);
         AtpBorrowRegistryV2 credit = AtpBorrowRegistryV2(lend.borrowRegistry());
         AtpBorrowLensV2 lens = AtpBorrowLensV2(lend.lens());
-        // ATP_EXECUTOR, when given, must be the core this registry was bound to.
-        _verifyWiring(vm.envOr("ATP_EXECUTOR", address(credit.atpExecutor())), lend);
+        _verifyWiring(core, lend);
 
         require(!credit.paused(), "registry is paused");
         R.VaultKind[3] memory kinds = [R.VaultKind.ERC4626, R.VaultKind.VENUS, R.VaultKind.AAVE];
@@ -400,7 +426,6 @@ contract DeployBorrowRoutingMainnet is Script, BorrowRoutingMainnetSpecs {
         // The code on chain is this repository's build, byte for byte, and every immutable in it holds one
         // of the addresses listed here (each of which a getter checked above or in `_verifyWiring` returns).
         address venusAdapter = credit.adapterOf(R.VaultKind.VENUS);
-        address core = address(credit.atpExecutor());
         _requireCode(
             address(credit),
             "AtpBorrowRegistryV2.sol:AtpBorrowRegistryV2",

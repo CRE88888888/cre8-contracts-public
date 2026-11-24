@@ -1,6 +1,11 @@
 # 策略加息動態路由 v2（合約介面與規則）
 
-> 介面版本：**v2.0-draft5（2026-11-24）**。改介面時在這裡往下加一行。
+> 介面版本：**v2.0-draft6（2026-11-25）**。改介面時在這裡往下加一行。
+>
+> **draft6（第三輪審查的修正，對照表在 §16；ABI 完全沒變，變的是下面兩個行為。這一版還沒部署：測試網 chain 97 上跑的仍是 draft5 的程式）：**
+> 1. Venus→Venus 的 `executeMigrate` 現在也會被 `ForeignDebt` 擋下（draft5 的檢查在這條路徑上永遠通過）。帳戶自己的負債不受影響。
+> 2. `lens.routeDebt`：某個幣在 Venus 的本金已經是 0、只剩利息零頭時，整筆只歸給帳戶在這個幣的**第一個** Venus 部位（`accountRoutes` 的順序），同幣其他路線回 0；帳戶在這個幣沒有 v2 的 Venus 部位（外來負債）時每條都回 0。draft5 是每條都回整筆。**後端算帳戶負債用 `tokenDebt(account, token)`，不要加總 `routeDebt`**（兩版都適用，見 §5）。
+> 3. 主網 `verify()` 一定要帶 `ATP_EXECUTOR`，而且必須是 `deployments/mainnet.json` 記的核心（§13）。
 >
 > **draft5（複審的修正，對照表在 §15；ABI 只多了唯讀函式，draft4 的呼叫都不用改）：**
 > 1. lens 新增 `minDebt(routeId)`：部分還款後最少要留下的負債（`minLoan` × 1.01；Venus 是 0）。Lista 部位的負債 ≤ 這個數、策略盒的錢又不夠全還時，第三方的 `executeDeleverage` 一毛都還不了，**後端要自己補錢全還或關掉**（做法在 §5「小額部位」）。
@@ -38,7 +43,7 @@
 > 9. 一筆還款讓帳戶在該借款幣的負債歸零時（`executeReduce` 或 `executeMigrate` 的舊路線），會把指定 vault 的存款一次領完，超過負債的部分同一筆付回帳戶（`Released` 事件）。
 > 10. `executeRelease`／關閉時的放回，也會把直接進到策略盒的同幣現金一起付回帳戶。
 
-狀態：v2 是**新合約**，放在 `src/atp/borrow/v2/`，不改已部署的 v1（`AtpBorrowExecutor`／`AtpBorrowRegistry`）。測試網（chain 97）已於 2026-11-25 部署（地址在 §12 與 `deployments/testnet-97.json` 的 `borrowV2`）；主網還沒部署。
+狀態：v2 是**新合約**，放在 `src/atp/borrow/v2/`，不改已部署的 v1（`AtpBorrowExecutor`／`AtpBorrowRegistry`）。測試網（chain 97）已於 2026-11-25 部署（地址在 §12 與 `deployments/testnet-97.json` 的 `borrowV2`），跑的是 draft5 的程式（commit `1888572`）；draft6 的修正還沒部署到任何鏈。主網還沒部署。
 
 ## 1. 跟 v1 差在哪
 
@@ -63,7 +68,7 @@
 | `AtpBorrowExecutorV2` | 唯一搬錢的合約，永久綁定 registry、lens 與 extension，建構時建立策略盒實作。自己實作開倉、還款／關閉、減倉、搬家；其他進入點經 fallback 以 delegatecall 交給 extension | 18.4 KB |
 | `AtpBorrowExecutorV2Extension` | executor 的另一半程式：換 vault、放回、救援、激勵。沒有狀態、沒有 immutable，只能被 executor 以 delegatecall 執行（直接呼叫會 revert） | 6.4 KB |
 | `AtpBorrowRegistryV2` | 白名單（借款幣、路線、vault、adapter、激勵代幣）、同意、上限、LTV 線設定、利率回報、記帳 | 24.2 KB（上限 24,576，剩 389 bytes） |
-| `AtpBorrowLensV2` | 所有讀取：部位、健康度、LTV 線、開倉條件、狀態快照；executor 的健康度、開倉、減倉計畫檢查也用它 | 21.9 KB |
+| `AtpBorrowLensV2` | 所有讀取：部位、健康度、LTV 線、開倉條件、狀態快照；executor 的健康度、開倉、減倉計畫檢查也用它 | 22.2 KB |
 | `StrategyBox` | 每個帳戶一個，只收 vault 份額（Lista vault share／vToken／aToken）與它們的激勵。只有 executor 能叫它 approve 或送出代幣 | 2.8 KB |
 | `Erc4626VaultAdapter`／`VenusVaultAdapter`／`AaveVaultAdapter` | 三種存款場所，同一個介面 `IStrategyVaultAdapter`。無狀態、只聽 executor。每種 kind 只能設一次（`setAdapter`） | 2.5–4.9 KB |
 | `RoutingV2Deployer` | 只用一次的部署器：用自己的 nonce 1、2、3 依序建立 registry、lens、executor，所以 executor 地址在部署器上鏈時就固定 | 2.1 KB |
@@ -146,6 +151,8 @@ Venus 的負債按借款幣記在帳戶上（同一個幣只有一筆），健�
 - **預算** `budgetValue` ＝ Σ(該帳戶每個 Venus 抵押品的價值 × 它的目標 LTV)。沒在 v2 登記、或沒有分級的抵押品預算算 0。
 - **減倉線** `deleverageValue` ＝ Σ(價值 × 減倉 LTV)。`debtValue ≥ deleverageValue` 時任何人可減倉；要還哪個幣的負債由呼叫者選路線（`routeId` 的借款幣）與該幣的 vault。
 - `lens.debt(routeId, account)` 回傳帳戶在這個借款幣的**整筆**負債；`lens.routeDebt(routeId, account)` 是按 principal 比例分給這條路線的部分（這個幣別只剩這條路線有 principal 時＝整筆）。`executeReduce` 的 `repayAmount = max` 還的是 `routeDebt`。
+- **本金歸零、只剩利息零頭時**（例如還款金額剛好等於本金、或減倉還掉了全部本金）：這個幣的整筆負債只算在帳戶第一個這個幣的 Venus 部位上（`accountRoutes` 裡排最前面的那條），同幣其他路線的 `routeDebt` 是 0。對 `routeDebt` 是 0 的路線送 `repayAmount = max` 不會還任何錢（沒有同時取回抵押就 `NothingToRepay`）。要清掉零頭：對 `routeDebt` 不是 0 的那條送 `max`，或在任何一條同幣路線上傳明確金額（上限是 `debt()`）。帳戶在這個幣沒有任何 v2 的 Venus 部位時（負債不是 v2 開的），每條路線的 `routeDebt` 都是 0。
+- **後端怎麼讀負債：** 帳戶在某個幣的總負債用 `lens.tokenDebt(account, token)`（Venus 加上清單裡的 Lista 部位）；只看 Venus 那一筆就用任何一條該幣路線的 `debt()`。**不要把各路線的 `routeDebt` 加起來當成帳戶負債**：比例是向上取整的（n 條路線加起來最多多 n−1 個最小單位），而且測試網目前部署的 draft5 lens 在本金歸零時每條同幣路線都回整筆，加總會重複計算。`routeDebt` 只用來知道「這條路線送 `max` 會還多少」與顯示各路線的份額。
 - 同一個抵押品的多條 Venus 路線（只差借款幣）共用同一批 vToken；`accountRoutes` 只會留一筆有 principal 的。
 
 **關閉兩個以上 Venus 部位（對應 backend #252）：** vault 現在是合併的，不需要「誰的 vault 最大誰收尾」。
@@ -391,9 +398,11 @@ USDT 會多幾個 minter（模擬利息用）：新的 USDT earn vault、Aave US
 
 演練內容：QQQB 在 Lista 借 USDC 存 USDC vault → 部分還款 → 一筆搬到 Lista USD1 市場（換借款幣）→ 存款換到 Venus vUSD1 → owner 把這條路線的線調緊（目標 10%、減倉 20%）→ 第三方觸發減倉（還 505.0 USD1）→ 線調回預設 → 關閉；NVDAB 在 Venus 借 USDT 存 Aave → 一筆搬到 Lista（同幣）→ 關閉；激勵由 vault 發給策略盒 → `collectRewards` 進帳戶 → `executeSweepRewards` 到 owner 指定地址。
 
-**v1 與 v2 不能在同一個帳戶上同時用 Venus（後端要守的規則）：** Venus 的負債與抵押是整個帳戶一起算的，v2 會把帳戶在 Venus 的全部 USDT 負債、全部 vToken 當成自己的。規則：一個投資組合帳戶要嘛用 v1、要嘛用 v2；要從 v1 換到 v2，先把 v1 在 Venus 的部位完全關掉（負債 0、抵押取回、v1 的 vault 份額贖回），再開 v2。合約這邊多一道保險：帳戶在 Venus 欠某個借款幣、但在 v2 沒有這個幣的 Venus 部位時，v2 這個幣的 Venus 路線開不了（`ForeignDebt`）。v2 自己的部位本金還完、只剩利息零頭時不算（部位會留在 `accountRoutes` 直到這個幣的負債歸零）。這道保險只擋「先有 v1 負債、才來開 v2」；v2 部位開著之後又去 v1 借同一個幣，合約分不出來，還是要靠後端的規則。Lista 每個市場獨立，v1／v2 用同一個 Lista 市場時也一樣要先關 v1（合約擋不到這個，因為同一個市場的負債分不出是誰開的）。
+**v1 與 v2 不能在同一個帳戶上同時用 Venus（後端要守的規則）：** Venus 的負債與抵押是整個帳戶一起算的，v2 會把帳戶在 Venus 的全部 USDT 負債、全部 vToken 當成自己的。規則：一個投資組合帳戶要嘛用 v1、要嘛用 v2；要從 v1 換到 v2，先把 v1 在 Venus 的部位完全關掉（負債 0、抵押取回、v1 的 vault 份額贖回），再開 v2。合約這邊多一道保險：帳戶在 Venus 欠某個借款幣、但在 v2 沒有這個幣的 Venus 部位時，v2 這個幣的 Venus 路線開不了（`ForeignDebt`），用 `executeOpen` 或搬家搬進去都一樣（搬家這條路徑是 draft6 才擋得住的；測試網上的 draft5 程式用 Venus→Venus 搬家可以繞過，見 §16 的 L-1，所以在換上修正版之前這一點完全靠後端的規則）。v2 自己的部位本金還完、只剩利息零頭時不算（部位會留在 `accountRoutes` 直到這個幣的負債歸零）。這道保險只擋「先有 v1 負債、才來開 v2」；v2 部位開著之後又去 v1 借同一個幣，合約分不出來，還是要靠後端的規則。Lista 每個市場獨立，v1／v2 用同一個 Lista 市場時也一樣要先關 v1（合約擋不到這個，因為同一個市場的負債分不出是誰開的）。
 
 演練只動它自己的示範帳戶（OWNER 用 CREATE2 建的 `RoutingDemoAccount`）與 v2 的東西：模擬代幣是鑄給示範帳戶的，減倉演練調的是 v2 這一條路線的線，**不動借貸 oracle 的價格**（那個 oracle v1 的部位也在讀；最早的版本是把 QQQB 價格砍半再調回，已改掉）。它會在核心 `AtpRegistry` 登記一個示範帳戶自己的非公開策略並 enroll 自己。
+
+**減倉那一段現在只在本機 fork 上跑（第三輪審查 I-4）：** QQQB/USD1 是所有帳戶共用的路線。2026-11-25 那次鏈上演練把它的線調緊（目標 10%、減倉 20%）再調回，中間那兩筆交易之間，這條路線上 LTV ≥ 20% 的其他帳戶任何人都可以減倉。腳本現在用 `anvil_nodeInfo` 判斷：RPC 是本機 Anvil fork 才做「調緊 → 第三方減倉 → 調回」這三筆；對公開測試網跑時自動跳過（印 `ROUTING_DEMO_DELEVERAGE_SKIPPED_NOT_A_FORK`），鏈上那一趟少 3 筆，不再動任何共用設定。上面的演練紀錄與筆數是改之前的。審查員讀過鏈上 66 條路線的 `ltvConfig`，目前都是預設值，沒有殘留。改完後用目前的鏈上狀態各模擬一次（都不廣播）：對公開節點 38 筆、跳過減倉、結束時沒有部位；對本機 Anvil fork 41 筆、第三方減倉還 504.97 USD1。另外，示範帳戶的 CREATE2 地址跟這個腳本檔案的編譯結果綁在一起，檔案改過之後下次演練會建一個新的示範帳戶（模擬裡是 `0xd641…3Fb1`），舊的 `0x65c3…C37c` 沒有部位、留在鏈上不用處理。
 
 要注意的兩件事：
 - 演練腳本所有步驟在同一個模擬時間點跑，vault 還沒生息，份額取整會讓 vault 比負債少 1 個最小單位。腳本先給帳戶 1 個借款幣當 `maxCashIn`。後端剛開倉就馬上搬家或關閉也會遇到，同樣帶一點 `maxCashIn` 即可；隔幾個區塊之後 vault 的利息就蓋過去了。
@@ -414,13 +423,13 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 
 腳本 `script/DeployBorrowRoutingMainnet.s.sol`，名單在 `script/BorrowRoutingMainnetSpecs.sol`。分三步，部署的 key 不需要任何 owner 權限，owner（Safe）不需要部署任何東西。
 
-**前置：** 目前主網上 2026-11-09 那套 `AtpExecutor`（`0x5477…c9e7`）沒有 `globalPaused()`，registry 的 owner 還是部署者 EOA。v2 要綁的是新版核心（`DeployAtpMainnet` 部署、owner 交給 Safe 之後的那一套）；腳本一開始就會檢查 `ATP_EXECUTOR.globalPaused()`，舊的那套會直接被拒絕。
+**前置：** 目前主網上 2026-11-09 那套 `AtpExecutor`（`0x5477…c9e7`）沒有 `globalPaused()`，registry 的 owner 還是部署者 EOA。v2 要綁的是新版核心（`DeployAtpMainnet` 部署、owner 交給 Safe 之後的那一套）；腳本一開始就會檢查 `ATP_EXECUTOR.globalPaused()`，舊的那套會直接被拒絕。**新版核心部署後要先把它的地址寫進 `deployments/mainnet.json`（`contracts.AtpExecutor`、`contracts.AtpRegistry`）並合併**：步驟 3 的 `verify()` 拿這個檔案當錨點，檔案裡現在記的還是舊核心，所以在那之前 `verify()` 一定不過。
 
 | 步驟 | 指令 | 誰 | 做什麼 |
 | --- | --- | --- | --- |
 | 1 部署 | `ATP_EXECUTOR=<核心 executor> EXPECTED_DEPLOYER_NONCE=$(cast nonce <deployer>) forge script script/DeployBorrowRoutingMainnet.s.sol --rpc-url <RPC> --broadcast` | 任何有 BNB 的部署 key | 8 筆：`RoutingV2Deployer`、registry、lens、extension、executor、三個 adapter。不做任何設定。nonce 不符就不送（跑第二次會被擋） |
 | 2 設定 | `forge script script/DeployBorrowRoutingMainnet.s.sol --sig "printConfig(address,address,address,address)" <executor> <erc4626Adapter> <venusAdapter> <aaveAdapter> --rpc-url <RPC>` | 唯讀；印出的呼叫由 Safe 送 | 列出名單裡還沒做的 owner 呼叫（to＝routing registry、calldata）。全做完時印 0 筆。fork 演練或 owner 是 key 時可改用 `configure(...)` 直接送 |
-| 3 驗證 | `ATP_SAFE=<safe> ATP_RATE_REPORTER=<reporter> ATP_EXECUTOR=<核心 executor> forge script script/DeployBorrowRoutingMainnet.s.sol --sig "verify(address)" <executor> --rpc-url <RPC>` | 唯讀；Safe 送完設定後的最終檢查 | 八個合約的鏈上程式碼跟本 repo 的編譯結果**完全相同**：immutable 的位置從編譯產物的 `immutableReferences` 讀出來，這些位置以外每一個 byte 都要一樣；每個 immutable 的值必須是預期的地址（registry、lens、executor、extension、策略盒實作、Venus comptroller、Moolah、核心），哪個位置放哪個值再由 getter 逐一核對（executor 與 lens 自己那份場所地址也有 getter）；互相的接線；**鏈上的路線、vault 數量與內容跟名單完全相同**（多一條、少一條都失敗）；每條路線的上限（launch cap）、使用率上限（9500）、目標線＝min(類別上限, F/2)、減倉線＝F×2/3；激勵代幣；簽名文字；`rateReporter`＝`ATP_RATE_REPORTER`（不能是 operator 或 owner）；`ATP_SAFE` 必填，必須是合約、已經是 registry 的 owner、沒有待接手的移轉。任何一項不符就 revert |
+| 3 驗證 | `ATP_SAFE=<safe> ATP_RATE_REPORTER=<reporter> ATP_EXECUTOR=<核心 executor> forge script script/DeployBorrowRoutingMainnet.s.sol --sig "verify(address)" <executor> --rpc-url <RPC>` | 唯讀；Safe 送完設定後的最終檢查 | 八個合約的鏈上程式碼跟本 repo 的編譯結果**完全相同**：immutable 的位置從編譯產物的 `immutableReferences` 讀出來，這些位置以外每一個 byte 都要一樣；每個 immutable 的值必須是預期的地址（registry、lens、executor、extension、策略盒實作、Venus comptroller、Moolah、核心），哪個位置放哪個值再由 getter 逐一核對（executor 與 lens 自己那份場所地址也有 getter）；互相的接線；**鏈上的路線、vault 數量與內容跟名單完全相同**（多一條、少一條都失敗）；每條路線的上限（launch cap）、使用率上限（9500）、目標線＝min(類別上限, F/2)、減倉線＝F×2/3；激勵代幣；簽名文字；`rateReporter`＝`ATP_RATE_REPORTER`（不能是 operator 或 owner）；`ATP_SAFE` 必填，必須是合約、已經是 registry 的 owner、沒有待接手的移轉；**`ATP_EXECUTOR` 必填**（draft6）：必須等於 `deployments/mainnet.json` 的 `contracts.AtpExecutor`，它的 `registry()` 必須等於 `contracts.AtpRegistry`，檔案的 `chainId` 必須是目前的鏈。核心地址只從環境變數與這個檔案來，不會從被驗證的合約自己讀。任何一項不符就 revert |
 
 步驟 2、3 都要帶 `ATP_RATE_REPORTER`（回報利率的獨立金鑰）。Lista 市場在名單裡用「market id＋抵押品地址＋借款幣地址＋oracle 地址」釘住，Moolah 回傳的任何一項不同就不產生設定。
 
@@ -433,7 +442,7 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 - 激勵代幣：LISTA（`0xFceB…dC46`）、XVS（`0xcF6B…6C63`）。
 - 每條路線的 CRE8 上限：50,000（借款幣）。這是我先放的上線值，不是產品決定，請使用者確認；owner 之後可逐條用 `setRouteCap` 改。
 
-**fork 演練（`test/atp/fork/BorrowRoutingMainnetScriptFork.t.sol`，需要 `BSC_RPC_URL`）：** 用腳本的同一段程式部署 → 套用它列出的 owner 呼叫（54 筆）→ `verify` 通過 → 再列一次是 0 筆；接著逐項弄壞確認 `verify` 每一項都會失敗：拿掉分級、改上限、改使用率上限、暫停、停用 vault、reporter 換成 operator、多登記一條名單外的路線、把合約程式碼換掉或翻一個 bit、`ATP_SAFE` 不是 owner、移轉未接手；reporter 設成 operator 時腳本連設定都不產生。最後用名單上的路線（Lista QQQB/USD1 → Lista USD1 vault）實際開倉、關閉一次。
+**fork 演練（`test/atp/fork/BorrowRoutingMainnetScriptFork.t.sol`，需要 `BSC_RPC_URL`）：** 用腳本的同一段程式部署 → 套用它列出的 owner 呼叫（54 筆）→ `verify` 通過 → 再列一次是 0 筆；接著逐項弄壞確認 `verify` 每一項都會失敗：拿掉分級、改上限、改使用率上限、暫停、停用 vault、reporter 換成 operator、多登記一條名單外的路線、把合約程式碼換掉或翻一個 bit、`ATP_SAFE` 不是 owner、移轉未接手；reporter 設成 operator 時腳本連設定都不產生。最後用名單上的路線（Lista QQQB/USD1 → Lista USD1 vault）實際開倉、關閉一次。fork 測試綁的是替身核心（`RoutingCoreStub`＋全新的 `AtpRegistry`，測試本身當 owner），所以它呼叫的是把核心地址明確傳進去的 `verifyWith(executor, core)`；正式的 `verify(executor)` 只吃 `ATP_EXECUTOR`＋`deployments/mainnet.json`，替身核心過不了（`test_script_verify_coreIsAnchoredToTheManifest_notToTheContractsUnderVerification`；不需要 RPC 的那一半在 `test/script/DeployBorrowRoutingMainnetChecks.t.sol`，CI 會跑）。
 
 部署後還要做、但不在腳本裡的事：把地址寫進 `deployments/mainnet.json`；後端 operator 送第一次 `reportRates`（在那之前 Lista vault 的路線開不了）；第一個策略盒建立後實測 Lista 的領激勵簽名（§9）。
 
@@ -476,3 +485,29 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 | `executeRescue` 只給 owner | 合約分不出 owner 與 session key，文件（§4）與介面 JSON（`rescueIsOwnerOnlyByPolicy`）寫明後端與 paymaster 的三條規則 | `test_M5_rescue_sendsReceiptsToTheAccount_onlyWithoutDebt`（合約這一側：沒有負債才行、只到帳戶本身） |
 
 測試網演練腳本的兩個修改（不是審查項目）：減倉演練不再動共用的借貸 oracle 價格，改成調 v2 那一條路線的線；結束時的抵押品檢查容許 Venus vToken 取整的零頭（1e11 個最小單位以內）。
+
+## 16. 第三輪審查（2026-11-25，`59511e8..1888572`，以 main `a6ae1fe` 執行）的發現與處理
+
+第三輪結論：沒有 Critical／High／Medium；2 個 Low、6 個 Info。沒有任何路徑讓 session key 把抵押品或借款資金送出帳戶／策略盒。審查員另外確認了測試網 chain 97 上 8 個 v2 合約的 bytecode 與 `a6ae1fe` 的編譯結果逐 byte 相同。
+
+**這一節的修正（draft6）只在 repo 裡，還沒部署到任何鏈。** 測試網上跑的仍是 draft5 的程式；換上修正版要重新部署整套 v2 合約（registry 把 executor 的地址寫死，不能只換 executor 或 lens），要不要換、什麼時候換由使用者決定。
+
+| 發現 | 處理 | 測試／位置 |
+| --- | --- | --- |
+| **L-1** `ForeignDebt` 在 Venus→Venus 搬家時被繞過（R2 引入的退步）：`executeMigrate` 先 `recordSwap` 把新路線放進帳戶清單，才呼叫 `beforeOpen`，而新條件是「欠這個幣、清單裡卻沒有這個幣的 Venus 部位」，此時一定找得到自己剛放進去的那條。帳戶有外來的 Venus USDT 負債時，先開同抵押品的 USDC 路線（只放抵押）再搬到 USDT 路線就過了，之後 v2 把那筆外來負債當成自己的。資金不會離開帳戶、預算仍把那筆負債算進去，所以是 Low | **已修**（只動 executor，registry 沒動）：`beforeOpen` 移到 `recordSwap` 前面，仍在 `recordReduce` 後面（舊本金已沖銷，上限與 `maxDebt` 的算法不變）。`beforeOpen` 是唯讀的，兩者之間只有 `ForeignDebt` 這一條讀帳戶清單，其他檢查結果不變。自己的負債不會被誤擋：新借款幣在 Venus 有自己的負債時，清單裡一定已經有這個幣的部位（R2 的記帳規則），不需要靠這次搬家放進去的那條 | `RoutingReview.t.sol`（第三輪那一段）：`test_L1_foreignDebt_venusToVenusMigrate_isRefused`、`test_L1_foreignDebt_migrateWithOldAndNewDebt_isRefused`（審查員的兩個 PoC，修正前兩個都不會 revert）、`test_L1_ownDebtInTheNewToken_venusToVenusMigrate_passes`（別條路線有本金、目標路線自己有本金、只剩利息零頭三種）、`testFuzz_L1_venusList_ownDebtIsNeverForeign`（隨機 40 步的開倉／還款／Venus→Venus 搬家／時間／第三方代還／reconcile：欠幣必有該幣部位、有本金或抵押必有部位、開倉與搬家都不會出現 `ForeignDebt`） |
+| **L-2** 主網 `verify()` 沒給 `ATP_EXECUTOR` 時，核心取自被驗證的 registry 自己，綁在假核心／假 `AtpRegistry` 上的整套 v2 驗得過（repo 的 fork 測試就是這樣通過的） | **已修**：`verify()` 用 `vm.envAddress("ATP_EXECUTOR")`（沒設就失敗），並要求它等於 `deployments/mainnet.json` 的 `contracts.AtpExecutor`、它的 `registry()` 等於 `contracts.AtpRegistry`、檔案的 `chainId` 等於目前的鏈；immutable 比對用的核心也改成這個值。`foundry.toml` 因此允許讀 `deployments/mainnet.json`。fork 測試改呼叫明確傳入替身核心的 `verifyWith(executor, core)` | `test/script/DeployBorrowRoutingMainnetChecks.t.sol`（CI 會跑：沒設 env、不是檔案裡的核心、registry 不符、鏈不符都失敗）；fork `test_script_verify_coreIsAnchoredToTheManifest_notToTheContractsUnderVerification` |
+| **I-1** `lens.routeDebt` 在該幣 Venus 本金為 0 時，每一條該幣的 Venus 路線都回整筆負債：後端加總會重複計算 | **已修（只改 lens）＋文件化**：本金為 0 時整筆只歸給帳戶第一個這個幣的 Venus 部位，其他路線與沒有部位的帳戶回 0；有本金時按比例的算法不變。連帶的行為：對 `routeDebt` 是 0 的路線送 `max` 不還任何錢（要清零頭就對有 `routeDebt` 的那條送 `max`，或傳明確金額），搬家離開這種路線時不會順便還掉零頭。後端的讀法寫在 §5 與介面 JSON（`venus.readingDebt`）：帳戶負債用 `tokenDebt`，不加總 `routeDebt`（測試網上的 draft5 lens 仍是舊行為） | `test_I1_routeDebt_interestWithoutPrincipal_belongsToOneRoute`、`test_I1_explicitAmount_repaysTheInterestThroughAnyRoute`、`test_I1_routeDebt_foreignDebtIsNoRoutes_andTheSplitByPrincipalIsUnchanged`；上面的 fuzz 每一步檢查兩條同幣路線的 `routeDebt` 加起來＝該幣負債（容許向上取整的 1 個最小單位）、不是部位的路線是 0 |
+| **I-2** `AtpBorrowRegistryV2` 24,187 bytes，離 EIP-170 上限只剩 389 | **文件化，沒改程式**：這一輪的修正都不動 registry（大小不變）。之後 registry 要加任何邏輯，得先把東西搬到 lens 或 executor（lens 剩 2,424、executor 剩 6,170） | §2 的大小表 |
+| **I-3** 主網 `verify()` 的「名單以外沒有別的」只涵蓋路線與 vault；多加的借款幣、激勵代幣、資產分級、`venusMarket` 對應、`venusBlocksPerYear` 查不出來（「沒有路線但有分級＋vToken 對應」的資產會替 Venus 帳戶多算預算） | **主網前待辦**（這次不改程式） | 下面的清單 |
+| **I-4** 演練腳本在共用測試網上調緊正式路線的線，兩筆交易之間其他帳戶可能被減倉 | **已修**：減倉那三步只在本機 Anvil fork 上跑，公開鏈自動跳過（§12） | `script/testnet/RoutingDemoTestnet.s.sol` |
+| **I-5** 健康度用 Venus 的 collateral factor，不是 liquidation threshold（主網 vNVDAB／vTSLAB 是 CF 60%／LT 70%，vUSDT 80%／80%）。水位上是保守的；帳戶同時有 LT÷CF 比例不同的抵押品時，「健康度不下降」的比較對真正的清算線會有幾個百分點的偏差。只有 bStock 抵押時不受影響 | **主網前待辦**（這次不改程式） | 下面的清單 |
+| **I-6** v1 與 v2 同帳戶（只有測試網有 v1）：沒有任何 v2 部位的帳戶，v2 的 `executeReduce` 可以把 v1 放的 Venus 抵押品取回到帳戶本身，直到全帳戶 LTV 到 v2 的目標線。沒有越過安全線，資產也只回帳戶本身 | **主網前待辦**（這次不改程式）；測試網照舊靠後端「一個帳戶只用一套」的規則（§12） | 下面的清單 |
+
+**主網前待辦（第三輪留下的）：**
+
+1. **I-3**：決定 `verify()` 要不要補上借款幣、激勵代幣、資產分級、`venusMarket` 對應、`venusBlocksPerYear` 的「名單以外沒有別的」。registry 沒有空間再加列舉用的 getter（I-2），做法是掃 registry 的設定事件跟名單核對。
+2. **I-5**：決定 Venus 的健康度（清算價值）要不要改用 liquidation threshold；要上 LT÷CF 比例跟 bStock 不同的 Venus 抵押品之前一定要先定。
+3. **I-6**：主網不部署 v1 借貸（`deployments/mainnet.json` 現在沒有），或在合約層做 v1／v2 互斥；不能只靠後端規則。
+4. 修正後的 L-1 再給審查員看一次（審查員的要求）。
+5. 審查員另外列的：兩組主網 fork 測試用釘區塊的 archive RPC 跑完整一次（CI 不跑 fork 測試）；session key 的 CallPolicy／paymaster 規則與簽名 policy 的整合測試；owner 換 Safe／timelock、`rateReporter` 用獨立金鑰。
+

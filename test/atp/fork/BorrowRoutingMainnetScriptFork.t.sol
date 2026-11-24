@@ -29,6 +29,16 @@ contract DeployBorrowRoutingMainnetHarness is DeployBorrowRoutingMainnet {
         _verifyWiring(core, d.lend);
     }
 
+    /// @dev `verify` with the core given explicitly: the fork's stand-in core is not the one in
+    /// `deployments/mainnet.json`, which the real `verify` (ATP_EXECUTOR) insists on.
+    function verifyWith(address executor, address core) external view {
+        _verify(executor, core);
+    }
+
+    function requireManifestCore(address core) external view {
+        _requireManifestCore(core);
+    }
+
     function spec()
         external
         pure
@@ -63,6 +73,8 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
         0xe52b068bb5b6225de1800b434bdd465246faea79352000acad88bdff312eab95;
     address internal constant SPCXB = 0xbe9D156892E55e7154BcD3cB0FEA677F9D3103E1;
     address internal constant USDC = 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d;
+    // `contracts.AtpExecutor` of deployments/mainnet.json.
+    address internal constant MANIFEST_EXECUTOR = 0x547764c2A6f789986F0f3E532c115ffC7E3AC9e7;
 
     DeployBorrowRoutingMainnetHarness internal script;
     AtpRegistry internal registry;
@@ -109,7 +121,7 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
     function test_script_deployConfigureVerify_andDriftIsCaught() public {
         // Deployed but not configured: verification fails, and a stranger cannot configure.
         vm.expectRevert();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         DeployBorrowRoutingMainnet.Call[] memory calls = script.configCalls(address(lend), adapters);
         vm.prank(OPERATOR);
         (bool ok,) = calls[0].target.call(calls[0].data);
@@ -117,7 +129,7 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
 
         uint256 sent = _configure();
         emit log_named_uint("owner calls", sent);
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         assertEq(script.configCalls(address(lend), adapters).length, 0, "configuration is idempotent");
         (uint256 venus, uint256 lista, uint256 vaults, uint256 cap) = script.spec();
         assertEq(credit.routeCount(), venus * 4 + lista);
@@ -130,52 +142,52 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
         R.Tier tier = credit.assetTier(collateral);
         credit.setAssetTier(collateral, R.Tier.NONE);
         vm.expectRevert();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setAssetTier(collateral, tier);
 
         credit.setRouteCap(route, cap + 1);
         vm.expectRevert(bytes("route cap"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setRouteCap(route, cap);
 
         credit.setRouteMaxUtilization(route, 8_500);
         vm.expectRevert(bytes("route utilization limit"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setRouteMaxUtilization(route, 9_500);
 
         credit.setPaused(true);
         vm.expectRevert(bytes("registry is paused"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setPaused(false);
 
         credit.setVault(credit.vaultIds(0), false, false);
         vm.expectRevert(bytes("vault state"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setVault(credit.vaultIds(0), true, false);
 
         credit.setRateReporter(OPERATOR);
         vm.expectRevert(bytes("rate reporter"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         credit.setRateReporter(RATE_REPORTER);
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
     }
 
     function test_script_verify_catchesExtrasForeignCodeAndOwnership() public {
         _configure();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
 
         // A route beyond the spec: the allowlist on chain must equal the spec exactly.
         uint256 snapshot = vm.snapshotState();
         credit.registerRoute(R.Venue.LISTA, SPCXB, USDC, EXTRA_MARKET, 1);
         vm.expectRevert(bytes("routes on chain differ from the spec"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         vm.revertToState(snapshot);
 
         // Code that is not this repository's build: another contract's code, or one flipped bit.
         snapshot = vm.snapshotState();
         vm.etch(address(lens), address(credit).code);
         vm.expectRevert();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         vm.revertToState(snapshot);
         snapshot = vm.snapshotState();
         address extension = lend.extension();
@@ -183,20 +195,20 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
         code[code.length / 2] = bytes1(uint8(code[code.length / 2]) ^ 0x01);
         vm.etch(extension, code);
         vm.expectRevert();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         vm.revertToState(snapshot);
 
         // Ownership: ATP_SAFE is required, must be a contract that owns the registry, with nothing pending.
         vm.setEnv("ATP_SAFE", vm.toString(address(0xBEEF)));
         vm.expectRevert();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         vm.setEnv("ATP_SAFE", vm.toString(address(this)));
         registry.transferOwnership(address(0xBEEF));
         vm.expectRevert(bytes("ownership handover pending"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         registry.transferOwnership(address(this));
         vm.expectRevert(bytes("ownership handover pending"));
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
 
         // The rate reporter may not be the session-key operator: the script refuses to plan it.
         vm.setEnv("ATP_RATE_REPORTER", vm.toString(OPERATOR));
@@ -205,11 +217,26 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
         vm.setEnv("ATP_RATE_REPORTER", vm.toString(RATE_REPORTER));
     }
 
+    /// Third review L-2: the real `verify` takes the core from ATP_EXECUTOR and holds it against
+    /// `deployments/mainnet.json`; it never reads it back from the contracts it is verifying.
+    function test_script_verify_coreIsAnchoredToTheManifest_notToTheContractsUnderVerification() public {
+        _configure();
+        script.verifyWith(address(lend), address(core));
+        // The stand-in core this stack is bound to is not the recorded one.
+        vm.expectRevert(bytes("ATP_EXECUTOR is not the AtpExecutor in deployments/mainnet.json"));
+        script.requireManifestCore(address(core));
+        // The recorded core is live on this fork and its registry is the recorded registry ...
+        script.requireManifestCore(MANIFEST_EXECUTOR);
+        // ... and a stack bound to another core does not verify against it, whatever its getters say.
+        vm.expectRevert(bytes("registry.atpExecutor"));
+        script.verifyWith(address(lend), MANIFEST_EXECUTOR);
+    }
+
     /// R4: runtime code identical to the build except for what an immutable holds, or for bytes where the
     /// build has zeros, is not this repository's deployment.
     function test_script_verify_catchesSwappedVenuePins_andBytesAlteredWhereTheBuildHasZeros() public {
         _configure();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         address venus = credit.venusComptroller();
         address[2] memory holders = [address(lend), address(lens)];
         for (uint256 i; i < 2; ++i) {
@@ -219,7 +246,7 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
             assertGt(replaced, 0, "venue pin not found in the code");
             vm.etch(holders[i], code);
             vm.expectRevert(bytes(i == 0 ? "executor venue pins" : "lens venue pins"));
-            script.verify(address(lend));
+            script.verifyWith(address(lend), address(core));
             vm.revertToState(snapshot);
             // The two venues swapped.
             snapshot = vm.snapshotState();
@@ -228,7 +255,7 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
             (code,) = _replaceWord(code, address(0xBAD), MOOLAH);
             vm.etch(holders[i], code);
             vm.expectRevert(bytes(i == 0 ? "executor venue pins" : "lens venue pins"));
-            script.verify(address(lend));
+            script.verifyWith(address(lend), address(core));
             vm.revertToState(snapshot);
         }
         // One byte changed where the build has a zero (and the deployment too): not an immutable's value.
@@ -247,10 +274,10 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
             code[at] = 0x01;
             vm.etch(deployed[i], code);
             vm.expectRevert();
-            script.verify(address(lend));
+            script.verifyWith(address(lend), address(core));
             vm.revertToState(snapshot);
         }
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
     }
 
     /// @dev `code` with every 32-byte word holding `from` (left-padded) rewritten to `to`.
@@ -276,7 +303,7 @@ contract BorrowRoutingMainnetScriptForkTest is Test {
 
     function test_script_allowlistedRouteWorksEndToEnd() public {
         _configure();
-        script.verify(address(lend));
+        script.verifyWith(address(lend), address(core));
         // Lista QQQB/USD1 (spec row 3) into the Lista USD1 vault.
         DeployBorrowRoutingMainnet.ListaMarket memory m = script.listaMarket(3);
         (address usd1, address vault) = script.usd1Vault();

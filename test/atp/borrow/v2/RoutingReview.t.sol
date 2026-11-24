@@ -532,4 +532,315 @@ contract RoutingReviewTest is RoutingBase {
         assertFalse(probe.reentered(), "extension half reentered");
         assertEq(lista.balanceOf(_box()), 1e18);
     }
+
+    // ---- third review (docs/borrow-routing-v2.zh-TW.md §16) ----
+    // L-1: `ForeignDebt` was skipped by a Venus -> Venus migrate (the new route was put into the account's
+    // list before the guard looked at that list). I-1: `lens.routeDebt` gave the whole debt to every Venus
+    // route of a loan token once the token's principal was zero.
+
+    function _try(bytes memory data) internal returns (bool ok, bytes memory ret) {
+        (ok, ret) = address(lend).call(data);
+    }
+
+    /// @dev What a v1 Venus position on the same account looks like: collateral and USDT debt v2 did not open.
+    function _foreignUsdtDebt(uint256 collateral, uint256 debt) internal {
+        nvda.approve(address(vNvda), MAX);
+        vNvda.mint(collateral);
+        address[] memory markets = new address[](1);
+        markets[0] = address(vNvda);
+        comptroller.enterMarkets(markets);
+        vUsdt.borrow(debt);
+    }
+
+    // ---- L-1 ----
+
+    /// The reviewer's sequence: foreign USDT debt, a collateral-only position on the USDC route of the same
+    /// collateral (allowed: another loan token), then a migrate to the USDT route.
+    function test_L1_foreignDebt_venusToVenusMigrate_isRefused() public {
+        _foreignUsdtDebt(5e18, 50e18);
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _open(V_NVDA_T, K_T, 1e18, 0);
+        _open(V_NVDA_C, bytes32(0), 1e18, 0);
+
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _migrate(V_NVDA_C, bytes32(0), V_NVDA_T, K_T, 0, 0);
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _migrate(V_NVDA_C, bytes32(0), V_NVDA_T, K_T, 10e18, 0);
+        // Nothing of the USDT routes became a v2 position, so the guard still stands on every path.
+        bytes32[] memory ids = credit.accountRoutes(address(this));
+        assertEq(ids.length, 1);
+        assertEq(ids[0], V_NVDA_C);
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _open(V_NVDA_T, K_T, 0, 10e18);
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _open(V_TSLA_T, K_T, 5e18, 10e18);
+        assertEq(credit.venusPrincipal(address(this), address(usdt)), 0);
+
+        // Once the foreign debt is gone the same migrate goes through.
+        usdt.approve(address(vUsdt), MAX);
+        vUsdt.repayBorrow(50e18);
+        _migrate(V_NVDA_C, bytes32(0), V_NVDA_T, K_T, 10e18, 0);
+        ids = credit.accountRoutes(address(this));
+        assertEq(ids.length, 1);
+        assertEq(ids[0], V_NVDA_T);
+        assertEq(lens.debt(V_NVDA_T, address(this)), 10e18);
+    }
+
+    /// The same with debt on the old route and new debt in the migrate.
+    function test_L1_foreignDebt_migrateWithOldAndNewDebt_isRefused() public {
+        _foreignUsdtDebt(5e18, 50e18);
+        _open(V_NVDA_C, K_C, 5e18, 10e18);
+        usdc.mint(address(this), 1e18);
+        usdc.approve(address(lend), MAX);
+        vm.expectRevert(IReg.ForeignDebt.selector);
+        _migrate(V_NVDA_C, K_C, V_NVDA_T, K_T, 30e18, 1e18);
+        // The whole call reverted: the old position is as it was.
+        assertEq(credit.principal(address(this), V_NVDA_C), 10e18);
+        assertEq(credit.principal(address(this), V_NVDA_T), 0);
+        assertEq(vUsdt.borrowBalanceStored(address(this)), 50e18);
+    }
+
+    /// The account's own debt in the new loan token never reads as foreign in a Venus -> Venus migrate:
+    /// principal on another route of the token, on the target route itself, or only interest left.
+    function test_L1_ownDebtInTheNewToken_venusToVenusMigrate_passes() public {
+        usdc.approve(address(lend), MAX);
+        usdt.approve(address(lend), MAX);
+        // (a) USDT principal on the TSLA route; NVDA moves from USDC to USDT.
+        _open(V_TSLA_T, K_T, 10e18, 100e18);
+        _open(V_NVDA_C, K_C, 10e18, 100e18);
+        usdc.mint(address(this), 1e18);
+        _migrate(V_NVDA_C, K_C, V_NVDA_T, K_T, 100e18, 1e18);
+        assertEq(credit.principal(address(this), V_NVDA_T), 100e18);
+        // (b) Both routes of one collateral hold principal; the USDC one moves onto the USDT one.
+        _open(V_NVDA_C, K_C, 0, 50e18);
+        usdc.mint(address(this), 1e18);
+        _migrate(V_NVDA_C, K_C, V_NVDA_T, K_T, 50e18, 1e18);
+        assertEq(credit.principal(address(this), V_NVDA_T), 150e18);
+        assertEq(credit.principal(address(this), V_NVDA_C), 0);
+        // (c) Only interest is left in USDT (every principal repaid exactly), TSLA moves from USDC to USDT.
+        skip(30 days);
+        _report(uint256(VAULT_APR) * 1e14, 0, 0);
+        _reduce(V_NVDA_T, K_T, 250e18, 0, 0);
+        assertEq(credit.venusPrincipal(address(this), address(usdt)), 0);
+        assertGt(vUsdt.borrowBalanceStored(address(this)), 0, "interest is left");
+        _reduce(V_TSLA_T, bytes32(0), 0, MAX, 0); // TSLA collateral out: only the NVDA position is left
+        bytes32[] memory ids = credit.accountRoutes(address(this));
+        assertEq(ids.length, 1);
+        assertEq(ids[0], V_NVDA_T, "the USDT interest keeps its position");
+        _open(V_TSLA_C, K_C, 10e18, 20e18);
+        usdc.mint(address(this), 1e18);
+        _migrate(V_TSLA_C, K_C, V_TSLA_T, K_T, 20e18, 1e18);
+        assertEq(credit.principal(address(this), V_TSLA_T), 20e18);
+    }
+
+    /// The account's Venus list under random sequences of opens, reduces, Venus -> Venus migrates, time,
+    /// third-party repayments and reconciles (all debt here is v2's own): a loan token owed on Venus always
+    /// has a Venus position standing for it, principal and posted collateral always have theirs, and neither
+    /// an open nor a migrate ever fails with `ForeignDebt`.
+    /// One run is a 40-step sequence with a snapshot per step: 2,000 runs (the CI default) take minutes on
+    /// the CI runner and push the job past its 10-minute limit, so CI runs 256; run it deeper locally with
+    /// `FOUNDRY_FUZZ_RUNS`.
+    /// forge-config: ci.fuzz.runs = 256
+    function testFuzz_L1_venusList_ownDebtIsNeverForeign(uint256 seed) public {
+        usdt.mint(address(this), 5_000e18);
+        usdc.mint(address(this), 5_000e18);
+        usdt.approve(address(lend), MAX);
+        usdc.approve(address(lend), MAX);
+        usdt.mint(KEEPER, 1_000_000e18);
+        vm.prank(KEEPER);
+        usdt.approve(address(vUsdt), MAX);
+        bytes32[4] memory routes = [V_NVDA_T, V_NVDA_C, V_TSLA_T, V_TSLA_C];
+        for (uint256 i; i < 40; ++i) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            uint256 r = seed % 4;
+            bytes32 route = routes[r];
+            bool isUsdt = r % 2 == 0;
+            bytes32 vault = isUsdt ? ((seed >> 4) % 2 == 0 ? K_T : K_AT) : ((seed >> 4) % 2 == 0 ? K_C : K_VC);
+            uint256 op = (seed >> 8) % 10;
+            if (op < 3) {
+                uint256 c = (seed >> 16) % 3 == 0 ? 0 : _bound(seed >> 24, 1e15, 20e18);
+                uint256 b = (seed >> 60) % 3 == 0 ? 0 : _bound(seed >> 70, 1e18, 300e18);
+                (bool ok, bytes memory ret) = _try(
+                    abi.encodeCall(lend.executeOpen, (address(this), route, vault, c, b, block.timestamp))
+                );
+                if (!ok) {
+                    assertTrue(bytes4(ret) != IReg.ForeignDebt.selector, "open: own debt read as foreign");
+                }
+            } else if (op < 6) {
+                uint256 mode = (seed >> 16) % 5;
+                uint256 repay = mode == 0
+                    ? 0
+                    : mode == 1
+                        ? MAX
+                        : mode == 2
+                            ? lens.debt(route, address(this))
+                            : mode == 3
+                                ? credit.principal(address(this), route)
+                                : _bound(seed >> 24, 1, 300e18);
+                uint256 wmode = (seed >> 100) % 3;
+                uint256 w = wmode == 0 ? 0 : wmode == 1 ? MAX : _bound(seed >> 110, 1, 20e18);
+                _try(
+                    abi.encodeCall(
+                        lend.executeReduce, (address(this), route, vault, repay, w, 5_000e18, block.timestamp)
+                    )
+                );
+            } else if (op < 8) {
+                // Venus -> Venus, same collateral, other loan token.
+                bytes32 to = routes[r % 2 == 0 ? r + 1 : r - 1];
+                uint256 b = (seed >> 16) % 2 == 0 ? 0 : _bound(seed >> 24, 1e18, 200e18);
+                (bool ok, bytes memory ret) = _try(
+                    abi.encodeCall(
+                        lend.executeMigrate,
+                        (address(this), route, vault, to, isUsdt ? K_C : K_T, b, 5_000e18, block.timestamp)
+                    )
+                );
+                if (!ok) {
+                    assertTrue(bytes4(ret) != IReg.ForeignDebt.selector, "migrate: own debt read as foreign");
+                }
+            } else if (op == 8) {
+                skip(_bound(seed >> 16, 1 hours, 30 days));
+                _report(uint256(VAULT_APR) * 1e14, 0, 0);
+                // Somebody repays part of the account's debt directly at Venus (anyone can).
+                uint256 d = vUsdt.borrowBalanceStored(address(this));
+                if ((seed >> 40) % 2 == 0 && d != 0) {
+                    vm.prank(KEEPER);
+                    vUsdt.repayBorrowBehalf(address(this), _bound(seed >> 50, 1, d));
+                }
+            } else {
+                credit.reconcile(address(this), route);
+            }
+            _checkList(routes);
+        }
+    }
+
+    function _checkList(bytes32[4] memory routes) internal {
+        bytes32[] memory ids = credit.accountRoutes(address(this));
+        bool[4] memory listed;
+        for (uint256 i; i < ids.length; ++i) {
+            for (uint256 j; j < 4; ++j) {
+                if (ids[i] == routes[j]) listed[j] = true;
+            }
+        }
+        // Routes: 0 NVDA/USDT, 1 NVDA/USDC, 2 TSLA/USDT, 3 TSLA/USDC.
+        for (uint256 j; j < 4; ++j) {
+            if (credit.principal(address(this), routes[j]) != 0) {
+                assertTrue(listed[j], "principal without position");
+            }
+        }
+        if (vUsdt.borrowBalanceStored(address(this)) != 0) {
+            assertTrue(listed[0] || listed[2], "USDT owed on Venus, no Venus USDT position");
+        }
+        if (vUsdc.borrowBalanceStored(address(this)) != 0) {
+            assertTrue(listed[1] || listed[3], "USDC owed on Venus, no Venus USDC position");
+        }
+        if (vNvda.balanceOf(address(this)) != 0) {
+            assertTrue(listed[0] || listed[1], "NVDA posted, no position");
+        }
+        if (vTsla.balanceOf(address(this)) != 0) {
+            assertTrue(listed[2] || listed[3], "TSLA posted, no position");
+        }
+        // What the lens gives each listed route adds up to the token's debt (I-1), within rounding up.
+        _checkRouteDebt(routes, listed, vUsdt.borrowBalanceStored(address(this)), 0);
+        _checkRouteDebt(routes, listed, vUsdc.borrowBalanceStored(address(this)), 1);
+        // The account's own state never reads as foreign debt (collateral-only top-up on every route).
+        uint256 snap = vm.snapshotState();
+        for (uint256 j; j < 4; ++j) {
+            (bool ok, bytes memory ret) = _try(
+                abi.encodeCall(
+                    lend.executeOpen, (address(this), routes[j], bytes32(0), 1e15, 0, block.timestamp)
+                )
+            );
+            if (!ok) assertTrue(bytes4(ret) != IReg.ForeignDebt.selector, "own debt read as foreign");
+        }
+        vm.revertToState(snap);
+    }
+
+    /// @dev `first` = 0 for the two USDT routes (0, 2), 1 for the two USDC routes (1, 3).
+    function _checkRouteDebt(bytes32[4] memory routes, bool[4] memory listed, uint256 owed, uint256 first)
+        internal
+        view
+    {
+        uint256 a = lens.routeDebt(routes[first], address(this));
+        uint256 b = lens.routeDebt(routes[first + 2], address(this));
+        assertGe(a + b, owed, "route debts below the token's debt");
+        assertLe(a + b, owed + 1, "route debts above the token's debt");
+        if (!listed[first]) assertEq(a, 0, "debt on a route that is not a position");
+        if (!listed[first + 2]) assertEq(b, 0, "debt on a route that is not a position");
+    }
+
+    // ---- I-1 ----
+
+    /// Two Venus routes of one loan token, every principal repaid, interest left: the debt is one route's
+    /// (the account's first Venus position in the token), not both.
+    function test_I1_routeDebt_interestWithoutPrincipal_belongsToOneRoute() public {
+        _open(V_NVDA_T, K_T, 10e18, 100e18);
+        _open(V_TSLA_T, K_T, 10e18, 100e18);
+        skip(30 days);
+        _report(uint256(VAULT_APR) * 1e14, 0, 0);
+        _reduce(V_TSLA_T, K_T, 200e18, 0, 0); // exactly the two principals, through one route
+        assertEq(credit.venusPrincipal(address(this), address(usdt)), 0);
+        uint256 owed = lens.debt(V_NVDA_T, address(this));
+        assertGt(owed, 0, "interest is left");
+        assertEq(lens.tokenDebt(address(this), address(usdt)), owed);
+        bytes32[] memory ids = credit.accountRoutes(address(this));
+        assertEq(ids.length, 2);
+        assertEq(ids[0], V_NVDA_T);
+        assertEq(lens.routeDebt(V_NVDA_T, address(this)), owed, "first position in the token");
+        assertEq(lens.routeDebt(V_TSLA_T, address(this)), 0);
+        assertEq(lens.routeStatus(V_NVDA_T, address(this)).routeDebt, owed);
+        assertEq(lens.routeStatus(V_TSLA_T, address(this)).routeDebt, 0);
+        // The other loan token is untouched by any of it.
+        assertEq(lens.routeDebt(V_NVDA_C, address(this)), 0);
+
+        // "Repay my route in full" on the route that holds nothing repays nothing ...
+        usdt.approve(address(lend), MAX);
+        vm.expectRevert(IExec.NothingToRepay.selector);
+        _reduce(V_TSLA_T, K_T, MAX, 0, 0);
+        // ... and its collateral can leave (the interest left is well within the other position's budget).
+        _reduce(V_TSLA_T, K_T, MAX, MAX, 0);
+        assertEq(tsla.balanceOf(address(this)), 1_000e18);
+        assertEq(lens.routeDebt(V_NVDA_T, address(this)), lens.debt(V_NVDA_T, address(this)));
+        // Closing the route that holds the debt ends the token: vault paid back, no position left.
+        _reduce(V_NVDA_T, K_T, MAX, MAX, 0);
+        assertEq(lens.tokenDebt(address(this), address(usdt)), 0);
+        assertEq(credit.accountRoutes(address(this)).length, 0);
+        assertEq(nvda.balanceOf(address(this)), 1_000e18);
+        _accountHoldsNoStrategyMoney();
+    }
+
+    /// An explicit amount repays the leftover interest through any route of the token.
+    function test_I1_explicitAmount_repaysTheInterestThroughAnyRoute() public {
+        _open(V_NVDA_T, K_T, 10e18, 100e18);
+        _open(V_TSLA_T, K_T, 10e18, 100e18);
+        skip(30 days);
+        _report(uint256(VAULT_APR) * 1e14, 0, 0);
+        _reduce(V_TSLA_T, K_T, 200e18, 0, 0);
+        uint256 owed = lens.debt(V_TSLA_T, address(this));
+        assertEq(lens.routeDebt(V_TSLA_T, address(this)), 0);
+        _reduce(V_TSLA_T, K_T, owed, MAX, 0);
+        assertEq(lens.tokenDebt(address(this), address(usdt)), 0);
+    }
+
+    /// Debt v2 did not open, on an account without any v2 position in the token, is no route's debt; with
+    /// principal in the token the split by principal is unchanged.
+    function test_I1_routeDebt_foreignDebtIsNoRoutes_andTheSplitByPrincipalIsUnchanged() public {
+        _foreignUsdtDebt(5e18, 50e18);
+        assertEq(lens.debt(V_NVDA_T, address(this)), 50e18);
+        assertEq(lens.routeDebt(V_NVDA_T, address(this)), 0);
+        assertEq(lens.routeDebt(V_TSLA_T, address(this)), 0);
+        usdt.approve(address(vUsdt), MAX);
+        vUsdt.repayBorrow(50e18);
+
+        _open(V_NVDA_T, K_T, 10e18, 100e18);
+        _open(V_TSLA_T, K_T, 10e18, 300e18);
+        assertEq(lens.routeDebt(V_NVDA_T, address(this)), 100e18);
+        assertEq(lens.routeDebt(V_TSLA_T, address(this)), 300e18);
+        skip(30 days);
+        uint256 owed = lens.debt(V_NVDA_T, address(this));
+        uint256 a = lens.routeDebt(V_NVDA_T, address(this));
+        uint256 b = lens.routeDebt(V_TSLA_T, address(this));
+        assertEq(a, (owed + 3) / 4);
+        assertGe(a + b, owed);
+        assertLe(a + b, owed + 1);
+    }
 }

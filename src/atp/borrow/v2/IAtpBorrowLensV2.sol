@@ -32,7 +32,11 @@ interface IAtpBorrowLensV2 {
     /// @notice Stored reads (last accrual). Lista: the market's debt. Venus: the whole debt in the loan token.
     function debt(bytes32 routeId, address account) external view returns (uint256);
     /// @notice Debt attributed to this route: Lista = `debt`; Venus = debt x principal share (all of it when
-    /// this is the only Venus route with principal in that loan token).
+    /// this is the only Venus route with principal in that loan token). With no principal left in the token
+    /// (interest that outlived it) the whole debt is one route's: the account's first Venus position in that
+    /// token in `accountRoutes`; every other route reads 0, and so does every route when the account holds
+    /// no such position (debt this registry did not open). `executeReduce` with `repayAmount` = max repays
+    /// this amount. For the account's debt in a token use `tokenDebt`, not a sum of these.
     function routeDebt(bytes32 routeId, address account) external view returns (uint256);
     /// @notice The account's debt in `token` over all its routes.
     function tokenDebt(address account, address token) external view returns (uint256);

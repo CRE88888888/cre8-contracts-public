@@ -240,10 +240,12 @@ contract AtpBorrowExecutorV2 is RoutingExecutorBase {
             if (token.balanceOf(address(this)) != base) revert IExec.InexactTransfer();
         }
         _reg.recordReduce(account, fromRouteId, repaid);
+        // 3. New debt straight into the new vault, admitted like any open: after the old principal retired,
+        // and before the new route takes the old one's place in the account's list (`ForeignDebt` looks for
+        // a Venus position in the new loan token there, and must not find the one this call is about to add).
+        (, R.Vault memory v, address adapter) = _reg.beforeOpen(account, toRouteId, toVaultId, borrowAmount);
         // Two Venus routes of one collateral share its vTokens: the position carries over to the new route.
         if (sameAccount) _reg.recordSwap(account, fromRouteId, toRouteId);
-        // 3. New debt straight into the new vault, admitted like any open (after the old principal retired).
-        (, R.Vault memory v, address adapter) = _reg.beforeOpen(account, toRouteId, toVaultId, borrowAmount);
         if (borrowAmount != 0) {
             _borrowIntoVault(to, toCore, toRouteId, v, adapter, toVaultId, account, borrowAmount);
         }
