@@ -10,10 +10,12 @@ optimizer_runs = 200
 via_ir = true
 evm_version = "cancun"
 # The mainnet verification script reads the build artifacts (immutable positions) to compare code exactly,
-# and the mainnet manifest (the core addresses routing v2 must be bound to).
+# and the mainnet manifest (the core addresses routing v2 must be bound to). The testnet cash-swapper script
+# reads the routing v2 addresses from the testnet manifest.
 fs_permissions = [
     { access = "read", path = "./out" },
     { access = "read", path = "./deployments/mainnet.json" },
+    { access = "read", path = "./deployments/testnet-97.json" },
 ]
 
 [profile.ci]

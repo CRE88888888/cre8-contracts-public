@@ -8,7 +8,8 @@
     "v2.0-draft3 (user decision 2026-11-24): default borrow-market utilization cap raised from 8500 to 9500 bps (AtpBorrowRegistryV2.MAX_BORROW_UTILIZATION_BPS; new routes get Route.maxUtilizationBps = 9500). No ABI change.",
     "v2.0-draft4 (independent review fixes, 2026-11-24): (1) NEW executor.executeRescue(account, vaultId, deadline) + event Rescued: with no debt in the vault's token, the box's receipts go to the account as they are; owner only, must NOT be in a session key's allowed selectors. (2) NEW lens.idleOf(account, token): loan token sitting directly in the strategy box; add it to vault holdings for the net value; repayments use it first, releases pay it out. (3) executeDeleverage: the health line is the only trigger (vault utilization > 95% no longer lets a stranger act; VaultStatus.shouldExit is informational, the backend exits with executeReduce / executeSwitchVault); when the box holds less than the amount due it repays what it holds but always leaves at least 1.01 x the venue's minimum loan. (4) executeSwitchVault now requires the destination to pass the deposit gates (utilization <= 90% where readable, enrollment not paused). (5) routeLines moved from the registry to the lens; registry error ForeignDebt added (an account with Venus debt this registry did not open cannot open a Venus route); executor views extension() and boxImplementation() added. (6) collateral-out check tightened: within budget, OR (budget before != 0 AND debt/budget not higher AND health factor not lower than before). (7) repay-only paths and debt-free collateral withdrawals read no oracle. (8) StrategyBox ERC-1271: only isValidSignature(bytes32,bytes) with the EIP-191 hash (verified on mainnet: the only form Lista uses). (9) the executor's code is split into the executor and AtpBorrowExecutorV2Extension (delegatecall): address, ABI and session-key target are unchanged. (10) at most one call into a Lista vault per action; ERC4626 vaults need >= 1,000 tokens of assets to be listed.",
     "v2.0-draft5 (re-review fixes, 2026-11-24; additive ABI only, every draft4 call is unchanged): (1) NEW lens.minDebt(routeId) = minLoan x 1.01 (0 on Venus): the smallest debt a partial repayment may leave. A Lista position whose debt is at or below it can only be repaid in full, so a third-party executeDeleverage (box money only) repays nothing of it when the box holds less than the debt: the backend must top it up (executeReduce with maxCashIn) or close it. (2) NEW read-only executor.venusComptroller() / moolah() and lens.venusComptroller() / moolah() (post-deploy verification). (3) an asset whose tier was removed (Tier.NONE, budget 0) can be wound down in steps: collateral may leave whenever the health factor does not drop (draft4 required full repayment first). (4) ForeignDebt now means: the account owes the loan token on Venus and holds no v2 Venus position in that token (interest left after the principal was repaid no longer trips it; such a position stays in accountRoutes until the token's debt is zero). (5) executeRescue: the contract cannot tell the owner from a session key (it checks msg.sender == account only); keeping it owner-only is a backend / paymaster rule.",
-    "v2.0-draft6 (third review fixes, 2026-11-25; NO ABI change, two behaviours change; NOT deployed yet: chain 97 still runs the draft5 code): (1) a Venus -> Venus executeMigrate is now refused with ForeignDebt like any open (in draft5 that path always passed the check: the new route was put into the account's list before the check looked at the list). The account's own debt is unaffected. (2) lens.routeDebt with no principal left in the loan token on Venus (interest that outlived it): the whole debt is attributed to ONE route, the account's first Venus position in that token in accountRoutes; every other route of the token reads 0, and so does every route when the account holds no v2 Venus position in the token (foreign debt). draft5 returned the whole debt for every Venus route of the token. executeReduce(repayAmount = MAX) repays routeDebt, so on a route that reads 0 it repays nothing. For the account's debt in a token use lens.tokenDebt(account, token), never a sum of routeDebt (correct on draft5 and draft6). (3) mainnet verify() requires ATP_EXECUTOR and holds it against deployments/mainnet.json."
+    "v2.0-draft6 (third review fixes, 2026-11-25; NO ABI change, two behaviours change; NOT deployed yet: chain 97 still runs the draft5 code): (1) a Venus -> Venus executeMigrate is now refused with ForeignDebt like any open (in draft5 that path always passed the check: the new route was put into the account's list before the check looked at the list). The account's own debt is unaffected. (2) lens.routeDebt with no principal left in the loan token on Venus (interest that outlived it): the whole debt is attributed to ONE route, the account's first Venus position in that token in accountRoutes; every other route of the token reads 0, and so does every route when the account holds no v2 Venus position in the token (foreign debt). draft5 returned the whole debt for every Venus route of the token. executeReduce(repayAmount = MAX) repays routeDebt, so on a route that reads 0 it repays nothing. For the account's debt in a token use lens.tokenDebt(account, token), never a sum of routeDebt (correct on draft5 and draft6). (3) mainnet verify() requires ATP_EXECUTOR and holds it against deployments/mainnet.json.",
+    "cash-swapper add-on (2026-11-25; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; NOT deployed on any chain): NEW separate contract AtpBorrowCashSwapper, bound to one routing executor. topUp(token, amountOut, maxUsdtIn, deadline): the calling account's USDT -> the loan token it owes, delivered into its own strategy box, capped at what the box is short of the debt (+ buffer). cashOut(token, amountIn, minUsdtOut, deadline): the calling account's loan token -> USDT, to the account itself. shortfall(account, token) (eth_call) -> (gap, cap). Fixed peg bound instead of an oracle. See `cashSwapper` and docs §17."
   ],
   "status": "deployed on BSC testnet (chain 97) on 2026-11-25 with the draft5 code (commit 1888572), see `deployments`; the draft6 fixes are in the repository only (a redeploy of the whole v2 set is needed: the registry pins its executor); not deployed on chain 56",
   "humanDoc": "docs/borrow-routing-v2.zh-TW.md",
@@ -17,7 +18,8 @@
     "AtpBorrowExecutorV2": "moves money; session-key target",
     "AtpBorrowRegistryV2": "executor.borrowRegistry(): allowlists, consent, accounting",
     "AtpBorrowLensV2": "executor.lens(): every venue read and status snapshot",
-    "StrategyBox": "executor.boxOf(account): holds vault receipts and their rewards"
+    "StrategyBox": "executor.boxOf(account): holds vault receipts and their rewards",
+    "AtpBorrowCashSwapper": "add-on (docs §17), separate address, bound to one routing executor: USDT -> owed loan token into the account's strategy box (topUp) and loan token -> USDT (cashOut); second session-key target"
   },
   "ids": {
     "routeId": "keccak256(abi.encode(uint8 venue, address collateral, address loan, bytes32 listaId))",
@@ -107,6 +109,16 @@
       "target": "each reward token ERC20 (optional)",
       "call": "approve(executorV2, amount)",
       "note": "enables executeSweepRewards for rewards claimed to the account"
+    },
+    {
+      "target": "USDT ERC20 (cash swapper add-on)",
+      "call": "approve(cashSwapper, amount)",
+      "note": "enables AtpBorrowCashSwapper.topUp; only ever spent inside its cap and peg bound"
+    },
+    {
+      "target": "each non-USDT loan token ERC20 (cash swapper add-on)",
+      "call": "approve(cashSwapper, amount)",
+      "note": "enables AtpBorrowCashSwapper.cashOut"
     }
   ],
   "neverApprove": "vault receipts are held by the strategy box, not the account: no vault-share approval exists in v2, and nothing of v2 is ever approved to the old AtpExecutor",
@@ -127,7 +139,8 @@
     "AtpBorrowExecutorV2.collectRewards (no deadline)",
     "AtpBorrowRegistryV2.reconcile",
     "AtpBorrowLensV2.sync / syncToken",
-    "AtpBorrowLensV2.routeStatus / vaultStatus / quote (eth_call)"
+    "AtpBorrowLensV2.routeStatus / vaultStatus / quote (eth_call)",
+    "AtpBorrowCashSwapper.shortfall (eth_call)"
   ],
   "consent": {
     "pinnedTo": "enrollment strategyId (not version)",
@@ -221,6 +234,58 @@
     "minLoan": "Moolah enforces a minimum loan per position (lens.minLoan(routeId), about 15 USD on mainnet): a borrow may not be smaller and a partial repay may not leave less; repay in full instead",
     "minDebt": "lens.minDebt(routeId) = minLoan x 1.01. A repayment that cannot reach the whole debt is cut to leave exactly this much; what was withdrawn beyond the repayment stays in the box as idle loan token (lens.idleOf, at most about 15 USD on mainnet) and is used first by the next repayment",
     "smallPositions": "if routeDebt <= minDebt(routeId) and vaultStatus(vaultId).assets + idleOf(account, token) < routeDebt, nobody but the account can repay it (executeDeleverage reverts VaultShortfall): the backend sends executeReduce(account, routeId, vaultId, MAX, withdrawAmount, maxCashIn, deadline) with the account's own loan token for the gap, or closes the position"
+  },
+  "cashSwapper": {
+    "status": "in the repository only; not deployed on chain 97 or 56. One swapper per routing executor (a redeployed executor needs a new swapper).",
+    "humanDoc": "docs/borrow-routing-v2.zh-TW.md §17",
+    "source": "src/atp/borrow/v2/AtpBorrowCashSwapper.sol, IAtpBorrowCashSwapper.sol",
+    "why": "executeReduce / executeMigrate / executeDeleverage repay from the strategy box (idle loan token, then the vault) and from the account's own loan token (maxCashIn). For USDC / USD1 / U nothing else turns the account's USDT into the token it owes, so a position whose vault grew slower than its debt cannot be closed (VaultShortfall). The mirror case: loan token left in the account after a close cannot become USDT.",
+    "caller": "the account itself (msg.sender). No account argument and no receiver argument on any function.",
+    "units": "raw token units; type(uint256).max = all (topUp: the cap; cashOut: the whole balance)",
+    "actions": {
+      "topUp": "topUp(address token, uint256 amountOut, uint256 maxUsdtIn, uint256 deadline) returns (usdtIn, tokenOut): buys exactly amountOut of token with the caller's USDT; the pool delivers it to executor.boxOf(caller). Reverts NoBox (no strategy box yet), NoShortfall(debt, held) (box already covers the debt), AboveShortfall(amount, cap), PegExceeded, Slippage (usdtIn > maxUsdtIn), InexactOutput (the pool did not deliver exactly amountOut), PoolNotSet",
+      "cashOut": "cashOut(address token, uint256 amountIn, uint256 minUsdtOut, uint256 deadline) returns (tokenIn, usdtOut): sells the caller's own token for USDT paid to the caller. Reverts StrategyAsset(token) when the caller's strategy ever traded token (it is a holding), PegExceeded, Slippage (usdtOut < minUsdtOut), Overcharged (the pool took more than amountIn), ZeroAmount, PoolNotSet",
+      "shortfall": "shortfall(address account, address token) returns (gap, cap) - use eth_call (it accrues). gap = lens.tokenDebt(account, token) - lens.idleOf(account, token) - sum(lens.vaultStatus(vaultId, account).assets over registry.accountVaults(account) whose token is `token`), floored at 0. cap = gap + ceil(gap * bufferBps / 10000): the most a topUp may buy now. A vault whose status cannot be read counts as 0."
+    },
+    "limits": {
+      "maxPegBps": "default 50, owner-set, hard ceiling MAX_PEG_BPS = 100. Every swap must satisfy paid <= received * (1 + maxPegBps/10000) + 3 raw units, both tokens counted at 1:1 after scaling to 18 decimals, measured on real balance changes (caller, destination)",
+      "bufferBps": "default 100, owner-set, hard ceiling MAX_BUFFER_BPS = 500",
+      "poolOf(token)": "the one allowlisted USDT/token PancakeSwap V3 pool; zero = both actions are off for the token (owner: setPool(token, 0))",
+      "owner": "AtpRegistry.owner() (the same owner as the routing registry; no owner of its own)"
+    },
+    "pause": "neither action follows registry.paused, AtpExecutor.globalPaused or an enrollment pause (they add no risk; like every exit of routing v2). The off switch is setPool(token, 0).",
+    "sessionKey": {
+      "target": "AtpBorrowCashSwapper",
+      "selectors": [
+        "topUp",
+        "cashOut"
+      ],
+      "rule": "no account argument to pin. Optional: restrict arg0 (token) to USDC / USD1 / U (any other token reverts PoolNotSet anyway). Never allow setPool / setLimits."
+    },
+    "paymaster": "sponsor UserOps whose call target is the cash swapper with selector topUp or cashOut",
+    "backend": {
+      "beforeClosingOrRepayingANonUsdtRoute": "eth_call shortfall(account, token). gap == 0: nothing to do. gap > 0: make sure the account holds about cap * 1.003 USDT (sell assets through the core as for a USDT route), send topUp(token, MAX, maxUsdtIn = cap * 1003 / 1000, deadline), then the usual executeReduce / executeMigrate (maxCashIn may be 0).",
+      "listaSmallPositions": "routeDebt <= minDebt and box money < routeDebt (see lista.smallPositions): topUp, then executeReduce(MAX, ...).",
+      "beforeAThirdPartyDeleverageIsNeeded": "a position near its deleverage line with gap > 0: topUp early so executeDeleverage finds enough in the box.",
+      "afterAClose": "loan token in the account (vault yield beyond the debt, the unused part of the buffer): cashOut(token, MAX, minUsdtOut = balance * 997 / 1000, deadline). Until then count it at 1 USD in the net value.",
+      "oneUserOpOrTwo": "Venus / Aave vault holdings: topUp is about 0.4M gas and can share a UserOp with executeReduce. A box holding a Lista vault makes topUp read the vault's live total (about 5.9M gas for the Lista USD1 vault): send topUp and executeReduce as two UserOps (the 1% buffer covers the interest in between) and always eth_estimateGas.",
+      "events": "ToppedUp(account, token, usdtIn, tokenOut, shortfall), CashedOut(account, token, tokenIn, usdtOut)"
+    },
+    "worstCase": "A leaked session key can convert the account's USDT into a loan token it owes, into its own strategy box, up to (token debt - idle in the box) * (1 + bufferBps) even if every vault reading is manipulated or unreadable, each swap inside the peg bound; and convert the account's USDC / USD1 / U into USDT in the account. Nothing leaves the account / its box. A second topUp reverts NoShortfall until the debt is repaid and borrowed again. A wrongly allowlisted pool cannot take approved funds: the callback pays only the pool, payer and token of the swap in flight, and that swap must still clear the peg bound.",
+    "knownLimits": [
+      "a vault that reads fine but cannot pay out (e.g. a Venus supply market at 100% utilization) still counts in the cap: shortfall can read 0 while executeReduce cannot reach the vault's money",
+      "depeg beyond maxPegBps blocks the affected direction (USDT cheap or loan token dear: topUp; loan token cheap: cashOut)",
+      "cashOut of 1-2 raw units may return 0"
+    ],
+    "mainnetPools2026_11_25": {
+      "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865 (PancakeSwap V3), fee 100 (0.01%), USDT is token0 in all three",
+      "USDC": "0x92b7807bF19b7DDdf89b706143896d05228f3121",
+      "USD1": "0x9c4Ee895e4f6Ce07Ada631C508D1306Db7502cCE",
+      "U": "0xA0909f81785f87f3e79309F0E73A7d82208094E4",
+      "measuredAtBlock": 135520469,
+      "costVsParityBps": "topUp pays / cashOut returns, fee included, USDT about 0.10% below the three tokens at that block: 1,000: USDC +11.51/+9.50, USD1 +10.70/+8.56, U +11.76/+9.75; 10,000: USDC +11.52/+9.48, USD1 +11.38/+7.92, U +11.79/+9.71; 50,000: USDC +11.60/+9.41, USD1 +14.93/+4.89, U +11.95/+9.55"
+    },
+    "testnet97": "not deployed. script/testnet/DeployBorrowCashSwapperTestnet.s.sol reads borrowV2.executor and borrowV2.loanTokens from deployments/testnet-97.json, creates PancakeSwap V3 0.01% pools USDT/USDC, USDT/USD1, USDT/U at 1:1 with 1,000,000 a side and allowlists them; rehearsed on a local fork (19 transactions, docs §17)"
   },
   "liveVenueNotes2026_11_24": [
     "Venus bStock supply caps are small: vNVDAB 1,500 NVDAB cap with 1,499.2 used (full), vTSLAB 236 cap / 34.9 used, vSPCXB 2,000 / 264: check comptroller.supplyCaps headroom before choosing a Venus route",
@@ -3798,6 +3863,569 @@
             "internalType": "uint256"
           }
         ],
+        "stateMutability": "nonpayable"
+      }
+    ],
+    "AtpBorrowCashSwapper": [
+      {
+        "type": "function",
+        "name": "MAX_BUFFER_BPS",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "MAX_PEG_BPS",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "borrowRegistry",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "bufferBps",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "cashOut",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "minUsdtOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "tokenIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "usdtOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executor",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "lens",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "maxPegBps",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "poolOf",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "registry",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "setLimits",
+        "inputs": [
+          {
+            "name": "maxPegBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "bufferBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setPool",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "pool",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "shortfall",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "gap",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "topUp",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxUsdtIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "usdtIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "tokenOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "usdt",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "event",
+        "name": "CashedOut",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "tokenIn",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "usdtOut",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "LimitsSet",
+        "inputs": [
+          {
+            "name": "maxPegBps",
+            "type": "uint16",
+            "indexed": false,
+            "internalType": "uint16"
+          },
+          {
+            "name": "bufferBps",
+            "type": "uint16",
+            "indexed": false,
+            "internalType": "uint16"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "PoolSet",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "pool",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "ToppedUp",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "usdtIn",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "tokenOut",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "shortfall",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "error",
+        "name": "AboveShortfall",
+        "inputs": [
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "BadCallback",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BadParameter",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BadPool",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "DeadlineExpired",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "InexactOutput",
+        "inputs": [
+          {
+            "name": "received",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "wanted",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "NoBox",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "NoShortfall",
+        "inputs": [
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "held",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "Overcharged",
+        "inputs": [
+          {
+            "name": "paid",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "offered",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "PegExceeded",
+        "inputs": [
+          {
+            "name": "paid",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "received",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "PoolNotSet",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "Slippage",
+        "inputs": [
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "bound",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "StrategyAsset",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "Unauthorized",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "ZeroAmount",
+        "inputs": []
+      },
+      {
+        "type": "function",
+        "name": "pancakeV3SwapCallback",
+        "inputs": [
+          {
+            "name": "amount0Delta",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "amount1Delta",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "data",
+            "type": "bytes",
+            "internalType": "bytes"
+          }
+        ],
+        "outputs": [],
         "stateMutability": "nonpayable"
       }
     ]
