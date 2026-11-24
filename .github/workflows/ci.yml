@@ -36,6 +36,8 @@ jobs:
       # 用 foundry.toml 的 [profile.ci]（fuzz 2000 runs）。
       # 不設 BSC_RPC_URL：fork 測試（test/atp/fork）會 vm.skip，回報 skipped 而不是 passed，
       # CI 因此不需要任何 secret，也不會打外部 RPC。
+      # 之後若要在 CI 跑 fork 測試：除了 BSC_RPC_URL，還必須設 BSC_FORK_BLOCK（要有歷史狀態的節點），
+      # routing v2 的 fork 測試在 CI=true 而沒釘區塊時會直接失敗，確保每次結果相同。
       - name: Test
         env:
           FOUNDRY_PROFILE: ci

@@ -1,0 +1,36 @@
+name: Slither
+
+# 靜態分析（Trail of Bits slither）。只在合約原始碼有變動的 PR 上跑，或手動觸發：
+# via_ir 編譯一次要好幾分鐘，private repo 每月只有 2000 分鐘，不在每次 push 都跑。
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "foundry.toml"
+      - ".github/workflows/slither.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: slither-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  slither:
+    name: slither
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 只看正式合約：lib/（vendored）、test/、script/、src/testnet/（模擬合約）不列入。
+      # fail-on: none —— 結果寫在這個 job 的 log 裡給人看，不擋合併；
+      # 要升級成擋合併，先把既有合約的發現清乾淨再改成 fail-on: high。
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          target: .
+          fail-on: none
+          slither-args: >-
+            --filter-paths "lib/|test/|script/|src/testnet/"
+            --exclude-informational
+            --exclude-optimization

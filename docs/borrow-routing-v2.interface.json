@@ -1,0 +1,3802 @@
+{
+  "name": "CRE8 Strategy Earn routing v2",
+  "interfaceVersion": "v2.0-draft5",
+  "date": "2026-11-24",
+  "changes": [
+    "v2.0-draft1: first published interface",
+    "v2.0-draft2: (1) all venue reads moved from the registry to AtpBorrowLensV2 (address = executor.lens()): routeStatus, vaultStatus, quote, health, debt, routeDebt, tokenDebt, collateral, targetLtv/deleverageLtv/liquidationLtv, plus new minLoan, deleverageAmount, borrowMarket; registry keeps config/consent/accounting and adds routeOpen, vaultOpen, routeLines, freshReport, vaultSince. (2) StrategyBox answers ERC-1271 only for the reward-proof login text (registry.rewardProofSuffix). (3) new permissionless executor.collectRewards(account, token) = box -> account. (4) event Opened: last field `ltv` replaced by `debtValue, budgetValue`; VaultStatus gains `since`. (5) Route gains maxUtilizationBps (default 8500, owner setRouteMaxUtilization). (6) collateral withdrawal / migration check relaxed to: within budget OR debt/budget not higher than before the action. (7) executor constructor is (registry, lens); the trio is created by the single-use RoutingV2Deployer. (8) executeDeleverage repays the whole box holding when it is smaller than the amount due (no revert). (9) a repayment that ends the account's debt in a token redeems the whole holding of the named vault and pays the surplus to the account in the same call (Released event), also inside executeMigrate.",
+    "v2.0-draft3 (user decision 2026-11-24): default borrow-market utilization cap raised from 8500 to 9500 bps (AtpBorrowRegistryV2.MAX_BORROW_UTILIZATION_BPS; new routes get Route.maxUtilizationBps = 9500). No ABI change.",
+    "v2.0-draft4 (independent review fixes, 2026-11-24): (1) NEW executor.executeRescue(account, vaultId, deadline) + event Rescued: with no debt in the vault's token, the box's receipts go to the account as they are; owner only, must NOT be in a session key's allowed selectors. (2) NEW lens.idleOf(account, token): loan token sitting directly in the strategy box; add it to vault holdings for the net value; repayments use it first, releases pay it out. (3) executeDeleverage: the health line is the only trigger (vault utilization > 95% no longer lets a stranger act; VaultStatus.shouldExit is informational, the backend exits with executeReduce / executeSwitchVault); when the box holds less than the amount due it repays what it holds but always leaves at least 1.01 x the venue's minimum loan. (4) executeSwitchVault now requires the destination to pass the deposit gates (utilization <= 90% where readable, enrollment not paused). (5) routeLines moved from the registry to the lens; registry error ForeignDebt added (an account with Venus debt this registry did not open cannot open a Venus route); executor views extension() and boxImplementation() added. (6) collateral-out check tightened: within budget, OR (budget before != 0 AND debt/budget not higher AND health factor not lower than before). (7) repay-only paths and debt-free collateral withdrawals read no oracle. (8) StrategyBox ERC-1271: only isValidSignature(bytes32,bytes) with the EIP-191 hash (verified on mainnet: the only form Lista uses). (9) the executor's code is split into the executor and AtpBorrowExecutorV2Extension (delegatecall): address, ABI and session-key target are unchanged. (10) at most one call into a Lista vault per action; ERC4626 vaults need >= 1,000 tokens of assets to be listed.",
+    "v2.0-draft5 (re-review fixes, 2026-11-24; additive ABI only, every draft4 call is unchanged): (1) NEW lens.minDebt(routeId) = minLoan x 1.01 (0 on Venus): the smallest debt a partial repayment may leave. A Lista position whose debt is at or below it can only be repaid in full, so a third-party executeDeleverage (box money only) repays nothing of it when the box holds less than the debt: the backend must top it up (executeReduce with maxCashIn) or close it. (2) NEW read-only executor.venusComptroller() / moolah() and lens.venusComptroller() / moolah() (post-deploy verification). (3) an asset whose tier was removed (Tier.NONE, budget 0) can be wound down in steps: collateral may leave whenever the health factor does not drop (draft4 required full repayment first). (4) ForeignDebt now means: the account owes the loan token on Venus and holds no v2 Venus position in that token (interest left after the principal was repaid no longer trips it; such a position stays in accountRoutes until the token's debt is zero). (5) executeRescue: the contract cannot tell the owner from a session key (it checks msg.sender == account only); keeping it owner-only is a backend / paymaster rule."
+  ],
+  "status": "deployed on BSC testnet (chain 97) on 2026-11-25, see `deployments`; not deployed on chain 56",
+  "humanDoc": "docs/borrow-routing-v2.zh-TW.md",
+  "source": "src/atp/borrow/v2/ (IAtpBorrowExecutorV2.sol, IAtpBorrowRegistryV2.sol, IAtpBorrowLensV2.sol, IStrategyVaultAdapter.sol, RoutingTypes.sol)",
+  "contracts": {
+    "AtpBorrowExecutorV2": "moves money; session-key target",
+    "AtpBorrowRegistryV2": "executor.borrowRegistry(): allowlists, consent, accounting",
+    "AtpBorrowLensV2": "executor.lens(): every venue read and status snapshot",
+    "StrategyBox": "executor.boxOf(account): holds vault receipts and their rewards"
+  },
+  "ids": {
+    "routeId": "keccak256(abi.encode(uint8 venue, address collateral, address loan, bytes32 listaId))",
+    "routeIdNotes": "venue 1 = VENUS (listaId = bytes32(0)), 2 = LISTA (listaId = Moolah market id). Same as registry.routeIdOf().",
+    "vaultId": "keccak256(abi.encode(uint8 kind, address token, address target))",
+    "vaultIdNotes": "kind 1 = ERC4626 (Lista vault; target = vault), 2 = VENUS (target = vToken), 3 = AAVE (target = Aave v3 Pool). Same as registry.vaultIdOf().",
+    "strategyBox": "executor.boxOf(account): CREATE2 clone, salt = bytes32(uint160(account)); deployed on first deposit"
+  },
+  "enums": {
+    "Venue": [
+      "NONE",
+      "VENUS",
+      "LISTA"
+    ],
+    "VaultKind": [
+      "NONE",
+      "ERC4626",
+      "VENUS",
+      "AAVE"
+    ],
+    "Tier": [
+      "NONE",
+      "INDEX_LARGE_CAP",
+      "STOCK",
+      "CRYPTO_LINKED"
+    ],
+    "Gate": [
+      "OPEN",
+      "CLOSED",
+      "BORROW_UTILIZATION",
+      "VAULT_UTILIZATION",
+      "NEGATIVE_CARRY",
+      "VAULT_UNREADABLE",
+      "TOKEN_MISMATCH"
+    ]
+  },
+  "constants": {
+    "tierTargetLtv": {
+      "INDEX_LARGE_CAP": "0.35e18",
+      "STOCK": "0.30e18",
+      "CRYPTO_LINKED": "0.20e18"
+    },
+    "targetLtv": "min(tier cap, F/2, owner override); F = Venus collateral factor or Lista LLTV",
+    "deleverageLtv": "min(F*2/3, owner override)",
+    "maxBorrowUtilizationBps": "per route: Route.maxUtilizationBps, default 9500 (owner: setRouteMaxUtilization); gates new borrowing only, exits are never affected",
+    "maxVaultSupplyUtilizationBps": 9000,
+    "vaultExitUtilizationBps": 9500,
+    "reportTtlSeconds": 172800,
+    "maxReportedRate": "0.5e18",
+    "maxPositionsPerAccount": 24,
+    "MAX": "type(uint256).max means 'all' for repayAmount, withdrawAmount, amount"
+  },
+  "units": {
+    "collateralAmount/withdrawAmount/collateral": "collateral token raw units",
+    "borrowAmount/repayAmount/maxCashIn/maxRepay/debt/routeDebt/principal/borrowCap/vault assets": "raw units of the route's (vault's) loan token; USDT, USDC, USD1 and U all have 18 decimals on BSC mainnet",
+    "maxDebt/accountPrincipalUsd": "USD with 18 decimals, each loan token counted at 1 USD (raw * 10^(18-decimals))",
+    "rates/LTVs": "18 decimals, yearly; 1e18 = 100%",
+    "utilization": "bps, rounded up",
+    "*Value": "USD with 18 decimals from the venue's own oracle"
+  },
+  "ownerSignsOnce": [
+    {
+      "target": "AtpBorrowRegistryV2",
+      "call": "setStrategyPolicy(uint256 maxDebt, address rewardRecipient, bool enabled)",
+      "note": "account must be enrolled; pinned to enrollment strategyId (not version)"
+    },
+    {
+      "target": "Venus comptroller",
+      "call": "updateDelegate(address executorV2, bool true)",
+      "note": "only if Venus routes are used"
+    },
+    {
+      "target": "Lista Moolah",
+      "call": "setAuthorization(address executorV2, bool true)",
+      "note": "only if Lista routes are used"
+    },
+    {
+      "target": "each collateral ERC20",
+      "call": "approve(executorV2, max)"
+    },
+    {
+      "target": "each loan token ERC20 (optional)",
+      "call": "approve(executorV2, amount)",
+      "note": "enables maxCashIn fallback on repay / migrate"
+    },
+    {
+      "target": "each reward token ERC20 (optional)",
+      "call": "approve(executorV2, amount)",
+      "note": "enables executeSweepRewards for rewards claimed to the account"
+    }
+  ],
+  "neverApprove": "vault receipts are held by the strategy box, not the account: no vault-share approval exists in v2, and nothing of v2 is ever approved to the old AtpExecutor",
+  "sessionKeyMayCall": {
+    "target": "AtpBorrowExecutorV2",
+    "selectors": [
+      "executeOpen",
+      "executeReduce",
+      "executeMigrate",
+      "executeSwitchVault",
+      "executeRelease",
+      "executeSweepRewards"
+    ],
+    "rule": "first argument `account` must equal the calling account (msg.sender)"
+  },
+  "permissionless": [
+    "AtpBorrowExecutorV2.executeDeleverage (no deadline; only at or above the health deleverage line)",
+    "AtpBorrowExecutorV2.collectRewards (no deadline)",
+    "AtpBorrowRegistryV2.reconcile",
+    "AtpBorrowLensV2.sync / syncToken",
+    "AtpBorrowLensV2.routeStatus / vaultStatus / quote (eth_call)"
+  ],
+  "consent": {
+    "pinnedTo": "enrollment strategyId (not version)",
+    "afterReEnroll": "policy is void until the account calls setStrategyPolicy again; do it in the same UserOp right after AtpRegistry.enroll",
+    "voidOrDisabledBlocks": [
+      "executeOpen",
+      "executeMigrate",
+      "executeSwitchVault"
+    ],
+    "alwaysOpen": [
+      "executeReduce",
+      "executeRelease",
+      "executeDeleverage",
+      "collectRewards",
+      "executeSweepRewards"
+    ]
+  },
+  "riskCheck": {
+    "newDebt": "debtValue <= budgetValue after executeOpen borrow and on the new route of executeMigrate",
+    "collateralOut": "after executeReduce withdraw (and for remaining Venus positions after a migrate): debtValue <= budgetValue OR (debtValue/budgetValue not higher AND health factor = liquidationValue/debtValue not lower than before the call). With no budget (tier removed) only the health factor rule applies: repay at least in proportion to the collateral taken out",
+    "repayOnly": "no check"
+  },
+  "rewards": {
+    "borrowIncentives": "claimed by anyone on the venue; tokens land in the portfolio account",
+    "vaultIncentives": "accrue to the strategy box (the depositor): claim for boxOf(account), then executor.collectRewards(account, token) moves them into the account",
+    "exit": "executeSweepRewards(account, token, accountAmount, deadline): box + up to accountAmount from the account -> policy.rewardRecipient; refused from the account for tokens its strategy ever traded",
+    "boxSignature": "StrategyBox.isValidSignature(bytes32 hash, bytes abi.encode(bytes message, bytes accountSignature)) is valid only when message ends with registry.rewardProofSuffix() (<= 64 bytes in front), hash == EIP-191 personal_sign hash of message, and the account's own isValidSignature(hash, accountSignature) is valid. Verified on BSC mainnet 2026-11-24: Lista's proof API accepts both the Kernel account and the box, calls isValidSignature(bytes32,bytes) with the EIP-191 hash only, has no signature-length limit, and needs type=safe for contract addresses (without it: 500 System error)."
+  },
+  "heldSince": {
+    "route": "registry.openedAt(account, routeId): first borrow of the current position; cleared when principal reaches 0; a migrated position starts again on the new route",
+    "vault": "registry.vaultSince(account, vaultId): when the box's holding in the vault went from empty to non-empty; cleared when emptied",
+    "eventsThatChangeBoxVaults": {
+      "in": [
+        "Opened",
+        "Migrated(toVaultId)",
+        "VaultSwitched"
+      ],
+      "out": [
+        "Reduced",
+        "Deleveraged",
+        "Migrated(fromVaultId)",
+        "VaultSwitched",
+        "Released"
+      ]
+    }
+  },
+  "rateReports": {
+    "call": "registry.reportRates(RouteReport[], VaultReport[]) by registry.rateReporter()",
+    "ttlSeconds": 172800,
+    "suggestedCadence": "every 12h, plus when a value moves by more than 0.25%",
+    "batch": "40 routes + 10 vaults fit in one transaction (see test_reportRates_onlyReporter_bounded_andBatchGas)",
+    "whenStale": "incentives read as 0; an ERC4626 (Lista) vault's rate reads as unknown and the pair's gate is VAULT_UNREADABLE (new borrowing only; open positions are not touched)"
+  },
+  "rescueIsOwnerOnlyByPolicy": "executeRescue passes for any caller that is the account (msg.sender == account): the contract cannot distinguish a UserOp signed by the owner from one signed by a session key. Enforced off chain: (1) the session key's CallPolicy must not list the executeRescue selector, (2) the paymaster does not sponsor UserOps carrying it except the owner-signed rescue flow, (3) the operator never sends it. Even if the rule is broken it only succeeds with no debt in the vault's token and the receipts only go to the account itself.",
+  "sessionKeyMustNotCall": [
+    "AtpBorrowExecutorV2.executeRescue",
+    "AtpBorrowRegistryV2.setStrategyPolicy",
+    "comptroller.updateDelegate",
+    "moolah.setAuthorization",
+    "ERC20.approve"
+  ],
+  "sessionKeyErc1271": "Measured on a live testnet portfolio account (test/atp/fork/SessionKey1271Fork97.t.sol): the session permission installed today (ECDSA signer + CallPolicy v0.0.4 + GasPolicy + TimestampPolicy, all flags 0) does NOT restrict ERC-1271; a session key can make the account's isValidSignature return valid for any hash. The strategy box is unaffected (it confirms the Lista login text only). Fix belongs to the backend: add a signature policy or flag the permission as not-for-signatures.",
+  "netValue": "collateral value + sum(vaultStatus.assets over accountVaults) + sum(lens.idleOf(account, token) over loan tokens) - debt",
+  "v1v2": "One portfolio account uses either v1 or v2. Close v1 completely (debt 0, collateral withdrawn, v1 vault shares redeemed) before opening v2 on the same account. On Venus the contract refuses (ForeignDebt) when the account owes that loan token and holds no v2 Venus position in it; debt taken through v1 after a v2 position exists is not detected, and on Lista nothing is: the backend must enforce the rule.",
+  "roles": {
+    "owner": "AtpRegistry.owner(): allowlists, caps, pause, tiers, adapters (set once), rate reporter, reward tokens",
+    "rateReporter": "reportRates(routes, vaults): incentive APRs and vault rates that are not on chain; expires after 48h; capped at 50% each"
+  },
+  "migration": {
+    "atomic": [
+      "same loan token, different venue or Lista market (executeMigrate)",
+      "different loan token when the old vault (+ account cash up to maxCashIn) covers the old route's debt (executeMigrate; nothing is swapped: old debt is repaid from the old token's vault, the new token is borrowed into its own vault)",
+      "Venus -> Venus same collateral, different loan token (executeMigrate; collateral stays)",
+      "deposit vault only, same token (executeSwitchVault)"
+    ],
+    "twoStep": [
+      "old vault holding < old route debt and account cash of that token cannot cover the gap: reverts VaultShortfall -> backend sources the old loan token (sell/swap through the normal trade path), executeReduce(old), then executeOpen(new)",
+      "old vault cannot pay out now, old venue paused, new venue lacks liquidity, new route fails an open gate: whole call reverts",
+      "partial migration is not supported: executeReduce first, then migrate the rest"
+    ],
+    "gas": "Lista vaults walk their whole withdraw queue on every deposit/withdraw (USD1 vault ~6-7M gas each way, USDC vault ~2.4M); BSC per-transaction cap is 16,777,216. Each action calls a given Lista vault at most once; the heaviest measured action is a migrate between two Lista vaults (8.9M). Always eth_estimateGas before sending, split into executeReduce + executeOpen above ~12M, and monitor each Lista vault's withdrawQueueLength."
+  },
+  "venus": {
+    "healthIsAccountWide": true,
+    "rule": "after any risk-increasing action: debtValue <= budgetValue = sum(collateralValue_i * targetLtv_i) over the account's Venus collaterals with a tier",
+    "debt": "debt(routeId, account) = the account's whole debt in that loan token; routeDebt = share by tracked principal",
+    "closeTwoOrMore": "send executeReduce(account, route_i, vaultId, MAX, MAX, maxCashIn, deadline) per route; pooled vault holdings make the old 'largest vault closes last' ordering unnecessary. Works in any order when each route was borrowed to its own target. When routes are unevenly borrowed, closing the lightly borrowed one first with MAX leaves the rest worse than before and reverts LtvTooHigh: pass an explicit larger repayAmount (up to lens.debt()) or close the heavier route first."
+  },
+  "lista": {
+    "minLoan": "Moolah enforces a minimum loan per position (lens.minLoan(routeId), about 15 USD on mainnet): a borrow may not be smaller and a partial repay may not leave less; repay in full instead",
+    "minDebt": "lens.minDebt(routeId) = minLoan x 1.01. A repayment that cannot reach the whole debt is cut to leave exactly this much; what was withdrawn beyond the repayment stays in the box as idle loan token (lens.idleOf, at most about 15 USD on mainnet) and is used first by the next repayment",
+    "smallPositions": "if routeDebt <= minDebt(routeId) and vaultStatus(vaultId).assets + idleOf(account, token) < routeDebt, nobody but the account can repay it (executeDeleverage reverts VaultShortfall): the backend sends executeReduce(account, routeId, vaultId, MAX, withdrawAmount, maxCashIn, deadline) with the account's own loan token for the gap, or closes the position"
+  },
+  "liveVenueNotes2026_11_24": [
+    "Venus bStock supply caps are small: vNVDAB 1,500 NVDAB cap with 1,499.2 used (full), vTSLAB 236 cap / 34.9 used, vSPCXB 2,000 / 264: check comptroller.supplyCaps headroom before choosing a Venus route",
+    "Lista Gauntlet USDT vault (0x6d67...2525) has an empty supply queue: deposits revert AllCapsReached; check vault.maxDeposit",
+    "Lista markets run near 90% utilization by design (NVDAB/USD1 92.7%): inside the default 95% route limit",
+    "Venus USDT borrow ~5.0% vs vUSDT supply ~3.5%: borrowing and supplying the same token on Venus is always negative carry"
+  ],
+  "mainnetAddressBook": {
+    "moolah": "0x8F73b65B4caAf64FBA2aF91cC5D4a2A1318E5D8C",
+    "venusComptroller": "0xfD36E2c2a6789Db23113685031d7F16329158384",
+    "aaveV3Pool": "0x6807dc923806fE8Fd134338EABCA509979a7e0cB",
+    "tokens": {
+      "USDT": "0x55d398326f99059fF775485246999027B3197955",
+      "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+      "USD1": "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d",
+      "U": "0xcE24439F2D9C6a2289F741120FE202248B666666"
+    },
+    "venusVTokens": {
+      "USDT": "0xfD5840Cd36d94D7229439859C0112a4185BC0255",
+      "USDC": "0xecA88125a5ADbe82614ffC12D0DB554E2e2867C8",
+      "USD1": "0x0C1DA220D301155b87318B90692Da8dc43B67340",
+      "U": "0x3d5E269787d562b74aCC55F18Bd26C5D09Fa245E",
+      "NVDAB": "0xEb8Ca841cBe1BC4832A10b15c7dAB1081eDaD371",
+      "TSLAB": "0x97421799419Eb782628e73e7220d8E0A207469a3",
+      "SPCXB": "0xC36dFaCc7a125859C106F29b9F2d874CCF29A55A",
+      "BTCB": "0x882C173bC7Ff3b7786CA16dfeD3DFFfb9Ee7847B",
+      "WBNB": "0x6bCa74586218dB34cdB402295796b79663d816e9"
+    },
+    "listaVaults": {
+      "USD1": "0xfa27f172e0b6ebcef9c51abf817e2cb142fbe627",
+      "U": "0x9a17fd5cb8efc25d11567e713ae795a89775a759",
+      "USDC": "0x8a06ac91265dbebe6d4606f45b10993e9a571869",
+      "USDT": "0x6d6783c146f2b0b2774c1725297f1845dc502525"
+    },
+    "aaveReserves": [
+      "USDT",
+      "USDC"
+    ],
+    "note": "verified against a public BSC RPC on 2026-11-24; reference only, nothing here is hard-coded in the contracts"
+  },
+  "deployments": {
+    "97": {
+      "manifest": "deployments/testnet-97.json -> borrowV2 (66 routes, 10 vaults with ids and parameters, demo transactions)",
+      "gitCommit": "1888572dc89cf7720bce50a9b96f6e28086474a8",
+      "executor": "0x494C106498e8221D3f72474f36995C191ACf6bB5",
+      "extension": "0x7bC1E80Cd0a684D56333775423a95efF13602bf8",
+      "registry": "0x7eae73a76Ff2359fE1aB059A77Dd36840A32559E",
+      "lens": "0x18A55C04aE72A00ED7790577FbdA9159DAc94000",
+      "boxImplementation": "0xa448e0108f31Ab1d084FfdDcD4827D9CB5D4E191",
+      "adapters": {
+        "erc4626": "0x3548A7641bae787A48E263f8aF053899e46fF02d",
+        "venus": "0x861e91a0a3d46c391587323B3FE32A43E53CFe91",
+        "aave": "0x432f96D0790f3bc3ceBed379Fd476F367CE63BAa"
+      },
+      "venusComptroller": "0x93AB77260c8C62b26698bBB0ee8da3E175b9ad8D",
+      "listaMoolah": "0x993237aC050512f3749bfEE2dE759b6B86Aea653",
+      "loanTokens": {
+        "USDT": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+        "USDC": "0xB887Ca3379dC41F1155dD0cb1B2e3c1D85D17eD5",
+        "USD1": "0xEA13862CB4612d228BA89b4319fEEc60F05Ab3AC",
+        "U": "0xC71E4Efb5A36bD54ad8DE9E9742bFA8fBd750875"
+      },
+      "rewardToken": "0xFfE08AC6f45A4aE5Ae2a692f0965EA46CE7d822c",
+      "rateReporter": "0xd8CE3295e05cA138e0d0d7214C4FD630c43F9d7F (OPERATOR)",
+      "deployedAtBlocks": [
+        144626656,
+        144628034
+      ],
+      "notes": "simulated venues and rates; v1 (deployments/testnet-97.json -> borrow) is untouched and one account uses v1 or v2, never both; Venus supply vaults quote ~0% until someone borrows, so opening straight into them is gated by negative carry"
+    }
+  },
+  "abi": {
+    "AtpBorrowExecutorV2": [
+      {
+        "type": "function",
+        "name": "borrowRegistry",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "boxImplementation",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "boxOf",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "collectRewards",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeDeleverage",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "maxRepay",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "repaid",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeMigrate",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fromRouteId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "fromVaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toRouteId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toVaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "borrowAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxCashIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeOpen",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "collateralAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "borrowAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeReduce",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "repayAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "withdrawAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxCashIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeRelease",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeRescue",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeSweepRewards",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "accountAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "executeSwitchVault",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "fromVaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toVaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "extension",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "lens",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "moolah",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "venusComptroller",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "event",
+        "name": "BoxCreated",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "box",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Deleveraged",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "repaid",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "debtValueBefore",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "debtValueAfter",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Migrated",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "fromRouteId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toRouteId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "fromVaultId",
+            "type": "bytes32",
+            "indexed": false,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toVaultId",
+            "type": "bytes32",
+            "indexed": false,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "repaid",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "collateralMoved",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "borrowed",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Opened",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "collateralIn",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "borrowed",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "debtValue",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "budgetValue",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Reduced",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "repaid",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "fromVault",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "fromCash",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "collateralOut",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "debtLeft",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Released",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "assets",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "Rescued",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "receipt",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RewardsCollected",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RewardsSwept",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "recipient",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VaultSwitched",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "fromVaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "toVaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "assets",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "error",
+        "name": "CollateralMismatch",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "DeadlineExpired",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "DebtOutstanding",
+        "inputs": [
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "GateClosed",
+        "inputs": [
+          {
+            "name": "gate",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "InexactTransfer",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "InvalidConfig",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "LtvTooHigh",
+        "inputs": [
+          {
+            "name": "debtValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "budgetValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "NotAccount",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "NotContract",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "NothingToDo",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "NothingToRepay",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "ProtocolError",
+        "inputs": [
+          {
+            "name": "code",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "RewardNotAllowed",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "SameRoute",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "TokenMismatch",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "VaultShortfall",
+        "inputs": [
+          {
+            "name": "needed",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "available",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "ZeroAmount",
+        "inputs": []
+      }
+    ],
+    "AtpBorrowRegistryV2": [
+      {
+        "type": "function",
+        "name": "accountPrincipalUsd",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "accountRoutes",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "accountVaults",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "adapterOf",
+        "inputs": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.VaultKind"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "assetTier",
+        "inputs": [
+          {
+            "name": "asset",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.Tier"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "executor",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "freshReport",
+        "inputs": [
+          {
+            "name": "id",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fresh",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "a",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "b",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "loanTokenAllowed",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "moolah",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "openedAt",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "paused",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "policy",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.Policy",
+            "components": [
+              {
+                "name": "maxDebt",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "rewardRecipient",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "strategyId",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "enabled",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "principal",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "rateReporter",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "reconcile",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "registerRoute",
+        "inputs": [
+          {
+            "name": "venue",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.Venue"
+          },
+          {
+            "name": "collateral",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "loan",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "listaId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "borrowCap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "registerVault",
+        "inputs": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.VaultKind"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "reportRates",
+        "inputs": [
+          {
+            "name": "routes",
+            "type": "tuple[]",
+            "internalType": "struct IAtpBorrowRegistryV2.RouteReport[]",
+            "components": [
+              {
+                "name": "routeId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "borrowIncentive",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateralIncentive",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          },
+          {
+            "name": "vaults",
+            "type": "tuple[]",
+            "internalType": "struct IAtpBorrowRegistryV2.VaultReport[]",
+            "components": [
+              {
+                "name": "vaultId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "baseRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "incentive",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "rewardProofSuffix",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes",
+            "internalType": "bytes"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "rewardTokenAllowed",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "route",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.Route",
+            "components": [
+              {
+                "name": "venue",
+                "type": "uint8",
+                "internalType": "enum RoutingTypes.Venue"
+              },
+              {
+                "name": "collateral",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "loan",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "listaId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "collateralVToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "loanVToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "borrowCap",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "maxUtilizationBps",
+                "type": "uint16",
+                "internalType": "uint16"
+              },
+              {
+                "name": "enabled",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "retired",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "routeCount",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "routeIdOf",
+        "inputs": [
+          {
+            "name": "venue",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.Venue"
+          },
+          {
+            "name": "collateral",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "loan",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "listaId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "pure"
+      },
+      {
+        "type": "function",
+        "name": "routeIds",
+        "inputs": [
+          {
+            "name": "index",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "routeOpen",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "setAdapter",
+        "inputs": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.VaultKind"
+          },
+          {
+            "name": "adapter",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setAssetTier",
+        "inputs": [
+          {
+            "name": "asset",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "tier",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.Tier"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setLoanToken",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "allowed",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setLtvConfig",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "target",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deleverage",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setPaused",
+        "inputs": [
+          {
+            "name": "paused",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRateReporter",
+        "inputs": [
+          {
+            "name": "reporter",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRewardProofSuffix",
+        "inputs": [
+          {
+            "name": "suffix",
+            "type": "bytes",
+            "internalType": "bytes"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRewardToken",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "allowed",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRoute",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "retire",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRouteCap",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "cap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setRouteMaxUtilization",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "bps",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setStrategyPolicy",
+        "inputs": [
+          {
+            "name": "maxDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "rewardRecipient",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setVault",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "retire",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setVenusBlocksPerYear",
+        "inputs": [
+          {
+            "name": "blocksPerYear",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "setVenusMarket",
+        "inputs": [
+          {
+            "name": "underlying",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "vToken",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "totalPrincipal",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vault",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.Vault",
+            "components": [
+              {
+                "name": "kind",
+                "type": "uint8",
+                "internalType": "enum RoutingTypes.VaultKind"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "target",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "receipt",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "enabled",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "retired",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vaultCount",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vaultIdOf",
+        "inputs": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum RoutingTypes.VaultKind"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "pure"
+      },
+      {
+        "type": "function",
+        "name": "vaultIds",
+        "inputs": [
+          {
+            "name": "index",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vaultOpen",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vaultSince",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "venusComptroller",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "venusMarket",
+        "inputs": [
+          {
+            "name": "underlying",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "event",
+        "name": "AdapterSet",
+        "inputs": [
+          {
+            "name": "kind",
+            "type": "uint8",
+            "indexed": true,
+            "internalType": "enum RoutingTypes.VaultKind"
+          },
+          {
+            "name": "adapter",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "AssetTierSet",
+        "inputs": [
+          {
+            "name": "asset",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "tier",
+            "type": "uint8",
+            "indexed": false,
+            "internalType": "enum RoutingTypes.Tier"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "LoanTokenSet",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "allowed",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "LtvConfigSet",
+        "inputs": [
+          {
+            "name": "key",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "target",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "deleverage",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "PausedSet",
+        "inputs": [
+          {
+            "name": "paused",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "PrincipalReconciled",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "removed",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RateReporterSet",
+        "inputs": [
+          {
+            "name": "reporter",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RewardProofSuffixSet",
+        "inputs": [
+          {
+            "name": "suffix",
+            "type": "bytes",
+            "indexed": false,
+            "internalType": "bytes"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RewardTokenSet",
+        "inputs": [
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "allowed",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RouteCapSet",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "cap",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RouteMaxUtilizationSet",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "bps",
+            "type": "uint16",
+            "indexed": false,
+            "internalType": "uint16"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RouteRatesReported",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "borrowIncentive",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "collateralIncentive",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RouteRegistered",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "venue",
+            "type": "uint8",
+            "indexed": false,
+            "internalType": "enum RoutingTypes.Venue"
+          },
+          {
+            "name": "collateral",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "loan",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "listaId",
+            "type": "bytes32",
+            "indexed": false,
+            "internalType": "bytes32"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "RouteSet",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          },
+          {
+            "name": "retired",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "StrategyPolicySet",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "maxDebt",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "rewardRecipient",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VaultRatesReported",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "baseRate",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          },
+          {
+            "name": "incentive",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VaultRegistered",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "kind",
+            "type": "uint8",
+            "indexed": false,
+            "internalType": "enum RoutingTypes.VaultKind"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "target",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "receipt",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VaultSet",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "indexed": true,
+            "internalType": "bytes32"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          },
+          {
+            "name": "retired",
+            "type": "bool",
+            "indexed": false,
+            "internalType": "bool"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VenusBlocksPerYearSet",
+        "inputs": [
+          {
+            "name": "blocksPerYear",
+            "type": "uint256",
+            "indexed": false,
+            "internalType": "uint256"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "event",
+        "name": "VenusMarketSet",
+        "inputs": [
+          {
+            "name": "underlying",
+            "type": "address",
+            "indexed": true,
+            "internalType": "address"
+          },
+          {
+            "name": "vToken",
+            "type": "address",
+            "indexed": false,
+            "internalType": "address"
+          }
+        ],
+        "anonymous": false
+      },
+      {
+        "type": "error",
+        "name": "AdmissionClosed",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BadParameter",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BadRoute",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BadVault",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "BorrowCapExceeded",
+        "inputs": [
+          {
+            "name": "requested",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "available",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "ConsentRequired",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "DebtAboveConsent",
+        "inputs": [
+          {
+            "name": "principalUsd",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "ForeignDebt",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "InvalidConstructor",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "TooManyPositions",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "Unauthorized",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "UnknownRoute",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "UnknownVault",
+        "inputs": []
+      }
+    ],
+    "AtpBorrowLensV2": [
+      {
+        "type": "function",
+        "name": "borrowMarket",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "utilizationBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "liquidity",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "collateral",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "debt",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "deleverageAmount",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "deleverageLtv",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "health",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.Health",
+            "components": [
+              {
+                "name": "collateralValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "liquidationValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "debtValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "budgetValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "deleverageValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "healthFactor",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "idleOf",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "liquidationLtv",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "minDebt",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "minLoan",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "moolah",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "quote",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.Quote",
+            "components": [
+              {
+                "name": "gate",
+                "type": "uint8",
+                "internalType": "enum RoutingTypes.Gate"
+              },
+              {
+                "name": "targetLtv",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowIncentiveRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "vaultRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "vaultIncentiveRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "carry",
+                "type": "int256",
+                "internalType": "int256"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "routeDebt",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "routeLines",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "target",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deleverage",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "f",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "routeStatus",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.RouteStatus",
+            "components": [
+              {
+                "name": "open",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "shouldDeleverage",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "borrowRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateralRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowIncentiveRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateralIncentiveRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowUtilizationBps",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "availableLiquidity",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowCapLeft",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "targetLtv",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "deleverageLtv",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "liquidationLtv",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "ltv",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateral",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateralValue",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "debt",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "routeDebt",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "principal",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "openedAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
+                "name": "health",
+                "type": "tuple",
+                "internalType": "struct RoutingTypes.Health",
+                "components": [
+                  {
+                    "name": "collateralValue",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "liquidationValue",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "debtValue",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "budgetValue",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "deleverageValue",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "healthFactor",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "sync",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "syncToken",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "targetLtv",
+        "inputs": [
+          {
+            "name": "routeId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "tokenDebt",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "vaultStatus",
+        "inputs": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "tuple",
+            "internalType": "struct RoutingTypes.VaultStatus",
+            "components": [
+              {
+                "name": "open",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "rateOnChain",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "rateKnown",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "utilizationKnown",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "shouldExit",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "supplyRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "incentiveRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "utilizationBps",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "assets",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "since",
+                "type": "uint64",
+                "internalType": "uint64"
+              }
+            ]
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "venusComptroller",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "error",
+        "name": "DebtOutstanding",
+        "inputs": [
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "GateClosed",
+        "inputs": [
+          {
+            "name": "gate",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "LtvTooHigh",
+        "inputs": [
+          {
+            "name": "debtValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "budgetValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "NothingToDo",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "NothingToRepay",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "ProtocolRead",
+        "inputs": [
+          {
+            "name": "code",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "type": "error",
+        "name": "TokenMismatch",
+        "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "VaultShortfall",
+        "inputs": [
+          {
+            "name": "needed",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "available",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "IStrategyVaultAdapter": [
+      {
+        "type": "function",
+        "name": "accrue",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "assetsOf",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "holder",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "deposit",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "assets",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "holder",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "kind",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "supplyRate",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "known",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "rate",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "utilizationBps",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "known",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "bps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "validate",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "receipt",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "withdraw",
+        "inputs": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "assets",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "holder",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "to",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "received",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      }
+    ]
+  }
+}

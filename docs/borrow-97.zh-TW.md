@@ -112,7 +112,7 @@ fork 實測（2026-11-23）：部署 59 筆、32,288,031 gas（最大單筆 8,78
 
 ## 7. 已知限制：策略 vault 份額與 `AtpExecutor.executeWithdraw`
 
-策略 vault 登記在既有 `AtpYieldRegistry`（供借款合約讀使用率與利率），`supplyEnabled = false` 擋住現金生息存入，但既有 `AtpExecutor.executeWithdraw` 沒有「只限現金生息」的檢查：**若帳戶曾對 `AtpExecutor` approve 策略 vault 份額**，session key 可把策略份額贖回成帳戶現金。錢仍在同一個投資組合帳戶，不會到別的帳戶或用戶錢包，但會跟現金混在一起、借款部位失去 vault 還款來源。`AtpExecutor` 已部署不改，所以後端必須：只對 `AtpBorrowExecutor` approve 策略 vault 份額、絕不對 `AtpExecutor` approve；session policy 不允許對策略 vault 的 market id 呼叫 `executeWithdraw`。主網要在下一版 executor 或 registry 擋掉。
+策略 vault 登記在既有 `AtpYieldRegistry`（供借款合約讀使用率與利率），`supplyEnabled = false` 擋住現金生息存入，但既有 `AtpExecutor.executeWithdraw` 沒有「只限現金生息」的檢查：**若帳戶曾對 `AtpExecutor` approve 策略 vault 份額**，session key 可把策略份額贖回成帳戶現金。錢仍在同一個投資組合帳戶，不會到別的帳戶或用戶錢包，但會跟現金混在一起、借款部位失去 vault 還款來源。`AtpExecutor` 已部署不改，所以後端必須：只對 `AtpBorrowExecutor` approve 策略 vault 份額、絕不對 `AtpExecutor` approve；session policy 不允許對策略 vault 的 market id 呼叫 `executeWithdraw`。主網要在下一版 executor 或 registry 擋掉。（v2 的做法：vault 份額改放每個帳戶的策略盒，只有 v2 executor 能動，見 `docs/borrow-routing-v2.zh-TW.md`；v2 尚未部署。）
 
 ## 8. #67 補齊首發基金市場（2026-11-23）
 
