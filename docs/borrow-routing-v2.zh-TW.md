@@ -511,3 +511,35 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 4. 修正後的 L-1 再給審查員看一次（審查員的要求）。
 5. 審查員另外列的：兩組主網 fork 測試用釘區塊的 archive RPC 跑完整一次（CI 不跑 fork 測試）；session key 的 CallPolicy／paymaster 規則與簽名 policy 的整合測試；owner 換 Safe／timelock、`rateReporter` 用獨立金鑰。
 
+### 測試網換上修正版：腳本與 fork 演練（已備好，**還沒廣播**，等使用者同意）
+
+`DeployBorrowRoutingTestnet` 的部署器 CREATE2 label 從 `routing.deployer` 改成 `routing.deployer.2`（常數 `DEPLOYER_LABEL`）。同一支腳本、同一個指令（§12）再跑一次就會部署出新的一套 v2，並在最後把舊那套的 registry 暫停（`setPaused(true)`：舊 executor 不能再開倉、搬家、換 vault，還款／取回抵押／減倉／放回／激勵照常；環境變數 `ROUTING_PAUSE_PREVIOUS=false` 可以不暫停）。模擬代幣、vToken、Lista 市場、earn vault、Aave 池的 CREATE2 地址不變，腳本看到已經有程式碼就跳過，不會重建也不會再灌流動性。
+
+**本機 Anvil fork 演練（2026-11-25，chain 97 公開節點、fork 區塊 144647413 與 144648037 各一次，結果逐筆相同；帳戶用 impersonate，沒有金鑰；gas price 0.15 gwei）：**
+
+| | 交易數 | gas | 花費 |
+| --- | --- | --- | --- |
+| 部署（DEPLOYER） | 8 筆：`RoutingV2Deployer`、registry、lens、extension、executor、三個 adapter | 19,905,085（最大單筆 5,346,486） | 0.002986 tBNB |
+| 設定（OWNER） | 127 筆：66 `registerRoute`、10 `registerVault`、31 `setAssetTier`、7 `setVenusMarket`、4 `setLoanToken`、3 `setAdapter`、2 `setRateReporter`、`setRewardToken`、`setRewardProofSuffix`、`reportRates`，最後 1 筆是舊 registry 的 `setPaused(true)` | 21,656,140 | 0.003248 tBNB |
+| 合計 | 135 筆，0 筆失敗 | 41,561,225 | 0.006234 tBNB |
+| 再跑一次 | 0 筆 | | |
+| 演練 `RoutingDemoTestnet`（對新 executor） | fork 上 41 筆；公開鏈會少減倉那 3 筆＝38 筆 | fork 9,091,608；公開鏈約 8,506,182 | fork 0.001364；公開鏈約 0.00128 tBNB（OWNER） |
+
+OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前餘額要夠付 2 倍的 gas 估計值（最大一筆約 0.00058），剛好卡在邊緣：**先從 DEPLOYER 轉 0.01 tBNB 給 OWNER**（演練就是這樣做的：設定後剩 0.0107，再跑演練後剩 0.0093）。DEPLOYER 有 0.4333，轉帳加部署後剩約 0.4203。
+
+演練得到的新地址（由部署者、label 與編譯結果決定；`src/` 沒有再改動、用同一個指令（含 `--libraries`）廣播時就是這一組，兩次演練相同）：
+
+| 合約 | 新地址 | 現在（draft5） |
+| --- | --- | --- |
+| `AtpBorrowExecutorV2`（session key 的 target） | `0xeddd943d855a5F5A2880BBFD411449A65182600F` | `0x494C…6bB5` |
+| `AtpBorrowExecutorV2Extension` | `0x2A385aBc1358c92f43C1480ff499f8Ff6415025e` | `0x7bC1…2bF8` |
+| `AtpBorrowRegistryV2` | `0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D` | `0x7eae…559E` |
+| `AtpBorrowLensV2` | `0x4fC68ead312aCfFCBF20f77884804F484226a27A` | `0x18A5…4000` |
+| `StrategyBox` 實作 | `0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76` | `0xa448…E191` |
+| adapter：ERC4626／Venus／Aave | `0x6242869aDEe4ad6Df35505d0Cabb76249FD49D58`／`0x769567B0e45F04Cd962c11CdC95018870Fa1AF66`／`0x06DD79a73A9351B3580ae0769F35209910BDEe7c` | `0x3548…F02d`／`0x861e…Fe91`／`0x432f…3BAa` |
+| `RoutingV2Deployer` | `0x353434F4B0cf98389fe0163b3991F40Db2176936` | `0x4dd9…7787` |
+
+66 個 routeId、10 個 vaultId、四種借款幣、vToken、earn vault、Aave 池、激勵代幣的地址都不變；每個帳戶的策略盒地址（`boxOf`）會變。
+
+**不會動到的東西（用演練的 135 筆逐筆做 state diff 確認）：** 有 storage／程式碼／nonce 變化的帳戶只有新的 9 個合約、CREATE2 工廠、DEPLOYER 與 OWNER 自己，以及舊的 v2 registry（只有 `paused` 那一格）。v1 的 `AtpBorrowExecutor`／`AtpBorrowRegistry`、核心 `AtpRegistry`／`AtpExecutor`、借貸 oracle、模擬 Venus comptroller、所有模擬代幣與 vToken、模擬 Lista Moolah、earn vault、Aave 池都沒有任何狀態變化，也沒有任何一筆交易的對象是它們；135 筆發出的事件只來自新 registry（261 個）與舊 v2 registry（1 個 `PausedSet`）。暫停後在 fork 上對舊 executor 試開倉得到 `AdmissionClosed`，還款路徑照常進到一般檢查。（選做的演練腳本會動到模擬代幣與場所：鑄抵押品給示範帳戶、開倉再關掉、在核心 registry 登記示範帳戶自己的非公開策略，跟 2026-11-25 那次一樣。）
+

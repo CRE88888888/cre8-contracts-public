@@ -44,7 +44,17 @@ import { TestnetRoutingBook as RB } from "./TestnetRoutingBook.sol";
 /// mocks, configures. Idempotent: a rerun broadcasts nothing. Keys: TESTNET_DEPLOYER_KEY / TESTNET_OWNER_KEY
 /// (fork: --unlocked). Env: TESTNET_EXECUTOR (manifest contracts.executor), BORROW_EXECUTOR_V1 (manifest
 /// borrow.executor): every collateral, tier, vToken and Lista market is read from the v1 registry on chain.
+/// A new version of the v2 contracts (the registry pins its executor, so the set is replaced as a whole) is a
+/// new `DEPLOYER_LABEL`: the simulated tokens, markets, vaults and pools keep their addresses and are not
+/// touched, the registry / lens / executor / extension / adapters are created again and configured from
+/// scratch, and the registry of the set before (`PREVIOUS_DEPLOYER_LABEL`) is paused for new risk (every exit
+/// stays open; ROUTING_PAUSE_PREVIOUS=false leaves it as it is).
 contract DeployBorrowRoutingTestnet is Script {
+    /// @dev CREATE2 label of the single-use `RoutingV2Deployer`, and with it of the whole v2 set. ".2" is the
+    /// set with the third-review fixes (interface v2.0-draft6); "routing.deployer" was the 2026-11-25 set.
+    string internal constant DEPLOYER_LABEL = "routing.deployer.2";
+    string internal constant PREVIOUS_DEPLOYER_LABEL = "routing.deployer";
+
     struct Out {
         IAtpBorrowExecutorV2 lend;
         AtpBorrowRegistryV2 credit;
@@ -155,6 +165,7 @@ contract DeployBorrowRoutingTestnet is Script {
         _routesAndVaults(c, o);
         _firstReport(o, usdt, extra);
         _revokeOwnerMinter(o.loans[0]);
+        address previous = _pausePrevious(c, o);
         vm.stopBroadcast();
 
         console.log("MANIFEST routingExecutor", address(o.lend));
@@ -173,6 +184,27 @@ contract DeployBorrowRoutingTestnet is Script {
         }
         console.log("MANIFEST routingRouteCount", o.credit.routeCount());
         console.log("MANIFEST routingVaultCount", o.credit.vaultCount());
+        if (previous != address(0)) {
+            console.log("MANIFEST routingPreviousRegistry", previous);
+            console.log("MANIFEST routingPreviousRegistryPaused", AtpBorrowRegistryV2(previous).paused());
+        }
+    }
+
+    /// @dev The registry of the v2 set this one replaces: paused for new risk (opens, migrations, vault
+    /// switches), so nothing new starts on the old executor; repayments, withdrawals, deleverage, releases
+    /// and rewards there are never paused. Returns the old registry (zero when ROUTING_PAUSE_PREVIOUS=false).
+    function _pausePrevious(Ctx memory c, Out memory o) private returns (address previous) {
+        if (!vm.envOr("ROUTING_PAUSE_PREVIOUS", true)) return address(0);
+        address d = TB.create2Address(
+            PREVIOUS_DEPLOYER_LABEL,
+            abi.encodePacked(type(RoutingV2Deployer).creationCode, abi.encode(c.sender))
+        );
+        require(d.code.length != 0, "routing deploy: previous deployer not found");
+        previous = RoutingV2Deployer(d).registry();
+        require(
+            previous.code.length != 0 && previous != address(o.credit), "routing deploy: previous registry"
+        );
+        if (!AtpBorrowRegistryV2(previous).paused()) AtpBorrowRegistryV2(previous).setPaused(true);
     }
 
     // ---- existing venues, read from the v1 registry ----
@@ -203,8 +235,7 @@ contract DeployBorrowRoutingTestnet is Script {
     {
         RoutingV2Deployer d = RoutingV2Deployer(
             _create2(
-                "routing.deployer",
-                abi.encodePacked(type(RoutingV2Deployer).creationCode, abi.encode(c.sender))
+                DEPLOYER_LABEL, abi.encodePacked(type(RoutingV2Deployer).creationCode, abi.encode(c.sender))
             )
         );
         if (d.registry() == address(0)) {

@@ -19,7 +19,8 @@ jobs:
   verify:
     name: forge build + test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 編譯（via_ir）在 runner 上要 4.5–9 分鐘，測試 1–2 分鐘；10 分鐘會被編譯慢的 runner 撞到（#70 兩次）。
+    timeout-minutes: 20
 
     steps:
       # lib/（OpenZeppelin、forge-std）是直接 commit 進來的，不是 submodule，

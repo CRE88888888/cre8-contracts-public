@@ -637,9 +637,8 @@ contract RoutingReviewTest is RoutingBase {
     /// third-party repayments and reconciles (all debt here is v2's own): a loan token owed on Venus always
     /// has a Venus position standing for it, principal and posted collateral always have theirs, and neither
     /// an open nor a migrate ever fails with `ForeignDebt`.
-    /// One run is a 40-step sequence with a snapshot per step: 2,000 runs (the CI default) take minutes on
-    /// the CI runner and push the job past its 10-minute limit, so CI runs 256; run it deeper locally with
-    /// `FOUNDRY_FUZZ_RUNS`.
+    /// One run is a 40-step sequence with a snapshot per step: 2,000 runs (the CI default) take several
+    /// minutes on the CI runner, so CI runs 256; run it deeper locally with `FOUNDRY_FUZZ_RUNS`.
     /// forge-config: ci.fuzz.runs = 256
     function testFuzz_L1_venusList_ownDebtIsNeverForeign(uint256 seed) public {
         usdt.mint(address(this), 5_000e18);
