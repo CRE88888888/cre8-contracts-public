@@ -1524,7 +1524,7 @@
     "interfaceVersion": "v2.0-draft6",
     "gitCommit": "465a6e5236f13be995f815e44a7c6fb5b3837888",
     "deployedAt": "2026-11-25T02:19Z..02:23Z",
-    "verifiedAtBlock": 144709526,
+    "verifiedAtBlock": 144712650,
     "executor": "0xeddd943d855a5F5A2880BBFD411449A65182600F",
     "extension": "0x2A385aBc1358c92f43C1480ff499f8Ff6415025e",
     "registry": "0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D",
@@ -2749,6 +2749,60 @@
           "executeSweepRewards: account -> owner's recipient": "0x108769eb122f14313fd8ba7d9c77d9b58bcfa15d13d15f8c2cfc224b03e87f72"
         }
       }
+    },
+    "demo": {
+      "note": "RoutingDemoTestnet on the draft6 set: a demo account owned by OWNER; every position closed again. The deleverage drill is skipped on the public chain (it would tighten a route every account shares); it runs on a local fork only.",
+      "account": "0xd641D5aa6c479288e9c02F4862303c1070ed3Fb1",
+      "box": "0x67d92dEfbA5dA3a7a02ed23CeFbC76562D2A13cB",
+      "rewardCollected": "1000000000000000000",
+      "txCount": 38,
+      "failed": 0,
+      "gasUsed": 8990558,
+      "blocks": [
+        144712473,
+        144712629
+      ],
+      "ranAt": "2026-11-25T03:00Z..03:01Z",
+      "txs": {
+        "open: QQQB collateral on Lista QQQB/USDC": "0xb17aa8bcccf75ed8918087998b7fd25e7af3d5e319296430d29f7fcc93055da6",
+        "open: borrow USDC into the USDC earn vault": "0x8a391e4ec9e2944631322666e5f3b0bd44b4582ba1dae663ff4bcee4472d3ca1",
+        "partial repay from the vault": "0xe966ee8dcd3c46412dbcb8d53be5e8d43546be3e22fce174d4012ae89f27e73f",
+        "migrate to Lista QQQB/USD1 (other loan token, one tx)": "0xf56e6b0c0bb5f163ae0f421e93ca758499e7aae4b1643375dcd1d75b552d2852",
+        "switch vault: USD1 earn vault -> Venus vUSD1": "0xa70aba6cd3b7e104d6032ec685729d3969f88d0bd24a6be0b41774dcbcfa2718",
+        "close QQQB (repay all, collateral back)": "0x1a8da8a85cdb1c969a24a615223de8b8a876ea5b357639b508f797de7dba3610",
+        "open: NVDAB collateral on Venus NVDAB/USDT": "0xd783a590dea493770d4afa8522622a78f5a27a7c6718310ced81b649abf754a6",
+        "open: borrow USDT into Aave": "0x3ac3b862b8bf058c74e8e2c08af6af5d9274dae01f5432b6d40a9563504a57fc",
+        "migrate Venus -> Lista NVDAB/USDT (same token, one tx)": "0x09cef7580b0cc23dfb9afff9c1686712bd1e9d2459da97dbd98ec6be1d04fe71",
+        "close NVDAB": "0x5d4ad38a20933dc4a06cc7be1faaa8587a9a01216c9cd85b1a6d0afa4bcf60fe",
+        "executeSweepRewards: account -> owner's recipient": "0xa0abd9cb9fc082a417ffd763c3bba1e79ef0aa2d17356fded77fb2fe85044f6f",
+        "vault pays its incentive to the box": "0xf940af07d2eb2ebfd507fa03fd71171a0bf278294305640cf0f99574d3b26d8e",
+        "collectRewards: box -> account": "0x1d1687948be59a3c971eb60a81f47633efece5b091ec1b0686363fa09e6bcbfe"
+      }
+    },
+    "cashSwapper": {
+      "note": "AtpBorrowCashSwapper (add-on, docs \u00a717): bound to this executor; a new v2 set needs a new swapper.",
+      "address": "0x99811a1115B36F8310deaDAda818cAE685360798",
+      "routingExecutor": "0xeddd943d855a5F5A2880BBFD411449A65182600F",
+      "gitCommit": "df96fcc222d53e6540d9566d72c9a754908beaac",
+      "owner": "0x09BBB9A06a0C49Ad24bddB18808944041783054e",
+      "usdt": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+      "poolFee": 100,
+      "pools": {
+        "USDC": "0xB880D719455D11627A37cAc49493bFb54C884A01",
+        "USD1": "0x85945fAE445F06C129D61CF962849534c8332586",
+        "U": "0x8A84c8EBe1c97Ab212600714DdCb53760F25Ba32"
+      },
+      "maxPegBps": 25,
+      "bufferBps": 100,
+      "topUpWindowSeconds": 86400,
+      "deployedAtBlocks": [
+        144712138,
+        144712214
+      ],
+      "deployedAt": "2026-11-25T02:57Z..02:58Z",
+      "deployTxCount": 19,
+      "deployFailed": 0,
+      "deployGasUsed": 18557526
     }
   }
 }

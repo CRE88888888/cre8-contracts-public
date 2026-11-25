@@ -2,9 +2,9 @@
 
 > 介面版本：**v2.0-draft6（2026-11-25）**。改介面時在這裡往下加一行。
 >
-> **外掛合約 `AtpBorrowCashSwapper`（2026-11-25，§17；還沒部署到任何鏈）：** 補上「借 USDC／USD1／U 的部位，還款差額沒有幣可補」的缺口，並把關閉後留在帳戶的借款幣換回 USDT。v2 四個合約的程式與 ABI 完全沒變。後端要加的：session key 多一個 target、帳戶多兩種 approve、關閉前讀 `shortfall`（都在 §17）。**第四輪審查後改過（§18）：** 補差額的上限不再讀 vault（＝負債 − 盒內閒置，加緩衝）、多了每帳戶每幣的 24 小時累計上限（`WindowExceeded`）、`topUp` 不再接受 `MAX`（後端自己給數量）、錨定上限預設從 0.5% 降到 0.25%。
+> **外掛合約 `AtpBorrowCashSwapper`（2026-11-25，§17；同一天已部署到測試網 chain 97：`0x99811a1115B36F8310deaDAda818cAE685360798`，主網還沒部署）：** 補上「借 USDC／USD1／U 的部位，還款差額沒有幣可補」的缺口，並把關閉後留在帳戶的借款幣換回 USDT。v2 四個合約的程式與 ABI 完全沒變。後端要加的：session key 多一個 target、帳戶多兩種 approve、關閉前讀 `shortfall`（都在 §17）。**第四輪審查後改過（§18）：** 補差額的上限不再讀 vault（＝負債 − 盒內閒置，加緩衝）、多了每帳戶每幣的 24 小時累計上限（`WindowExceeded`）、`topUp` 不再接受 `MAX`（後端自己給數量）、錨定上限預設從 0.5% 降到 0.25%。
 >
-> **draft6（第三輪審查的修正，對照表在 §16；ABI 完全沒變，變的是下面兩個行為。這一版還沒部署：測試網 chain 97 上跑的仍是 draft5 的程式）：**
+> **draft6（第三輪審查的修正，對照表在 §16；ABI 完全沒變，變的是下面兩個行為。2026-11-25 已重新部署到測試網 chain 97，新地址在 §12；原本 draft5 那套已暫停新增風險）：**
 > 1. Venus→Venus 的 `executeMigrate` 現在也會被 `ForeignDebt` 擋下（draft5 的檢查在這條路徑上永遠通過）。帳戶自己的負債不受影響。
 > 2. `lens.routeDebt`：某個幣在 Venus 的本金已經是 0、只剩利息零頭時，整筆只歸給帳戶在這個幣的**第一個** Venus 部位（`accountRoutes` 的順序），同幣其他路線回 0；帳戶在這個幣沒有 v2 的 Venus 部位（外來負債）時每條都回 0。draft5 是每條都回整筆。**後端算帳戶負債用 `tokenDebt(account, token)`，不要加總 `routeDebt`**（兩版都適用，見 §5）。
 > 3. 主網 `verify()` 一定要帶 `ATP_EXECUTOR`，而且必須是 `deployments/mainnet.json` 記的核心（§13）。
@@ -45,7 +45,7 @@
 > 9. 一筆還款讓帳戶在該借款幣的負債歸零時（`executeReduce` 或 `executeMigrate` 的舊路線），會把指定 vault 的存款一次領完，超過負債的部分同一筆付回帳戶（`Released` 事件）。
 > 10. `executeRelease`／關閉時的放回，也會把直接進到策略盒的同幣現金一起付回帳戶。
 
-狀態：v2 是**新合約**，放在 `src/atp/borrow/v2/`，不改已部署的 v1（`AtpBorrowExecutor`／`AtpBorrowRegistry`）。測試網（chain 97）已於 2026-11-25 部署（地址在 §12 與 `deployments/testnet-97.json` 的 `borrowV2`），跑的是 draft5 的程式（commit `1888572`）；draft6 的修正還沒部署到任何鏈。主網還沒部署。
+狀態：v2 是**新合約**，放在 `src/atp/borrow/v2/`，不改已部署的 v1（`AtpBorrowExecutor`／`AtpBorrowRegistry`）。測試網（chain 97）跑的是 draft6 的程式（commit `465a6e5`，2026-11-25 重新部署，地址在 §12 與 `deployments/testnet-97.json` 的 `borrowV2`）；先前 draft5 那套（commit `1888572`）已暫停新增風險，記在 `borrowV2.previous`。外掛的 `AtpBorrowCashSwapper` 也已部署到測試網（§17）。主網還沒部署。
 
 ## 1. 跟 v1 差在哪
 
@@ -157,7 +157,7 @@ Venus 的負債按借款幣記在帳戶上（同一個幣只有一筆），健�
 - **減倉線** `deleverageValue` ＝ Σ(價值 × 減倉 LTV)。`debtValue ≥ deleverageValue` 時任何人可減倉；要還哪個幣的負債由呼叫者選路線（`routeId` 的借款幣）與該幣的 vault。
 - `lens.debt(routeId, account)` 回傳帳戶在這個借款幣的**整筆**負債；`lens.routeDebt(routeId, account)` 是按 principal 比例分給這條路線的部分（這個幣別只剩這條路線有 principal 時＝整筆）。`executeReduce` 的 `repayAmount = max` 還的是 `routeDebt`。
 - **本金歸零、只剩利息零頭時**（例如還款金額剛好等於本金、或減倉還掉了全部本金）：這個幣的整筆負債只算在帳戶第一個這個幣的 Venus 部位上（`accountRoutes` 裡排最前面的那條），同幣其他路線的 `routeDebt` 是 0。對 `routeDebt` 是 0 的路線送 `repayAmount = max` 不會還任何錢（沒有同時取回抵押就 `NothingToRepay`）。要清掉零頭：對 `routeDebt` 不是 0 的那條送 `max`，或在任何一條同幣路線上傳明確金額（上限是 `debt()`）。帳戶在這個幣沒有任何 v2 的 Venus 部位時（負債不是 v2 開的），每條路線的 `routeDebt` 都是 0。
-- **後端怎麼讀負債：** 帳戶在某個幣的總負債用 `lens.tokenDebt(account, token)`（Venus 加上清單裡的 Lista 部位）；只看 Venus 那一筆就用任何一條該幣路線的 `debt()`。**不要把各路線的 `routeDebt` 加起來當成帳戶負債**：比例是向上取整的（n 條路線加起來最多多 n−1 個最小單位），而且測試網目前部署的 draft5 lens 在本金歸零時每條同幣路線都回整筆，加總會重複計算。`routeDebt` 只用來知道「這條路線送 `max` 會還多少」與顯示各路線的份額。
+- **後端怎麼讀負債：** 帳戶在某個幣的總負債用 `lens.tokenDebt(account, token)`（Venus 加上清單裡的 Lista 部位）；只看 Venus 那一筆就用任何一條該幣路線的 `debt()`。**不要把各路線的 `routeDebt` 加起來當成帳戶負債**：比例是向上取整的（n 條路線加起來最多多 n−1 個最小單位），而且 draft5 的 lens（測試網上已暫停的那一套）在本金歸零時每條同幣路線都回整筆，加總會重複計算。`routeDebt` 只用來知道「這條路線送 `max` 會還多少」與顯示各路線的份額。
 - 同一個抵押品的多條 Venus 路線（只差借款幣）共用同一批 vToken；`accountRoutes` 只會留一筆有 principal 的。
 
 **關閉兩個以上 Venus 部位（對應 backend #252）：** vault 現在是合併的，不需要「誰的 vault 最大誰收尾」。
@@ -243,6 +243,8 @@ F ＝ Venus collateral factor／Lista LLTV。
 每個動作對同一個 Lista vault 最多呼叫一次（修正前關閉要兩次、vault 的錢不夠時兩次、最壞情況三次約 1,800 萬）：需要多少就請 vault 給「最多這麼多」，給不足不會 revert；vault 完全領不出來也不重試，改用帳戶現金或留在策略盒。fork 測試對每個動作斷言 < 1,200 萬 gas。唯一會碰兩個大 vault 的是搬家（各一次，887 萬）。
 
 **後端要做的：** 送出前 `eth_estimateGas`，超過 1,200 萬就拆成 `executeReduce`＋`executeOpen`；監看各 Lista vault 的 `withdrawQueueLength`（佇列越長越貴，USD1 vault 現在 142）。
+
+**`executeOpen` 的 gas 要留餘量：** 後端自己決定 gas 上限（EOA 交易的 gas limit、UserOp 的 `callGasLimit`）時，`executeOpen` 不要照 `eth_estimateGas` 的數字原樣送。在 chain 97 的本機 fork 上，用預設估計值送出的 `executeOpen` 會 out of gas（原因還沒追查）。部署與演練腳本一律用估計值的 2 倍（`--gas-estimate-multiplier 200`），2026-11-25 鏈上演練的 38 筆這樣送都過了；後端比照留 2 倍。鏈上實際用量（測試網的模擬場所；主網的 Lista vault 看上面的表）：`executeOpen` 只放抵押 32–42 萬、借款並存進 vault 79–88 萬，`executeMigrate` 111–124 萬。
 
 ## 8. 單位
 
@@ -339,7 +341,51 @@ F ＝ Venus collateral factor／Lista LLTV。
 
 腳本：`script/testnet/DeployBorrowRoutingTestnet.s.sol`（部署＋設定，可重複執行，第二次沒有交易）、`script/testnet/RoutingDemoTestnet.s.sol`（演練）。參數在 `script/testnet/TestnetRoutingBook.sol`。
 
-**部署紀錄（2026-11-25 00:17–00:26 台北時間，程式碼 commit `1888572`）：**
+**目前這一套（draft6）的部署紀錄（2026-11-25 10:19–11:01 台北時間，使用者同意後由總管廣播）：**
+
+| 合約 | 地址 |
+| --- | --- |
+| `AtpBorrowExecutorV2`（session key 的 target） | `0xeddd943d855a5F5A2880BBFD411449A65182600F` |
+| `AtpBorrowExecutorV2Extension` | `0x2A385aBc1358c92f43C1480ff499f8Ff6415025e` |
+| `AtpBorrowRegistryV2` | `0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D` |
+| `AtpBorrowLensV2` | `0x4fC68ead312aCfFCBF20f77884804F484226a27A` |
+| `StrategyBox` 實作 | `0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76` |
+| adapter：ERC4626／Venus／Aave | `0x6242869aDEe4ad6Df35505d0Cabb76249FD49D58`／`0x769567B0e45F04Cd962c11CdC95018870Fa1AF66`／`0x06DD79a73A9351B3580ae0769F35209910BDEe7c` |
+| `RoutingV2Deployer` | `0x353434F4B0cf98389fe0163b3991F40Db2176936` |
+| `AtpBorrowCashSwapper`（§17；session key 的另一個 target） | `0x99811a1115B36F8310deaDAda818cAE685360798` |
+| swapper 的池（PancakeSwap V3 0.01%）USDT/USDC／USDT/USD1／USDT/U | `0xB880D719455D11627A37cAc49493bFb54C884A01`／`0x85945fAE445F06C129D61CF962849534c8332586`／`0x8A84c8EBe1c97Ab212600714DdCb53760F25Ba32` |
+| 模擬 USDC／USD1／U（沒變） | `0xB887Ca3379dC41F1155dD0cb1B2e3c1D85D17eD5`／`0xEA13862CB4612d228BA89b4319fEEc60F05Ab3AC`／`0xC71E4Efb5A36bD54ad8DE9E9742bFA8fBd750875` |
+| 模擬激勵代幣 LISTA（沒變） | `0xFfE08AC6f45A4aE5Ae2a692f0965EA46CE7d822c` |
+
+66 條路線、10 個 vault 的 id 與參數、vToken／earn vault／Aave 池的地址都跟上一套相同，在 `deployments/testnet-97.json` 的 `borrowV2`（swapper 在 `borrowV2.cashSwapper`、演練在 `borrowV2.demo`、上一套在 `borrowV2.previous`）。`rateReporter` 是 OPERATOR（`0xd8CE…9d7F`）。
+
+**後端要跟著換的：** session key 的 target 改成新的 executor `0xeddd…600F`，另外加 swapper `0x9981…0798`（selector 只放 `topUp`、`cashOut`，§17）；lens、registry 換成新地址；每個帳戶的策略盒地址（`boxOf`）跟著 executor 變了。舊那套上如果還有部位，還款／取回抵押／放回／領激勵仍然送舊的 executor `0x494C…6bB5`（它已暫停新增風險，不能開倉、搬家、換 vault）。
+
+- v2 重新部署＋設定（`DeployBorrowRoutingTestnet`，程式碼 commit `465a6e5`，細節在 §16）：135 筆（DEPLOYER 8、OWNER 127），區塊 144707011–144707575（10:19–10:23），0 筆失敗，41,561,225 gas，0.006234 tBNB。筆數、gas、地址跟 fork 演練逐項相同。最後一筆是舊 registry 的 `setPaused(true)`（`0x1c12d1d80b727130079d45ec11f15cf74340fdc666f3aa9cb2c266ce52c16aa7`）。
+- `AtpBorrowCashSwapper`（`DeployBorrowCashSwapperTestnet`，程式碼 commit `df96fcc`，細節在 §17）：19 筆（DEPLOYER 10、OWNER 9），區塊 144712138–144712214（10:57–10:58），0 筆失敗，18,557,526 gas，0.002784 tBNB，也跟 fork 演練逐項相同。`maxPegBps` 25、`bufferBps` 100。
+- 演練 `RoutingDemoTestnet`（對新的 executor）：38 筆（OWNER），區塊 144712473–144712629（11:00–11:01），0 筆失敗，8,990,558 gas，0.001349 tBNB。減倉那 3 筆在公開鏈上自動跳過（見下面）。示範帳戶 `0xd641D5aa6c479288e9c02F4862303c1070ed3Fb1`，策略盒 `0x67d92dEfbA5dA3a7a02ed23CeFbC76562D2A13cB`，領到的激勵 1 LISTA；結束時沒有部位、沒有負債，沒有改任何路線的線。
+- 部署後唯讀檢查（區塊 144712650，96 項全過）：三份 broadcast 紀錄的每一筆都在鏈上、0 筆失敗；v2 的九個合約與 swapper 的 runtime bytecode 跟 repo 的編譯結果逐 byte 相同；合約互相接線正確、場所是上一套用的那組模擬 Venus／Lista；66 條路線與 10 個 vault 跟上一套逐項相同、都開著、利率回報都是新的；舊 registry 已暫停，而且只收到那一筆 `setPaused(true)`；v2 重新部署的 135 筆沒有任何一筆的對象是 v1、核心、模擬代幣或借貸市場；swapper 綁的是這個 executor／registry／lens，三個池是 factory 的 0.01% 池且有流動性；OWNER 不是 USDT minter。
+- 三支腳本跑完後的餘額：DEPLOYER 0.4176 tBNB、OWNER 0.0093 tBNB。
+
+演練的主要步驟（其餘 25 筆是建示範帳戶、鑄幣與帳戶自己的準備動作；13 筆的 hash 也在 manifest 的 `borrowV2.demo.txs`）：
+
+| 步驟 | 交易 | gas |
+| --- | --- | --- |
+| `executeOpen`：QQQB 抵押放進 Lista QQQB/USDC | `0xb17aa8bcccf75ed8918087998b7fd25e7af3d5e319296430d29f7fcc93055da6` | 316,974 |
+| `executeOpen`：借 USDC 存進 USDC earn vault | `0x8a391e4ec9e2944631322666e5f3b0bd44b4582ba1dae663ff4bcee4472d3ca1` | 787,858 |
+| `executeReduce`：從 vault 部分還款 | `0xe966ee8dcd3c46412dbcb8d53be5e8d43546be3e22fce174d4012ae89f27e73f` | 417,211 |
+| `executeMigrate`：一筆搬到 Lista QQQB/USD1（換借款幣） | `0xf56e6b0c0bb5f163ae0f421e93ca758499e7aae4b1643375dcd1d75b552d2852` | 1,106,273 |
+| `executeSwitchVault`：USD1 earn vault → Venus vUSD1 | `0xa70aba6cd3b7e104d6032ec685729d3969f88d0bd24a6be0b41774dcbcfa2718` | 451,112 |
+| `executeReduce`：關閉 QQQB（全還、抵押取回） | `0x1a8da8a85cdb1c969a24a615223de8b8a876ea5b357639b508f797de7dba3610` | 550,318 |
+| `executeOpen`：NVDAB 抵押放進 Venus NVDAB/USDT | `0xd783a590dea493770d4afa8522622a78f5a27a7c6718310ced81b649abf754a6` | 416,696 |
+| `executeOpen`：借 USDT 存進 Aave | `0x3ac3b862b8bf058c74e8e2c08af6af5d9274dae01f5432b6d40a9563504a57fc` | 881,320 |
+| `executeMigrate`：Venus → Lista NVDAB/USDT（同幣，一筆） | `0x09cef7580b0cc23dfb9afff9c1686712bd1e9d2459da97dbd98ec6be1d04fe71` | 1,237,325 |
+| `executeReduce`：關閉 NVDAB | `0x5d4ad38a20933dc4a06cc7be1faaa8587a9a01216c9cd85b1a6d0afa4bcf60fe` | 524,126 |
+| vault 把激勵付給策略盒 | `0xf940af07d2eb2ebfd507fa03fd71171a0bf278294305640cf0f99574d3b26d8e` | 71,316 |
+| `collectRewards`：策略盒 → 帳戶 | `0x1d1687948be59a3c971eb60a81f47633efece5b091ec1b0686363fa09e6bcbfe` | 74,946 |
+| `executeSweepRewards`：帳戶 → owner 指定地址 | `0xa0abd9cb9fc082a417ffd763c3bba1e79ef0aa2d17356fded77fb2fe85044f6f` | 98,515 |
+
+**上一套（draft5，已暫停新增風險）的部署紀錄（2026-11-25 00:17–00:26 台北時間，程式碼 commit `1888572`）：**
 
 | 合約 | 地址 |
 | --- | --- |
@@ -352,11 +398,11 @@ F ＝ Venus collateral factor／Lista LLTV。
 | 模擬 USDC／USD1／U | `0xB887Ca3379dC41F1155dD0cb1B2e3c1D85D17eD5`／`0xEA13862CB4612d228BA89b4319fEEc60F05Ab3AC`／`0xC71E4Efb5A36bD54ad8DE9E9742bFA8fBd750875` |
 | 模擬激勵代幣 LISTA | `0xFfE08AC6f45A4aE5Ae2a692f0965EA46CE7d822c` |
 
-66 條路線、10 個 vault 的 id 與參數、vToken／earn vault／Aave 池的地址都在 `deployments/testnet-97.json` 的 `borrowV2`。`rateReporter` 是 OPERATOR（`0xd8CE…9d7F`）。
+這一套的地址現在記在 `deployments/testnet-97.json` 的 `borrowV2.previous`。
 
 - 部署＋設定：331 筆（DEPLOYER 21、OWNER 310），區塊 144626656–144628034，0 筆失敗，82,530,848 gas，0.01238 tBNB。地址跟 fork 演練完全相同。再跑一次腳本：0 筆。
 - 唯讀檢查：各合約有程式碼且互相接線正確、場所地址＝v1 用的那套模擬 Venus／Lista、66 條路線與 10 個 vault 都開著、四種借款幣與激勵代幣在白名單、沒有任何一筆交易的對象是 v1 的 executor／registry。
-- 演練 `RoutingDemoTestnet`：41 筆（OWNER），區塊 144629276–144629454，0 筆失敗，9,644,612 gas（比 fork 演練多 3.9%，鏈上各步之間有利息），0.00145 tBNB。示範帳戶 `0x65c3251F4854A53Cc01C2386A44ec372F292C37c`，策略盒 `0xf56bc1EC1185F5Dbf31a7b6E38afA9029eF8B520`，第三方減倉還了 504.97 USD1，結束時沒有部位、沒有負債。每一步的交易 hash 在 manifest 的 `borrowV2.demo.txs`。
+- 演練 `RoutingDemoTestnet`：41 筆（OWNER），區塊 144629276–144629454，0 筆失敗，9,644,612 gas（比 fork 演練多 3.9%，鏈上各步之間有利息），0.00145 tBNB。示範帳戶 `0x65c3251F4854A53Cc01C2386A44ec372F292C37c`，策略盒 `0xf56bc1EC1185F5Dbf31a7b6E38afA9029eF8B520`，第三方減倉還了 504.97 USD1，結束時沒有部位、沒有負債。每一步的交易 hash 在 manifest 的 `borrowV2.previous.demo.txs`。
 - 跑完餘額：DEPLOYER 0.4333 tBNB、OWNER 0.0040 tBNB（OWNER 之後要再做設定先補一點）。
 
 跟演練不同的只有一件事：廣播用的 RPC。`https://bsc-testnet.bnbchain.org` 只留幾分鐘的歷史狀態，forge 模擬 331 筆要約 10 分鐘，第一次在模擬階段就 `missing trie node` 停下（**一筆都沒送出**，兩個帳戶的 nonce 沒動）；改用 `https://bsc-testnet.publicnode.com` 後一次跑完。
@@ -403,11 +449,11 @@ USDT 會多幾個 minter（模擬利息用）：新的 USDT earn vault、Aave US
 
 演練內容：QQQB 在 Lista 借 USDC 存 USDC vault → 部分還款 → 一筆搬到 Lista USD1 市場（換借款幣）→ 存款換到 Venus vUSD1 → owner 把這條路線的線調緊（目標 10%、減倉 20%）→ 第三方觸發減倉（還 505.0 USD1）→ 線調回預設 → 關閉；NVDAB 在 Venus 借 USDT 存 Aave → 一筆搬到 Lista（同幣）→ 關閉；激勵由 vault 發給策略盒 → `collectRewards` 進帳戶 → `executeSweepRewards` 到 owner 指定地址。
 
-**v1 與 v2 不能在同一個帳戶上同時用 Venus（後端要守的規則）：** Venus 的負債與抵押是整個帳戶一起算的，v2 會把帳戶在 Venus 的全部 USDT 負債、全部 vToken 當成自己的。規則：一個投資組合帳戶要嘛用 v1、要嘛用 v2；要從 v1 換到 v2，先把 v1 在 Venus 的部位完全關掉（負債 0、抵押取回、v1 的 vault 份額贖回），再開 v2。合約這邊多一道保險：帳戶在 Venus 欠某個借款幣、但在 v2 沒有這個幣的 Venus 部位時，v2 這個幣的 Venus 路線開不了（`ForeignDebt`），用 `executeOpen` 或搬家搬進去都一樣（搬家這條路徑是 draft6 才擋得住的；測試網上的 draft5 程式用 Venus→Venus 搬家可以繞過，見 §16 的 L-1，所以在換上修正版之前這一點完全靠後端的規則）。v2 自己的部位本金還完、只剩利息零頭時不算（部位會留在 `accountRoutes` 直到這個幣的負債歸零）。這道保險只擋「先有 v1 負債、才來開 v2」；v2 部位開著之後又去 v1 借同一個幣，合約分不出來，還是要靠後端的規則。Lista 每個市場獨立，v1／v2 用同一個 Lista 市場時也一樣要先關 v1（合約擋不到這個，因為同一個市場的負債分不出是誰開的）。
+**v1 與 v2 不能在同一個帳戶上同時用 Venus（後端要守的規則）：** Venus 的負債與抵押是整個帳戶一起算的，v2 會把帳戶在 Venus 的全部 USDT 負債、全部 vToken 當成自己的。規則：一個投資組合帳戶要嘛用 v1、要嘛用 v2；要從 v1 換到 v2，先把 v1 在 Venus 的部位完全關掉（負債 0、抵押取回、v1 的 vault 份額贖回），再開 v2。合約這邊多一道保險：帳戶在 Venus 欠某個借款幣、但在 v2 沒有這個幣的 Venus 部位時，v2 這個幣的 Venus 路線開不了（`ForeignDebt`），用 `executeOpen` 或搬家搬進去都一樣（搬家這條路徑是 draft6 才擋得住的，見 §16 的 L-1；測試網 2026-11-25 已換上 draft6，舊的 draft5 那套已暫停，不能再開倉或搬家）。v2 自己的部位本金還完、只剩利息零頭時不算（部位會留在 `accountRoutes` 直到這個幣的負債歸零）。這道保險只擋「先有 v1 負債、才來開 v2」；v2 部位開著之後又去 v1 借同一個幣，合約分不出來，還是要靠後端的規則。Lista 每個市場獨立，v1／v2 用同一個 Lista 市場時也一樣要先關 v1（合約擋不到這個，因為同一個市場的負債分不出是誰開的）。
 
 演練只動它自己的示範帳戶（OWNER 用 CREATE2 建的 `RoutingDemoAccount`）與 v2 的東西：模擬代幣是鑄給示範帳戶的，減倉演練調的是 v2 這一條路線的線，**不動借貸 oracle 的價格**（那個 oracle v1 的部位也在讀；最早的版本是把 QQQB 價格砍半再調回，已改掉）。它會在核心 `AtpRegistry` 登記一個示範帳戶自己的非公開策略並 enroll 自己。
 
-**減倉那一段現在只在本機 fork 上跑（第三輪審查 I-4）：** QQQB/USD1 是所有帳戶共用的路線。2026-11-25 那次鏈上演練把它的線調緊（目標 10%、減倉 20%）再調回，中間那兩筆交易之間，這條路線上 LTV ≥ 20% 的其他帳戶任何人都可以減倉。腳本現在用 `anvil_nodeInfo` 判斷：RPC 是本機 Anvil fork 才做「調緊 → 第三方減倉 → 調回」這三筆；對公開測試網跑時自動跳過（印 `ROUTING_DEMO_DELEVERAGE_SKIPPED_NOT_A_FORK`），鏈上那一趟少 3 筆，不再動任何共用設定。上面的演練紀錄與筆數是改之前的。審查員讀過鏈上 66 條路線的 `ltvConfig`，目前都是預設值，沒有殘留。改完後用目前的鏈上狀態各模擬一次（都不廣播）：對公開節點 38 筆、跳過減倉、結束時沒有部位；對本機 Anvil fork 41 筆、第三方減倉還 504.97 USD1。另外，示範帳戶的 CREATE2 地址跟這個腳本檔案的編譯結果綁在一起，檔案改過之後下次演練會建一個新的示範帳戶（模擬裡是 `0xd641…3Fb1`），舊的 `0x65c3…C37c` 沒有部位、留在鏈上不用處理。
+**減倉那一段現在只在本機 fork 上跑（第三輪審查 I-4）：** QQQB/USD1 是所有帳戶共用的路線。2026-11-25 對上一套（draft5）的那次鏈上演練把它的線調緊（目標 10%、減倉 20%）再調回，中間那兩筆交易之間，這條路線上 LTV ≥ 20% 的其他帳戶任何人都可以減倉。腳本現在用 `anvil_nodeInfo` 判斷：RPC 是本機 Anvil fork 才做「調緊 → 第三方減倉 → 調回」這三筆；對公開測試網跑時自動跳過（印 `ROUTING_DEMO_DELEVERAGE_SKIPPED_NOT_A_FORK`），鏈上那一趟少 3 筆，不再動任何共用設定。上一套（draft5）的演練紀錄與筆數是改之前的；2026-11-25 對新那套的演練（38 筆）是改之後的。審查員讀過鏈上 66 條路線的 `ltvConfig`，目前都是預設值，沒有殘留。改完後用目前的鏈上狀態各模擬一次（都不廣播）：對公開節點 38 筆、跳過減倉、結束時沒有部位；對本機 Anvil fork 41 筆、第三方減倉還 504.97 USD1。另外，示範帳戶的 CREATE2 地址跟這個腳本檔案的編譯結果綁在一起，檔案改過之後下次演練會建一個新的示範帳戶（2026-11-25 對新那套演練時建的就是 `0xd641…3Fb1`），舊的 `0x65c3…C37c` 沒有部位、留在鏈上不用處理。
 
 要注意的兩件事：
 - 演練腳本所有步驟在同一個模擬時間點跑，vault 還沒生息，份額取整會讓 vault 比負債少 1 個最小單位。腳本先給帳戶 1 個借款幣當 `maxCashIn`。後端剛開倉就馬上搬家或關閉也會遇到，同樣帶一點 `maxCashIn` 即可；隔幾個區塊之後 vault 的利息就蓋過去了。
@@ -495,13 +541,13 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 
 第三輪結論：沒有 Critical／High／Medium；2 個 Low、6 個 Info。沒有任何路徑讓 session key 把抵押品或借款資金送出帳戶／策略盒。審查員另外確認了測試網 chain 97 上 8 個 v2 合約的 bytecode 與 `a6ae1fe` 的編譯結果逐 byte 相同。
 
-**這一節的修正（draft6）只在 repo 裡，還沒部署到任何鏈。** 測試網上跑的仍是 draft5 的程式；換上修正版要重新部署整套 v2 合約（registry 把 executor 的地址寫死，不能只換 executor 或 lens），要不要換、什麼時候換由使用者決定。
+**這一節的修正（draft6）2026-11-25 已部署到測試網 chain 97**（使用者同意後由總管廣播，結果在本節最後與 §12）。registry 把 executor 的地址寫死，不能只換 executor 或 lens，所以是重新部署整套 v2 合約，舊的 draft5 那套暫停新增風險。主網還沒部署。
 
 | 發現 | 處理 | 測試／位置 |
 | --- | --- | --- |
 | **L-1** `ForeignDebt` 在 Venus→Venus 搬家時被繞過（R2 引入的退步）：`executeMigrate` 先 `recordSwap` 把新路線放進帳戶清單，才呼叫 `beforeOpen`，而新條件是「欠這個幣、清單裡卻沒有這個幣的 Venus 部位」，此時一定找得到自己剛放進去的那條。帳戶有外來的 Venus USDT 負債時，先開同抵押品的 USDC 路線（只放抵押）再搬到 USDT 路線就過了，之後 v2 把那筆外來負債當成自己的。資金不會離開帳戶、預算仍把那筆負債算進去，所以是 Low | **已修**（只動 executor，registry 沒動）：`beforeOpen` 移到 `recordSwap` 前面，仍在 `recordReduce` 後面（舊本金已沖銷，上限與 `maxDebt` 的算法不變）。`beforeOpen` 是唯讀的，兩者之間只有 `ForeignDebt` 這一條讀帳戶清單，其他檢查結果不變。自己的負債不會被誤擋：新借款幣在 Venus 有自己的負債時，清單裡一定已經有這個幣的部位（R2 的記帳規則），不需要靠這次搬家放進去的那條 | `RoutingReview.t.sol`（第三輪那一段）：`test_L1_foreignDebt_venusToVenusMigrate_isRefused`、`test_L1_foreignDebt_migrateWithOldAndNewDebt_isRefused`（審查員的兩個 PoC，修正前兩個都不會 revert）、`test_L1_ownDebtInTheNewToken_venusToVenusMigrate_passes`（別條路線有本金、目標路線自己有本金、只剩利息零頭三種）、`testFuzz_L1_venusList_ownDebtIsNeverForeign`（隨機 40 步的開倉／還款／Venus→Venus 搬家／時間／第三方代還／reconcile：欠幣必有該幣部位、有本金或抵押必有部位、開倉與搬家都不會出現 `ForeignDebt`） |
 | **L-2** 主網 `verify()` 沒給 `ATP_EXECUTOR` 時，核心取自被驗證的 registry 自己，綁在假核心／假 `AtpRegistry` 上的整套 v2 驗得過（repo 的 fork 測試就是這樣通過的） | **已修**：`verify()` 用 `vm.envAddress("ATP_EXECUTOR")`（沒設就失敗），並要求它等於 `deployments/mainnet.json` 的 `contracts.AtpExecutor`、它的 `registry()` 等於 `contracts.AtpRegistry`、檔案的 `chainId` 等於目前的鏈；immutable 比對用的核心也改成這個值。`foundry.toml` 因此允許讀 `deployments/mainnet.json`。fork 測試改呼叫明確傳入替身核心的 `verifyWith(executor, core)` | `test/script/DeployBorrowRoutingMainnetChecks.t.sol`（CI 會跑：沒設 env、不是檔案裡的核心、registry 不符、鏈不符都失敗）；fork `test_script_verify_coreIsAnchoredToTheManifest_notToTheContractsUnderVerification` |
-| **I-1** `lens.routeDebt` 在該幣 Venus 本金為 0 時，每一條該幣的 Venus 路線都回整筆負債：後端加總會重複計算 | **已修（只改 lens）＋文件化**：本金為 0 時整筆只歸給帳戶第一個這個幣的 Venus 部位，其他路線與沒有部位的帳戶回 0；有本金時按比例的算法不變。連帶的行為：對 `routeDebt` 是 0 的路線送 `max` 不還任何錢（要清零頭就對有 `routeDebt` 的那條送 `max`，或傳明確金額），搬家離開這種路線時不會順便還掉零頭。後端的讀法寫在 §5 與介面 JSON（`venus.readingDebt`）：帳戶負債用 `tokenDebt`，不加總 `routeDebt`（測試網上的 draft5 lens 仍是舊行為） | `test_I1_routeDebt_interestWithoutPrincipal_belongsToOneRoute`、`test_I1_explicitAmount_repaysTheInterestThroughAnyRoute`、`test_I1_routeDebt_foreignDebtIsNoRoutes_andTheSplitByPrincipalIsUnchanged`；上面的 fuzz 每一步檢查兩條同幣路線的 `routeDebt` 加起來＝該幣負債（容許向上取整的 1 個最小單位）、不是部位的路線是 0 |
+| **I-1** `lens.routeDebt` 在該幣 Venus 本金為 0 時，每一條該幣的 Venus 路線都回整筆負債：後端加總會重複計算 | **已修（只改 lens）＋文件化**：本金為 0 時整筆只歸給帳戶第一個這個幣的 Venus 部位，其他路線與沒有部位的帳戶回 0；有本金時按比例的算法不變。連帶的行為：對 `routeDebt` 是 0 的路線送 `max` 不還任何錢（要清零頭就對有 `routeDebt` 的那條送 `max`，或傳明確金額），搬家離開這種路線時不會順便還掉零頭。後端的讀法寫在 §5 與介面 JSON（`venus.readingDebt`）：帳戶負債用 `tokenDebt`，不加總 `routeDebt`（測試網上已暫停的 draft5 那套 lens 仍是舊行為） | `test_I1_routeDebt_interestWithoutPrincipal_belongsToOneRoute`、`test_I1_explicitAmount_repaysTheInterestThroughAnyRoute`、`test_I1_routeDebt_foreignDebtIsNoRoutes_andTheSplitByPrincipalIsUnchanged`；上面的 fuzz 每一步檢查兩條同幣路線的 `routeDebt` 加起來＝該幣負債（容許向上取整的 1 個最小單位）、不是部位的路線是 0 |
 | **I-2** `AtpBorrowRegistryV2` 24,187 bytes，離 EIP-170 上限只剩 389 | **文件化，沒改程式**：這一輪的修正都不動 registry（大小不變）。之後 registry 要加任何邏輯，得先把東西搬到 lens 或 executor（lens 剩 2,424、executor 剩 6,170） | §2 的大小表 |
 | **I-3** 主網 `verify()` 的「名單以外沒有別的」只涵蓋路線與 vault；多加的借款幣、激勵代幣、資產分級、`venusMarket` 對應、`venusBlocksPerYear` 查不出來（「沒有路線但有分級＋vToken 對應」的資產會替 Venus 帳戶多算預算） | **主網前待辦**（這次不改程式） | 下面的清單 |
 | **I-4** 演練腳本在共用測試網上調緊正式路線的線，兩筆交易之間其他帳戶可能被減倉 | **已修**：減倉那三步只在本機 Anvil fork 上跑，公開鏈自動跳過（§12） | `script/testnet/RoutingDemoTestnet.s.sol` |
@@ -516,7 +562,23 @@ forge script script/testnet/DeployBorrowRoutingTestnet.s.sol:DeployBorrowRouting
 4. 修正後的 L-1 再給審查員看一次（審查員的要求）。
 5. 審查員另外列的：兩組主網 fork 測試用釘區塊的 archive RPC 跑完整一次（CI 不跑 fork 測試）；session key 的 CallPolicy／paymaster 規則與簽名 policy 的整合測試；owner 換 Safe／timelock、`rateReporter` 用獨立金鑰。
 
-### 測試網換上修正版：腳本與 fork 演練（已備好，**還沒廣播**，等使用者同意）
+### 測試網換上修正版：腳本、fork 演練與廣播結果（2026-11-25 已廣播）
+
+**廣播結果（2026-11-25 10:19–10:23 台北時間，chain 97，區塊 144707011–144707575，程式碼 commit `465a6e5`）：** 135 筆（DEPLOYER 8 筆 19,905,085 gas、OWNER 127 筆 21,656,140 gas）、0 筆失敗、合計 41,561,225 gas、0.006234 tBNB，跟下面的 fork 演練逐項相同；得到的地址就是下表的「新地址」。最後一筆把舊 registry 暫停（`0x1c12d1d80b727130079d45ec11f15cf74340fdc666f3aa9cb2c266ce52c16aa7`，區塊 144707575）。廣播前照下面寫的先從 DEPLOYER 轉 0.01 tBNB 給 OWNER（`0x28999c745a756d09d350c3ebec64bba7fabf72220af2afb23f4c3e866620c8bf`，區塊 144700045）。部署後的唯讀檢查與對新那套的演練在 §12。主要交易：
+
+| 步驟 | 交易 |
+| --- | --- |
+| 建 `RoutingV2Deployer` | `0x3ddc4893f116157ff6620fa9b955a014b7221b34dd038237fcc8c318898bdc21` |
+| `deployRegistry` | `0x50696faedee83c1f61e786ea09944eb779dbde1b7997b95dcc63b66b524ca75e` |
+| `deployLens` | `0x3acb449ae6598f202314019c305f081c09e7b8bab079897711abb3369777229d` |
+| 建 `AtpBorrowExecutorV2Extension` | `0x4c468669c7cecc9d5ad1353a0e9213d79c93d0b3575026550dee51ae9380cb28` |
+| `deployExecutor` | `0xa8e6ab6054c9af5ab5d7362f55e033f1dc363956cac80588a44fcde9b08e16e8` |
+| 建 adapter：ERC4626／Venus／Aave | `0xc40b377d305967cb43e2557b1ace5019aff94181816f5e21c584c08835d513d1`／`0xb929a7d64cd1726fbd587d09cf195b7146c8eb5c0fced854ba274ab41976cca6`／`0xec77e59abdabe967cb89376daa5be5e384e2e62d0d001d5e17a0ceff53d30058` |
+| 第一次 `reportRates` | `0xce7e8aec4ed4416a9ea589384a88f3871df6d205860fb7ea74dfb301e3ed8ba4` |
+| `rateReporter` 交給 OPERATOR | `0xddb11c6131acdd827a751f254c32957da3c03f1bbb49e7732840b83a5277ec2a` |
+| 舊 registry `setPaused(true)` | `0x1c12d1d80b727130079d45ec11f15cf74340fdc666f3aa9cb2c266ce52c16aa7` |
+
+以下是廣播前寫的腳本說明與 fork 演練，保留原樣（裡面的「目前」「現在」指廣播前）。
 
 `DeployBorrowRoutingTestnet` 的部署器 CREATE2 label 從 `routing.deployer` 改成 `routing.deployer.2`（常數 `DEPLOYER_LABEL`）。同一支腳本、同一個指令（§12）再跑一次就會部署出新的一套 v2，並在最後把舊那套的 registry 暫停（`setPaused(true)`：舊 executor 不能再開倉、搬家、換 vault，還款／取回抵押／減倉／放回／激勵照常；環境變數 `ROUTING_PAUSE_PREVIOUS=false` 可以不暫停）。模擬代幣、vToken、Lista 市場、earn vault、Aave 池的 CREATE2 地址不變，腳本看到已經有程式碼就跳過，不會重建也不會再灌流動性。
 
@@ -534,7 +596,7 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 演練得到的新地址（由部署者、label 與編譯結果決定；`src/` 沒有再改動、用同一個指令（含 `--libraries`）廣播時就是這一組，兩次演練相同）：
 
-| 合約 | 新地址 | 現在（draft5） |
+| 合約 | 新地址（2026-11-25 廣播後就是這一組） | 上一套（draft5，已暫停） |
 | --- | --- | --- |
 | `AtpBorrowExecutorV2`（session key 的 target） | `0xeddd943d855a5F5A2880BBFD411449A65182600F` | `0x494C…6bB5` |
 | `AtpBorrowExecutorV2Extension` | `0x2A385aBc1358c92f43C1480ff499f8Ff6415025e` | `0x7bC1…2bF8` |
@@ -550,7 +612,7 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 ## 17. 借款幣補差額與換回現金：`AtpBorrowCashSwapper`（外掛合約）
 
-狀態：程式、測試、部署腳本都在 repo，**還沒部署到任何鏈**。v2 的 executor、extension、registry、lens 一行都沒改，也不知道這個合約存在；它是旁邊多出來的一個小合約（`src/atp/borrow/v2/AtpBorrowCashSwapper.sol`，303 行，7.7 KB），綁定一個 v2 executor，executor 重新部署時它也要跟著重新部署（一筆交易）。介面：`IAtpBorrowCashSwapper.sol`，ABI 在介面 JSON 的 `abi.AtpBorrowCashSwapper`，後端用法在 `cashSwapper`。第四輪審查（§18）後改過上限與預設值，這一節寫的是改過之後的行為。
+狀態：**2026-11-25 已部署到測試網 chain 97**（`0x99811a1115B36F8310deaDAda818cAE685360798`，綁 executor `0xeddd…600F`；紀錄在這一節的「部署」與 §12），主網還沒部署。v2 的 executor、extension、registry、lens 一行都沒改，也不知道這個合約存在；它是旁邊多出來的一個小合約（`src/atp/borrow/v2/AtpBorrowCashSwapper.sol`，303 行，7.7 KB），綁定一個 v2 executor，executor 重新部署時它也要跟著重新部署（一筆交易）。介面：`IAtpBorrowCashSwapper.sol`，ABI 在介面 JSON 的 `abi.AtpBorrowCashSwapper`，後端用法在 `cashSwapper`。第四輪審查（§18）後改過上限與預設值，這一節寫的是改過之後的行為。
 
 ### 補的是什麼缺口
 
@@ -693,9 +755,20 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 2. `--sig "printConfig(address)" <swapper>`：印出 owner（Safe）要送的 3 筆 `setPool`（先把 v2 registry 的借款幣設好，否則這一步會停下）。
 3. **先把 §13 `verify` 驗過的 v2 executor 寫進 `deployments/mainnet.json` 的 `borrowV2.executor`**（v2 上主網後才會有這一欄），再跑 `ATP_SAFE=<safe> forge script … --sig "verify(address)" <swapper>`：鏈上程式碼跟本 repo 的編譯結果逐 byte 相同（6 個 immutable 的值都必須是預期的）、綁的是 **manifest 記的那個 executor**（第四輪 L-A：不再從環境變數拿；manifest 沒有這一欄就直接失敗並說明）、核心 registry 是 `deployments/mainnet.json` 記的那個、三個池子與 factory 查到的一致、兩個上限是預設值（0.25%、1%）、Safe 是 owner 且沒有待接手的移轉。查不出「名單以外還設了別的池子」（mapping 不能列舉），要掃 `PoolSet` 事件。
 
-**測試網（`script/testnet/DeployBorrowCashSwapperTestnet.s.sol`，還沒廣播，等使用者同意）：** v2 地址從 `deployments/testnet-97.json` 的 `borrowV2.executor` 讀（`ROUTING_EXECUTOR` 可以覆寫，給「manifest 還沒更新」的演練用），三個借款幣從 `borrowV2.loanTokens` 讀，再逐一跟鏈上核對。做的事：部署 swapper（CREATE2）→ 在測試網的 PancakeSwap V3 建 USDT/USDC、USDT/USD1、USDT/U 三個 0.01% 池（1:1）→ 各放 100 萬＋100 萬的流動性（±0.2% 區間）→ `setPool` 三次。可重複執行，第二次 0 筆。
+**測試網（`script/testnet/DeployBorrowCashSwapperTestnet.s.sol`，2026-11-25 已廣播，結果在這一段後面）：** v2 地址從 `deployments/testnet-97.json` 的 `borrowV2.executor` 讀（`ROUTING_EXECUTOR` 可以覆寫，給「manifest 還沒更新」的演練用），三個借款幣從 `borrowV2.loanTokens` 讀，再逐一跟鏈上核對。做的事：部署 swapper（CREATE2）→ 在測試網的 PancakeSwap V3 建 USDT/USDC、USDT/USD1、USDT/U 三個 0.01% 池（1:1）→ 各放 100 萬＋100 萬的流動性（±0.2% 區間）→ `setPool` 三次。可重複執行，第二次 0 筆。
 
-**本機 Anvil fork 演練（2026-11-25，第四輪修正後重跑；chain 97 公開節點，fork 區塊 144666529；帳戶用 impersonate，沒有金鑰；gas price 0.15 gwei）。** 先在 fork 上把 §16 那套還沒廣播的 v2 重新部署跑完：135 筆、41,561,225 gas、0.006234 tBNB，跟 §16 記的逐項相同，得到的地址也相同（executor `0xeddd943d855a5F5A2880BBFD411449A65182600F`、registry `0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D`、lens `0x4fC68ead312aCfFCBF20f77884804F484226a27A`、策略盒實作 `0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76`）：**第四輪的修正沒有改到 v2 四個合約與核心的 bytecode**（另外把 v2 的 9 個合約（executor、extension、registry、lens、策略盒、部署器、三個 adapter）與核心 4 個合約的 creation／runtime bytecode 跟 PR #72 那次的編譯結果（`src/` 與 main 相同）逐一比對，全部相同，只有 swapper 不同）。再用 `ROUTING_EXECUTOR=0xeddd943d855a5F5A2880BBFD411449A65182600F` 跑這支腳本：
+**廣播結果（2026-11-25 10:57–10:58 台北時間，chain 97，區塊 144712138–144712214，程式碼 commit `df96fcc`）：** 19 筆（DEPLOYER 10 筆 18,088,615 gas、OWNER 9 筆 468,911 gas）、0 筆失敗、合計 18,557,526 gas、0.002784 tBNB，跟下面的 fork 演練逐項相同。沒有帶 `ROUTING_EXECUTOR`，executor 是從 manifest 讀的（PR #74 已先把 `borrowV2.executor` 改成新地址）。swapper 與三個池的地址就是下面那張表。部署後唯讀檢查（§12）：runtime bytecode 跟 repo 的編譯結果逐 byte 相同、綁的是新的 executor／registry／lens、三個池是 factory 的 0.01% 池且有流動性、OWNER 結束時不是 USDT minter。主要交易：
+
+| 步驟 | 交易 |
+| --- | --- |
+| 建 `AtpBorrowCashSwapper`（CREATE2） | `0xc7d3630d8027a233b92cc0b31ae4abca3072ffe2db7c9b91f42aeb56becfe41c` |
+| 建池 USDT/USDC | `0x7daba386b316c3873635dfc0757ca58519df341eff8c8c708d893506957ef76f` |
+| 建池 USDT/USD1 | `0x37b0be8f026a1ec131458edbc7a840587a82c7493f909430a01de35a2575d159` |
+| 建池 USDT/U | `0xfcfb7ab33117847277d6d370240919dda2058dd75fea15b72cbee68f2b7f2460` |
+| 加流動性 USDC／USD1／U | `0xbbbbbcc08874dfd305a3c143248ca8862bc96f592849fec9b03c5e0f5a367da8`／`0x5b01dfe8bfea71da183fd9245837ab3856b1975737d4d7c7d8caec7ce3efd278`／`0x4222660a526f94922c3be064dae47e20a42f9ffbdc26916ee0345ae7e7c479a0` |
+| `setPool` USDC／USD1／U | `0x2810ac726d55b2afd7b3c80d6a453fbfda923ed23c2b65fcd28fdb7af2d865b1`／`0x736124b068168c6771b456e7b04e7e2ac4ee0f9e80119304a4c0eaedb408f396`／`0x2bb55e5b0ff1b4edc8596b0281e29b38758d4d262c2ad66b2701543b23b03ad3` |
+
+**本機 Anvil fork 演練（廣播前寫的，保留原樣；2026-11-25，第四輪修正後重跑；chain 97 公開節點，fork 區塊 144666529；帳戶用 impersonate，沒有金鑰；gas price 0.15 gwei）。** 先在 fork 上把 §16 那套（當時還沒廣播的）v2 重新部署跑完：135 筆、41,561,225 gas、0.006234 tBNB，跟 §16 記的逐項相同，得到的地址也相同（executor `0xeddd943d855a5F5A2880BBFD411449A65182600F`、registry `0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D`、lens `0x4fC68ead312aCfFCBF20f77884804F484226a27A`、策略盒實作 `0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76`）：**第四輪的修正沒有改到 v2 四個合約與核心的 bytecode**（另外把 v2 的 9 個合約（executor、extension、registry、lens、策略盒、部署器、三個 adapter）與核心 4 個合約的 creation／runtime bytecode 跟 PR #72 那次的編譯結果（`src/` 與 main 相同）逐一比對，全部相同，只有 swapper 不同）。再用 `ROUTING_EXECUTOR=0xeddd943d855a5F5A2880BBFD411449A65182600F` 跑這支腳本：
 
 | 誰送 | 交易 | gas | 花費 |
 | --- | --- | --- | --- |
@@ -706,7 +779,7 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 餘額：DEPLOYER 現在 0.4333 tBNB（v2 重新部署後 0.4203，這支跑完 0.4176），夠；OWNER 這支只花 0.00007（v2 重新部署那邊已經要先補 0.01；跑完剩 0.01064）。`--gas-estimate-multiplier 200` 下送出前要付得起最大一筆的 2 倍（約 0.00144 tBNB），由 DEPLOYER 付。
 
-預期地址（swapper 的地址由 CREATE2 label、編譯結果與它綁的 executor 決定；用下面同一個指令、`src/` 沒再改動時就是這個。**第四輪修正改了程式，所以跟 PR #72 記的 `0x5Cf4…26F7` 不一樣了。** 池子的地址由 factory、兩個代幣與費率決定，沒變）：
+地址（廣播後跟演練預期的完全相同。swapper 的地址由 CREATE2 label、編譯結果與它綁的 executor 決定；用下面同一個指令、`src/` 沒再改動時就是這個。**第四輪修正改了程式，所以跟 PR #72 記的 `0x5Cf4…26F7` 不一樣了。** 池子的地址由 factory、兩個代幣與費率決定，沒變）：
 
 | 合約 | 地址 |
 | --- | --- |
@@ -717,7 +790,7 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 演練後在 fork 上實際呼叫了一次：`maxPegBps`＝25、`bufferBps`＝100、`TOP_UP_WINDOW`＝86400、`executor`＝`0xeddd…600F`；一個測試帳戶經這個合約把 10,000 的 USDC、USD1、U 各賣回 USDT，都拿到 9,998.90（−1.10 bps：0.01% 手續費加一點點價格衝擊），16.4–18.1 萬 gas；沒有策略盒的帳戶 `topUp` 得到 `NoBox`。OWNER 結束時不是 USDT minter；3 張 LP NFT 在 DEPLOYER。不會動到的東西：核心、v1、v2 的任何合約與設定都沒有被這支腳本呼叫（19 筆的對象只有 CREATE2 工廠、PancakeSwap 的 position manager、四個模擬代幣與新的 swapper）。演練用的 Anvil（自己的埠）已關掉。
 
-**要先做的事與順序：** 這支腳本要在 v2 重新部署廣播完、`deployments/testnet-97.json` 的 `borrowV2.executor` 改成新地址**之後**跑（不帶 `ROUTING_EXECUTOR`，讓它讀 manifest）。在那之前跑會綁到舊的 draft5 executor（`0x494C…6bB5`），之後還得再部署一次。
+**要先做的事與順序：** 這支腳本要在 v2 重新部署廣播完、`deployments/testnet-97.json` 的 `borrowV2.executor` 改成新地址**之後**跑（不帶 `ROUTING_EXECUTOR`，讓它讀 manifest）。在那之前跑會綁到舊的 draft5 executor（`0x494C…6bB5`），之後還得再部署一次。2026-11-25 就是照這個順序做的。
 
 ```bash
 YV=$(jq -r .contracts.yieldView deployments/testnet-97.json)
@@ -727,7 +800,7 @@ forge script script/testnet/DeployBorrowCashSwapperTestnet.s.sol:DeployBorrowCas
   --sender 0x55662B4183fcA1230694D5D57F56E4F2E0e3008a   # 金鑰經 TESTNET_DEPLOYER_KEY／TESTNET_OWNER_KEY
 ```
 
-廣播後要把腳本印出的 `MANIFEST cashSwapper…` 幾行寫進 `deployments/testnet-97.json`（這個 PR 沒有動 manifest）。
+廣播後腳本印出的 `MANIFEST cashSwapper…` 幾行已經寫進 `deployments/testnet-97.json` 的 `borrowV2.cashSwapper`。
 
 ### 測試
 
@@ -762,7 +835,7 @@ forge script script/testnet/DeployBorrowCashSwapperTestnet.s.sol:DeployBorrowCas
 
 ## 18. 第四輪審查（2026-11-25，main `465a6e5`）的發現與處理
 
-第四輪結論：沒有 Critical／High，沒有任何路徑讓錢離開「帳戶＋它的策略盒」到第三方；3 個 Medium、1 個 Low、8 個 Info，都在外掛的 `AtpBorrowCashSwapper`（PR #72，還沒部署到任何鏈）與它的部署腳本。第三輪 L-1 的修正（PR #70）審查員確認正確。**這一節的修正只動 `AtpBorrowCashSwapper`、它的介面、主網部署腳本與測試；v2 四個合約與核心一個 byte 都沒改**（§17「部署」的演練裡實際核對過 v2 重新部署的地址不變）。
+第四輪結論：沒有 Critical／High，沒有任何路徑讓錢離開「帳戶＋它的策略盒」到第三方；3 個 Medium、1 個 Low、8 個 Info，都在外掛的 `AtpBorrowCashSwapper`（PR #72；審查當時還沒部署到任何鏈，修正後的版本 2026-11-25 已部署到測試網，§17）與它的部署腳本。第三輪 L-1 的修正（PR #70）審查員確認正確。**這一節的修正只動 `AtpBorrowCashSwapper`、它的介面、主網部署腳本與測試；v2 四個合約與核心一個 byte 都沒改**（§17「部署」的演練裡實際核對過 v2 重新部署的地址不變）。
 
 審查員的 PoC（`R4ForkPoC.t.sol`、`R4SwapperPoC.t.sol`）在修正前的 main 上重跑過，全部成立；修正後原樣跑會失敗，反過來寫的回歸測試在上面的「測試」。
 

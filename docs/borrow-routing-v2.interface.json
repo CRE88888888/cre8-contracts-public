@@ -8,11 +8,12 @@
     "v2.0-draft3 (user decision 2026-11-24): default borrow-market utilization cap raised from 8500 to 9500 bps (AtpBorrowRegistryV2.MAX_BORROW_UTILIZATION_BPS; new routes get Route.maxUtilizationBps = 9500). No ABI change.",
     "v2.0-draft4 (independent review fixes, 2026-11-24): (1) NEW executor.executeRescue(account, vaultId, deadline) + event Rescued: with no debt in the vault's token, the box's receipts go to the account as they are; owner only, must NOT be in a session key's allowed selectors. (2) NEW lens.idleOf(account, token): loan token sitting directly in the strategy box; add it to vault holdings for the net value; repayments use it first, releases pay it out. (3) executeDeleverage: the health line is the only trigger (vault utilization > 95% no longer lets a stranger act; VaultStatus.shouldExit is informational, the backend exits with executeReduce / executeSwitchVault); when the box holds less than the amount due it repays what it holds but always leaves at least 1.01 x the venue's minimum loan. (4) executeSwitchVault now requires the destination to pass the deposit gates (utilization <= 90% where readable, enrollment not paused). (5) routeLines moved from the registry to the lens; registry error ForeignDebt added (an account with Venus debt this registry did not open cannot open a Venus route); executor views extension() and boxImplementation() added. (6) collateral-out check tightened: within budget, OR (budget before != 0 AND debt/budget not higher AND health factor not lower than before). (7) repay-only paths and debt-free collateral withdrawals read no oracle. (8) StrategyBox ERC-1271: only isValidSignature(bytes32,bytes) with the EIP-191 hash (verified on mainnet: the only form Lista uses). (9) the executor's code is split into the executor and AtpBorrowExecutorV2Extension (delegatecall): address, ABI and session-key target are unchanged. (10) at most one call into a Lista vault per action; ERC4626 vaults need >= 1,000 tokens of assets to be listed.",
     "v2.0-draft5 (re-review fixes, 2026-11-24; additive ABI only, every draft4 call is unchanged): (1) NEW lens.minDebt(routeId) = minLoan x 1.01 (0 on Venus): the smallest debt a partial repayment may leave. A Lista position whose debt is at or below it can only be repaid in full, so a third-party executeDeleverage (box money only) repays nothing of it when the box holds less than the debt: the backend must top it up (executeReduce with maxCashIn) or close it. (2) NEW read-only executor.venusComptroller() / moolah() and lens.venusComptroller() / moolah() (post-deploy verification). (3) an asset whose tier was removed (Tier.NONE, budget 0) can be wound down in steps: collateral may leave whenever the health factor does not drop (draft4 required full repayment first). (4) ForeignDebt now means: the account owes the loan token on Venus and holds no v2 Venus position in that token (interest left after the principal was repaid no longer trips it; such a position stays in accountRoutes until the token's debt is zero). (5) executeRescue: the contract cannot tell the owner from a session key (it checks msg.sender == account only); keeping it owner-only is a backend / paymaster rule.",
-    "v2.0-draft6 (third review fixes, 2026-11-25; NO ABI change, two behaviours change; NOT deployed yet: chain 97 still runs the draft5 code): (1) a Venus -> Venus executeMigrate is now refused with ForeignDebt like any open (in draft5 that path always passed the check: the new route was put into the account's list before the check looked at the list). The account's own debt is unaffected. (2) lens.routeDebt with no principal left in the loan token on Venus (interest that outlived it): the whole debt is attributed to ONE route, the account's first Venus position in that token in accountRoutes; every other route of the token reads 0, and so does every route when the account holds no v2 Venus position in the token (foreign debt). draft5 returned the whole debt for every Venus route of the token. executeReduce(repayAmount = MAX) repays routeDebt, so on a route that reads 0 it repays nothing. For the account's debt in a token use lens.tokenDebt(account, token), never a sum of routeDebt (correct on draft5 and draft6). (3) mainnet verify() requires ATP_EXECUTOR and holds it against deployments/mainnet.json.",
-    "cash-swapper add-on (2026-11-25; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; NOT deployed on any chain): NEW separate contract AtpBorrowCashSwapper, bound to one routing executor. topUp(token, amountOut, maxUsdtIn, deadline): the calling account's USDT -> the loan token it owes, delivered into its own strategy box, capped at what the box is short of the debt (+ buffer). cashOut(token, amountIn, minUsdtOut, deadline): the calling account's loan token -> USDT, to the account itself. shortfall(account, token) (eth_call) -> (gap, cap). Fixed peg bound instead of an oracle. See `cashSwapper` and docs §17.",
-    "cash-swapper fourth-review fixes (2026-11-25, docs §18; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; still NOT deployed on any chain; the swapper's ABI and behaviour CHANGED): (1) the top-up cap reads no vault: per call amountOut <= (tokenDebt - idle in the box) * (1 + bufferBps); a vault that cannot be read, is read with too little gas, or reads full but cannot pay no longer changes it. (2) NEW 24-hour window per (account, token): purchases <= the highest debt a topUp of the window saw * (1 + bufferBps), error WindowExceeded(bought, cap); NEW getters TOP_UP_WINDOW, topUpWindowOf(account, token), topUpCap(account, token). (3) topUp no longer accepts type(uint256).max (AboveShortfall): the backend passes min(gap * (1 + bufferBps), cap). (4) shortfall: gap is unchanged in meaning but the call now reverts when a vault cannot be read; cap is the enforced limit (no vault read, window included). (5) maxPegBps default 50 -> 25. (6) NoShortfall(debt, idle): the second field is the idle loan token only; ToppedUp's last field is tokenDebt - idle. (7) amounts >= 2^255 revert (SafeCast); loan tokens need 6-18 decimals. (8) mainnet verify() reads the routing executor from deployments/mainnet.json only."
+    "v2.0-draft6 (third review fixes, 2026-11-25; NO ABI change, two behaviours change; deployed on chain 97 on 2026-11-25, see `deployments`; the draft5 set it replaced is paused for new risk): (1) a Venus -> Venus executeMigrate is now refused with ForeignDebt like any open (in draft5 that path always passed the check: the new route was put into the account's list before the check looked at the list). The account's own debt is unaffected. (2) lens.routeDebt with no principal left in the loan token on Venus (interest that outlived it): the whole debt is attributed to ONE route, the account's first Venus position in that token in accountRoutes; every other route of the token reads 0, and so does every route when the account holds no v2 Venus position in the token (foreign debt). draft5 returned the whole debt for every Venus route of the token. executeReduce(repayAmount = MAX) repays routeDebt, so on a route that reads 0 it repays nothing. For the account's debt in a token use lens.tokenDebt(account, token), never a sum of routeDebt (correct on draft5 and draft6). (3) mainnet verify() requires ATP_EXECUTOR and holds it against deployments/mainnet.json.",
+    "cash-swapper add-on (2026-11-25; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; deployed on chain 97 on 2026-11-25 in its fourth-review form, see `cashSwapper.testnet97`; not on chain 56): NEW separate contract AtpBorrowCashSwapper, bound to one routing executor. topUp(token, amountOut, maxUsdtIn, deadline): the calling account's USDT -> the loan token it owes, delivered into its own strategy box, capped at what the box is short of the debt (+ buffer). cashOut(token, amountIn, minUsdtOut, deadline): the calling account's loan token -> USDT, to the account itself. shortfall(account, token) (eth_call) -> (gap, cap). Fixed peg bound instead of an oracle. See `cashSwapper` and docs §17.",
+    "cash-swapper fourth-review fixes (2026-11-25, docs §18; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; this is the form deployed on chain 97 on 2026-11-25; not on chain 56; the swapper's ABI and behaviour CHANGED): (1) the top-up cap reads no vault: per call amountOut <= (tokenDebt - idle in the box) * (1 + bufferBps); a vault that cannot be read, is read with too little gas, or reads full but cannot pay no longer changes it. (2) NEW 24-hour window per (account, token): purchases <= the highest debt a topUp of the window saw * (1 + bufferBps), error WindowExceeded(bought, cap); NEW getters TOP_UP_WINDOW, topUpWindowOf(account, token), topUpCap(account, token). (3) topUp no longer accepts type(uint256).max (AboveShortfall): the backend passes min(gap * (1 + bufferBps), cap). (4) shortfall: gap is unchanged in meaning but the call now reverts when a vault cannot be read; cap is the enforced limit (no vault read, window included). (5) maxPegBps default 50 -> 25. (6) NoShortfall(debt, idle): the second field is the idle loan token only; ToppedUp's last field is tokenDebt - idle. (7) amounts >= 2^255 revert (SafeCast); loan tokens need 6-18 decimals. (8) mainnet verify() reads the routing executor from deployments/mainnet.json only.",
+    "chain 97 deployments recorded (2026-11-25; no ABI or behaviour change, interfaceVersion stays v2.0-draft6): the draft6 set replaced the draft5 set (new executor / extension / registry / lens / box implementation / adapter addresses; the 66 routeIds, 10 vaultIds, loan tokens, vTokens, earn vaults and Aave pools are unchanged; every account's boxOf changes; the old registry is paused for new risk), AtpBorrowCashSwapper is deployed and bound to the new executor, and the demo was run against the new set. Addresses: `deployments` here and deployments/testnet-97.json -> borrowV2. Backend note added in `migration.gas`: do not send executeOpen with the bare gas estimate, leave headroom."
   ],
-  "status": "deployed on BSC testnet (chain 97) on 2026-11-25 with the draft5 code (commit 1888572), see `deployments`; the draft6 fixes are in the repository only (a redeploy of the whole v2 set is needed: the registry pins its executor); not deployed on chain 56",
+  "status": "deployed on BSC testnet (chain 97): the draft6 code (commit 465a6e5) since 2026-11-25, blocks 144707011-144707575, see `deployments`; the draft5 set deployed before it (commit 1888572) is paused for new risk and listed under deployments.97.previous; the cash-swapper add-on is deployed on chain 97 as well (`cashSwapper.testnet97`); nothing is deployed on chain 56",
   "humanDoc": "docs/borrow-routing-v2.zh-TW.md",
   "source": "src/atp/borrow/v2/ (IAtpBorrowExecutorV2.sol, IAtpBorrowRegistryV2.sol, IAtpBorrowLensV2.sol, IStrategyVaultAdapter.sol, RoutingTypes.sol)",
   "contracts": {
@@ -205,7 +206,7 @@
   ],
   "sessionKeyErc1271": "Measured on a live testnet portfolio account (test/atp/fork/SessionKey1271Fork97.t.sol): the session permission installed today (ECDSA signer + CallPolicy v0.0.4 + GasPolicy + TimestampPolicy, all flags 0) does NOT restrict ERC-1271; a session key can make the account's isValidSignature return valid for any hash. The strategy box is unaffected (it confirms the Lista login text only). Fix belongs to the backend: add a signature policy or flag the permission as not-for-signatures.",
   "netValue": "collateral value + sum(vaultStatus.assets over accountVaults) + sum(lens.idleOf(account, token) over loan tokens) - debt",
-  "v1v2": "One portfolio account uses either v1 or v2. Close v1 completely (debt 0, collateral withdrawn, v1 vault shares redeemed) before opening v2 on the same account. On Venus the contract refuses (ForeignDebt) when the account owes that loan token and holds no v2 Venus position in it, on executeOpen and (draft6) on executeMigrate; the draft5 code on chain 97 can be bypassed with a Venus -> Venus migrate, so until it is redeployed this is a backend rule only. Debt taken through v1 after a v2 position exists is not detected, a v2 executeReduce can return Venus collateral v1 posted to the account itself down to v2's target line, and on Lista nothing is detected: the backend must enforce the rule.",
+  "v1v2": "One portfolio account uses either v1 or v2. Close v1 completely (debt 0, collateral withdrawn, v1 vault shares redeemed) before opening v2 on the same account. On Venus the contract refuses (ForeignDebt) when the account owes that loan token and holds no v2 Venus position in it, on executeOpen and (draft6, the set on chain 97 since 2026-11-25) on executeMigrate; the draft5 set could be bypassed with a Venus -> Venus migrate, and it is paused now (no open, migrate or vault switch on the old executor). Debt taken through v1 after a v2 position exists is not detected, a v2 executeReduce can return Venus collateral v1 posted to the account itself down to v2's target line, and on Lista nothing is detected: the backend must enforce the rule.",
   "roles": {
     "owner": "AtpRegistry.owner(): allowlists, caps, pause, tiers, adapters (set once), rate reporter, reward tokens",
     "rateReporter": "reportRates(routes, vaults): incentive APRs and vault rates that are not on chain; expires after 48h; capped at 50% each"
@@ -222,13 +223,13 @@
       "old vault cannot pay out now, old venue paused, new venue lacks liquidity, new route fails an open gate: whole call reverts",
       "partial migration is not supported: executeReduce first, then migrate the rest"
     ],
-    "gas": "Lista vaults walk their whole withdraw queue on every deposit/withdraw (USD1 vault ~6-7M gas each way, USDC vault ~2.4M); BSC per-transaction cap is 16,777,216. Each action calls a given Lista vault at most once; the heaviest measured action is a migrate between two Lista vaults (8.9M). Always eth_estimateGas before sending, split into executeReduce + executeOpen above ~12M, and monitor each Lista vault's withdrawQueueLength."
+    "gas": "Lista vaults walk their whole withdraw queue on every deposit/withdraw (USD1 vault ~6-7M gas each way, USDC vault ~2.4M); BSC per-transaction cap is 16,777,216. Each action calls a given Lista vault at most once; the heaviest measured action is a migrate between two Lista vaults (8.9M). Always eth_estimateGas before sending, split into executeReduce + executeOpen above ~12M, and monitor each Lista vault's withdrawQueueLength. Leave headroom on executeOpen: on a chain 97 fork an executeOpen sent with the bare default gas estimate ran out of gas (cause not investigated). The deployment and demo scripts send with twice the estimate (--gas-estimate-multiplier 200) and all 38 demo transactions of 2026-11-25 passed that way; do the same for the gas limit / callGasLimit the backend sets itself. Used on chain 97 (simulated venues): executeOpen collateral only 0.32-0.42M, executeOpen borrow into a vault 0.79-0.88M, executeMigrate 1.11-1.24M."
   },
   "venus": {
     "healthIsAccountWide": true,
     "rule": "after any risk-increasing action: debtValue <= budgetValue = sum(collateralValue_i * targetLtv_i) over the account's Venus collaterals with a tier",
-    "debt": "debt(routeId, account) = the account's whole debt in that loan token; routeDebt = share by tracked principal. With no principal left in the token (interest only): draft6 = the whole debt on the account's first Venus position of that token in accountRoutes and 0 on the others; draft5 (on chain 97 today) = the whole debt on every Venus route of the token",
-    "readingDebt": "account debt in a token = lens.tokenDebt(account, token) (Venus + the listed Lista positions); the Venus part alone = lens.debt(anyVenusRouteOfThatToken, account). Do NOT sum routeDebt over routes: shares round up (up to n-1 raw units over for n routes) and the draft5 lens double counts when the token's principal is zero. routeDebt tells what executeReduce(MAX) repays on that route and how the debt is split for display; to clear leftover interest send MAX on the route whose routeDebt is not 0, or an explicit repayAmount (capped at debt()) on any route of the token",
+    "debt": "debt(routeId, account) = the account's whole debt in that loan token; routeDebt = share by tracked principal. With no principal left in the token (interest only): draft6 = the whole debt on the account's first Venus position of that token in accountRoutes and 0 on the others; draft5 (the paused previous set on chain 97) = the whole debt on every Venus route of the token",
+    "readingDebt": "account debt in a token = lens.tokenDebt(account, token) (Venus + the listed Lista positions); the Venus part alone = lens.debt(anyVenusRouteOfThatToken, account). Do NOT sum routeDebt over routes: shares round up (up to n-1 raw units over for n routes) and the draft5 lens (the paused previous set on chain 97) double counts when the token's principal is zero. routeDebt tells what executeReduce(MAX) repays on that route and how the debt is split for display; to clear leftover interest send MAX on the route whose routeDebt is not 0, or an explicit repayAmount (capped at debt()) on any route of the token",
     "closeTwoOrMore": "send executeReduce(account, route_i, vaultId, MAX, MAX, maxCashIn, deadline) per route; pooled vault holdings make the old 'largest vault closes last' ordering unnecessary. Works in any order when each route was borrowed to its own target. When routes are unevenly borrowed, closing the lightly borrowed one first with MAX leaves the rest worse than before and reverts LtvTooHigh: pass an explicit larger repayAmount (up to lens.debt()) or close the heavier route first."
   },
   "lista": {
@@ -237,7 +238,7 @@
     "smallPositions": "if routeDebt <= minDebt(routeId) and vaultStatus(vaultId).assets + idleOf(account, token) < routeDebt, nobody but the account can repay it (executeDeleverage reverts VaultShortfall): the backend sends executeReduce(account, routeId, vaultId, MAX, withdrawAmount, maxCashIn, deadline) with the account's own loan token for the gap, or closes the position"
   },
   "cashSwapper": {
-    "status": "in the repository only; not deployed on chain 97 or 56. One swapper per routing executor (a redeployed executor needs a new swapper). Changed after the fourth review (2026-11-25, docs §18): top-up cap without vault reads, a 24-hour top-up window, no MAX for topUp, default maxPegBps 25.",
+    "status": "deployed on chain 97 on 2026-11-25 at 0x99811a1115B36F8310deaDAda818cAE685360798 (bound to executor 0xeddd943d855a5F5A2880BBFD411449A65182600F), see `testnet97`; not deployed on chain 56. One swapper per routing executor (a redeployed executor needs a new swapper). Changed after the fourth review (2026-11-25, docs §18): top-up cap without vault reads, a 24-hour top-up window, no MAX for topUp, default maxPegBps 25.",
     "humanDoc": "docs/borrow-routing-v2.zh-TW.md §17",
     "source": "src/atp/borrow/v2/AtpBorrowCashSwapper.sol, IAtpBorrowCashSwapper.sol",
     "why": "executeReduce / executeMigrate / executeDeleverage repay from the strategy box (idle loan token, then the vault) and from the account's own loan token (maxCashIn). For USDC / USD1 / U nothing else turns the account's USDT into the token it owes, so a position whose vault grew slower than its debt cannot be closed (VaultShortfall). The mirror case: loan token left in the account after a close cannot become USDT.",
@@ -295,7 +296,7 @@
       "costVsParityBps": "topUp pays / cashOut returns, fee included, USDT about 0.10% below the three tokens at that block: 1,000: USDC +11.51/+9.50, USD1 +10.70/+8.56, U +11.76/+9.75; 10,000: USDC +11.52/+9.48, USD1 +11.38/+7.92, U +11.79/+9.71; 50,000: USDC +11.60/+9.41, USD1 +14.93/+4.89, U +11.95/+9.55",
       "remeasuredAtBlock135531000": "after the fourth-review fixes: topUp pays, fee included, 1,000 / 10,000 / 50,000: USDC +13.77 / +13.78 / +13.86 bps, USD1 +11.85 / +12.56 / +16.32 bps, U +11.77 / +11.80 / +11.96 bps (all inside the 25 bps bound)"
     },
-    "testnet97": "not deployed. script/testnet/DeployBorrowCashSwapperTestnet.s.sol reads borrowV2.executor and borrowV2.loanTokens from deployments/testnet-97.json, creates PancakeSwap V3 0.01% pools USDT/USDC, USDT/USD1, USDT/U at 1:1 with 1,000,000 a side and allowlists them; rehearsed on a local fork (19 transactions, 18,557,526 gas, 0.002784 tBNB at 0.15 gwei, docs §17). The expected swapper address changed with the fourth-review fixes: 0x99811a1115B36F8310deaDAda818cAE685360798 (bound to the pending executor 0xeddd943d855a5F5A2880BBFD411449A65182600F)",
+    "testnet97": "deployed on 2026-11-25 (blocks 144712138-144712214, 19 transactions, 0 failed, 18,557,526 gas, 0.002784 tBNB at 0.15 gwei; code commit df96fcc; the same counts, gas and addresses as the fork rehearsal in docs §17): swapper 0x99811a1115B36F8310deaDAda818cAE685360798, bound to executor 0xeddd943d855a5F5A2880BBFD411449A65182600F; PancakeSwap V3 0.01% pools at 1:1 with 1,000,000 a side: USDT/USDC 0xB880D719455D11627A37cAc49493bFb54C884A01, USDT/USD1 0x85945fAE445F06C129D61CF962849534c8332586, USDT/U 0x8A84c8EBe1c97Ab212600714DdCb53760F25Ba32; maxPegBps 25, bufferBps 100, TOP_UP_WINDOW 86400. Also in deployments.97.cashSwapper and deployments/testnet-97.json -> borrowV2.cashSwapper. Script: script/testnet/DeployBorrowCashSwapperTestnet.s.sol (reads borrowV2.executor and borrowV2.loanTokens from the manifest). A redeployed executor needs a new swapper.",
     "mainnetVerify": "script/DeployBorrowCashSwapperMainnet.s.sol verify(swapper) takes the routing executor from deployments/mainnet.json (borrowV2.executor, written after routing v2 is on mainnet and verified) and from nowhere else; it fails with a message while that field is missing. ROUTING_EXECUTOR is only read by run() (the deployment)."
   },
   "liveVenueNotes2026_11_24": [
@@ -339,17 +340,17 @@
   },
   "deployments": {
     "97": {
-      "manifest": "deployments/testnet-97.json -> borrowV2 (66 routes, 10 vaults with ids and parameters, demo transactions)",
-      "gitCommit": "1888572dc89cf7720bce50a9b96f6e28086474a8",
-      "executor": "0x494C106498e8221D3f72474f36995C191ACf6bB5",
-      "extension": "0x7bC1E80Cd0a684D56333775423a95efF13602bf8",
-      "registry": "0x7eae73a76Ff2359fE1aB059A77Dd36840A32559E",
-      "lens": "0x18A55C04aE72A00ED7790577FbdA9159DAc94000",
-      "boxImplementation": "0xa448e0108f31Ab1d084FfdDcD4827D9CB5D4E191",
+      "manifest": "deployments/testnet-97.json -> borrowV2 (66 routes, 10 vaults with ids and parameters, cashSwapper, demo transactions; the draft5 set this one replaced is under borrowV2.previous)",
+      "gitCommit": "465a6e5236f13be995f815e44a7c6fb5b3837888",
+      "executor": "0xeddd943d855a5F5A2880BBFD411449A65182600F",
+      "extension": "0x2A385aBc1358c92f43C1480ff499f8Ff6415025e",
+      "registry": "0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D",
+      "lens": "0x4fC68ead312aCfFCBF20f77884804F484226a27A",
+      "boxImplementation": "0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76",
       "adapters": {
-        "erc4626": "0x3548A7641bae787A48E263f8aF053899e46fF02d",
-        "venus": "0x861e91a0a3d46c391587323B3FE32A43E53CFe91",
-        "aave": "0x432f96D0790f3bc3ceBed379Fd476F367CE63BAa"
+        "erc4626": "0x6242869aDEe4ad6Df35505d0Cabb76249FD49D58",
+        "venus": "0x769567B0e45F04Cd962c11CdC95018870Fa1AF66",
+        "aave": "0x06DD79a73A9351B3580ae0769F35209910BDEe7c"
       },
       "venusComptroller": "0x93AB77260c8C62b26698bBB0ee8da3E175b9ad8D",
       "listaMoolah": "0x993237aC050512f3749bfEE2dE759b6B86Aea653",
@@ -362,11 +363,71 @@
       "rewardToken": "0xFfE08AC6f45A4aE5Ae2a692f0965EA46CE7d822c",
       "rateReporter": "0xd8CE3295e05cA138e0d0d7214C4FD630c43F9d7F (OPERATOR)",
       "deployedAtBlocks": [
-        144626656,
-        144628034
+        144707011,
+        144707575
       ],
-      "notes": "simulated venues and rates; v1 (deployments/testnet-97.json -> borrow) is untouched and one account uses v1 or v2, never both; Venus supply vaults quote ~0% until someone borrows, so opening straight into them is gated by negative carry",
-      "interfaceVersion": "v2.0-draft5 (draft6 not deployed)"
+      "deployedAt": "2026-11-25T02:19Z..02:23Z",
+      "deployTxCount": 135,
+      "deployGasUsed": 41561225,
+      "notes": "simulated venues and rates; v1 (deployments/testnet-97.json -> borrow) is untouched and one account uses v1 or v2, never both; Venus supply vaults quote ~0% until someone borrows, so opening straight into them is gated by negative carry; routeIds, vaultIds, tokens and markets are the same as in the previous set, every account's boxOf is new",
+      "interfaceVersion": "v2.0-draft6",
+      "cashSwapper": {
+        "address": "0x99811a1115B36F8310deaDAda818cAE685360798",
+        "routingExecutor": "0xeddd943d855a5F5A2880BBFD411449A65182600F",
+        "gitCommit": "df96fcc222d53e6540d9566d72c9a754908beaac",
+        "usdt": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
+        "poolFee": 100,
+        "pools": {
+          "USDC": "0xB880D719455D11627A37cAc49493bFb54C884A01",
+          "USD1": "0x85945fAE445F06C129D61CF962849534c8332586",
+          "U": "0x8A84c8EBe1c97Ab212600714DdCb53760F25Ba32"
+        },
+        "maxPegBps": 25,
+        "bufferBps": 100,
+        "topUpWindowSeconds": 86400,
+        "deployedAtBlocks": [
+          144712138,
+          144712214
+        ],
+        "deployedAt": "2026-11-25T02:57Z..02:58Z",
+        "deployTxCount": 19,
+        "deployGasUsed": 18557526
+      },
+      "demo": {
+        "account": "0xd641D5aa6c479288e9c02F4862303c1070ed3Fb1",
+        "box": "0x67d92dEfbA5dA3a7a02ed23CeFbC76562D2A13cB",
+        "blocks": [
+          144712473,
+          144712629
+        ],
+        "ranAt": "2026-11-25T03:00Z..03:01Z",
+        "txCount": 38,
+        "failed": 0,
+        "gasUsed": 8990558,
+        "note": "RoutingDemoTestnet against this set; every position closed again, the deleverage drill is skipped on the public chain. Transaction hashes: manifest borrowV2.demo.txs and docs §12"
+      },
+      "previous": {
+        "note": "the draft5 set, paused for new risk since block 144707575: no open, migrate or vault switch on its executor; repayments, collateral withdrawals, deleverage, releases and rewards stay open",
+        "interfaceVersion": "v2.0-draft5",
+        "gitCommit": "1888572dc89cf7720bce50a9b96f6e28086474a8",
+        "executor": "0x494C106498e8221D3f72474f36995C191ACf6bB5",
+        "extension": "0x7bC1E80Cd0a684D56333775423a95efF13602bf8",
+        "registry": "0x7eae73a76Ff2359fE1aB059A77Dd36840A32559E",
+        "lens": "0x18A55C04aE72A00ED7790577FbdA9159DAc94000",
+        "boxImplementation": "0xa448e0108f31Ab1d084FfdDcD4827D9CB5D4E191",
+        "adapters": {
+          "erc4626": "0x3548A7641bae787A48E263f8aF053899e46fF02d",
+          "venus": "0x861e91a0a3d46c391587323B3FE32A43E53CFe91",
+          "aave": "0x432f96D0790f3bc3ceBed379Fd476F367CE63BAa"
+        },
+        "deployedAtBlocks": [
+          144626656,
+          144628034
+        ],
+        "paused": true,
+        "pausedAtBlock": 144707575,
+        "pausedTx": "0x1c12d1d80b727130079d45ec11f15cf74340fdc666f3aa9cb2c266ce52c16aa7"
+      }
     }
   },
   "abi": {
