@@ -2,7 +2,7 @@
 
 > 介面版本：**v2.0-draft6（2026-11-25）**。改介面時在這裡往下加一行。
 >
-> **外掛合約 `AtpBorrowCashSwapper`（2026-11-25，§17；還沒部署到任何鏈）：** 補上「借 USDC／USD1／U 的部位，還款差額沒有幣可補」的缺口，並把關閉後留在帳戶的借款幣換回 USDT。v2 四個合約的程式與 ABI 完全沒變。後端要加的：session key 多一個 target、帳戶多兩種 approve、關閉前讀 `shortfall`（都在 §17）。
+> **外掛合約 `AtpBorrowCashSwapper`（2026-11-25，§17；還沒部署到任何鏈）：** 補上「借 USDC／USD1／U 的部位，還款差額沒有幣可補」的缺口，並把關閉後留在帳戶的借款幣換回 USDT。v2 四個合約的程式與 ABI 完全沒變。後端要加的：session key 多一個 target、帳戶多兩種 approve、關閉前讀 `shortfall`（都在 §17）。**第四輪審查後改過（§18）：** 補差額的上限不再讀 vault（＝負債 − 盒內閒置，加緩衝）、多了每帳戶每幣的 24 小時累計上限（`WindowExceeded`）、`topUp` 不再接受 `MAX`（後端自己給數量）、錨定上限預設從 0.5% 降到 0.25%。
 >
 > **draft6（第三輪審查的修正，對照表在 §16；ABI 完全沒變，變的是下面兩個行為。這一版還沒部署：測試網 chain 97 上跑的仍是 draft5 的程式）：**
 > 1. Venus→Venus 的 `executeMigrate` 現在也會被 `ForeignDebt` 擋下（draft5 的檢查在這條路徑上永遠通過）。帳戶自己的負債不受影響。
@@ -550,7 +550,7 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 ## 17. 借款幣補差額與換回現金：`AtpBorrowCashSwapper`（外掛合約）
 
-狀態：程式、測試、部署腳本都在 repo，**還沒部署到任何鏈**。v2 的 executor、extension、registry、lens 一行都沒改，也不知道這個合約存在；它是旁邊多出來的一個小合約（`src/atp/borrow/v2/AtpBorrowCashSwapper.sol`，245 行，6.9 KB），綁定一個 v2 executor，executor 重新部署時它也要跟著重新部署（一筆交易）。介面：`IAtpBorrowCashSwapper.sol`，ABI 在介面 JSON 的 `abi.AtpBorrowCashSwapper`，後端用法在 `cashSwapper`。
+狀態：程式、測試、部署腳本都在 repo，**還沒部署到任何鏈**。v2 的 executor、extension、registry、lens 一行都沒改，也不知道這個合約存在；它是旁邊多出來的一個小合約（`src/atp/borrow/v2/AtpBorrowCashSwapper.sol`，303 行，7.7 KB），綁定一個 v2 executor，executor 重新部署時它也要跟著重新部署（一筆交易）。介面：`IAtpBorrowCashSwapper.sol`，ABI 在介面 JSON 的 `abi.AtpBorrowCashSwapper`，後端用法在 `cashSwapper`。第四輪審查（§18）後改過上限與預設值，這一節寫的是改過之後的行為。
 
 ### 補的是什麼缺口
 
@@ -560,13 +560,15 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 ### 兩個動作
 
-呼叫者就是帳戶本身（`msg.sender`；session key 經帳戶自己的 `execute()` 進來）。**沒有 `account` 參數、沒有收款人參數**，所以不可能替別的帳戶操作。金額是代幣最小單位，`type(uint256).max` 表示全部。
+呼叫者就是帳戶本身（`msg.sender`；session key 經帳戶自己的 `execute()` 進來）。**沒有 `account` 參數、沒有收款人參數**，所以不可能替別的帳戶操作。金額是代幣最小單位；`type(uint256).max` 表示全部，**只有 `cashOut` 接受**（`topUp` 一定要給明確數量：`MAX` 會是「整筆負債」，那是後端平常不該買的量，所以拿掉了）。
 
 | 動作 | 呼叫 | 錢怎麼走 |
 | --- | --- | --- |
-| 補差額 | `topUp(token, amountOut, maxUsdtIn, deadline)` → `(usdtIn, tokenOut)` | 帳戶的 USDT → 池子；池子的 `token` → **這個帳戶的策略盒**（`executor.boxOf(msg.sender)`）。買到的數量剛好是 `amountOut`（`MAX`＝上限那麼多）。之後照常 `executeReduce`：合約本來就先用盒裡閒置的借款幣；第三方的 `executeDeleverage` 也用得到 |
+| 補差額 | `topUp(token, amountOut, maxUsdtIn, deadline)` → `(usdtIn, tokenOut)` | 帳戶的 USDT → 池子；池子的 `token` → **這個帳戶的策略盒**（`executor.boxOf(msg.sender)`）。買到的數量剛好是 `amountOut`。之後照常 `executeReduce`：合約本來就先用盒裡閒置的借款幣；第三方的 `executeDeleverage` 也用得到 |
 | 換回現金 | `cashOut(token, amountIn, minUsdtOut, deadline)` → `(tokenIn, usdtOut)` | 帳戶的 `token` → 池子；池子的 USDT → **帳戶本身**。`MAX`＝帳戶裡全部的 `token` |
-| 讀差額 | `shortfall(account, token)` → `(gap, cap)`（用 eth_call，會先 accrue） | `gap`＝負債 −（盒內閒置＋各 vault 該幣存款），沒有差額是 0；`cap`＝現在最多可以補多少 |
+| 讀差額與額度 | `shortfall(account, token)` → `(gap, cap)`（用 eth_call，會先 accrue） | `gap`＝**後端平常該補的量**：負債 −（盒內閒置＋各 vault 該幣存款），沒有差額是 0。只是給後端看的數字，鏈上不用它：讀得到但領不出來的 vault 仍然算進去（這時實際要補的比 `gap` 多，最多到 `cap`）；有 vault 讀不到時**整個呼叫 revert**（不會悄悄當成 0：少給 gas 的讀取不能把整筆負債報成差額），這時改讀 `topUpCap`。`cap` 同下一列。`gap > cap` 表示視窗額度用完了 |
+| 讀額度 | `topUpCap(account, token)` → `cap`（用 eth_call，會先 accrue） | **現在最多可以補多少**（鏈上強制的那個數）：`（負債 − 盒內閒置）×（1＋緩衝）` 與「這個視窗還剩的額度」取小的；不用補或視窗用完是 0。完全不讀 vault，所以 vault 是什麼狀態都答得出來，不到 30 萬 gas |
+| 讀視窗 | `topUpWindowOf(account, token)` → `(start, bought, peakDebt)`、常數 `TOP_UP_WINDOW`（86,400 秒） | 這個帳戶這個幣的視窗：什麼時候開的（0＝沒開過；`start + TOP_UP_WINDOW` 之後就是過期的，下一次補差額重新開）、視窗內已買進多少、視窗內補差額時看過的最高負債 |
 
 這個合約**從頭到尾不持有任何代幣**：池子直接付給目的地，swap callback 把要付的幣從帳戶直接轉給池子（所以帳戶要先 approve 這個合約）。也不留任何 allowance。
 
@@ -574,15 +576,17 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 | 限制 | 內容 |
 | --- | --- |
-| 補差額的上限 | `amountOut ≤ gap ×（1 + bufferBps）`。`gap` 用 lens 讀：`tokenDebt(account, token)`（先 `syncToken`）減 `idleOf(account, token)` 減該帳戶每個該幣 vault 的 `vaultStatus(...).assets`。`gap ≤ 0` 就 `NoShortfall`；帳戶還沒有策略盒就 `NoBox`。緩衝預設 1%（給接下來幾個區塊的利息與取整），owner 可調，硬上限 5% |
-| 價格 | 不用 oracle，用固定錨定上限：**付出 ≤ 換得 ×（1 + maxPegBps）**，兩邊都當 1 美元、依各自 decimals 換成 18 位再比，用帳戶與目的地的**實際餘額變化**算，不信池子回報的數字。預設 0.5%，owner 可調（含調緊到 0），硬上限 1%。超過就整筆 revert（`PegExceeded`）。另外容許 3 個最小單位的取整（池子對 1 個最小單位的買單會收 2），不然零頭補不了 |
+| 補差額的單筆上限 | `amountOut ≤（負債 − 盒內閒置）×（1 + bufferBps）`，超過是 `AboveShortfall(amount, cap)`。負債是 `lens.tokenDebt(account, token)`（先 `syncToken`），閒置是 `lens.idleOf(account, token)`。**不讀任何 vault**（第四輪 M-1、M-3）：vault 讀不到、被少給 gas 讀到一半、讀得到卻領不出來，都不會改變這個上限，也不會擋住還款真正需要的那一筆。盒內閒置已經蓋過負債就是 `NoShortfall(debt, idle)`；帳戶還沒有策略盒是 `NoBox`。緩衝預設 1%（給接下來幾個區塊的利息與取整），owner 可調，硬上限 5% |
+| 補差額的 24 小時累計上限 | 每個帳戶、每個借款幣各一個**固定視窗**，語意跟核心 `AtpExecutor` 的買入上限（`BUY_WINDOW`）一樣：第一次補差額時開始，`start + 24 小時` 之後的第一次補差額重新開一個。視窗內累計買進量（含這一筆）`≤ 視窗內補差額時看過的最高負債 ×（1 + bufferBps）`，超過是 `WindowExceeded(bought, cap)`。用「視窗內最高負債」而不是「當下負債」的原因：補了一部分、還掉之後負債變小，剩下的還是要補得了（vault 領不出來時分批減倉就是這樣）；對想來回磨損的人兩種算法的上限一樣，都是「視窗內最高負債 ×（1＋緩衝）」。視窗內再借更多只會多出新借的那一段；負債自己長出來的利息也會讓額度多那一點點 |
+| 價格 | 不用 oracle，用固定錨定上限：**付出 ≤ 換得 ×（1 + maxPegBps）**，兩邊都當 1 美元、依各自 decimals 換成 18 位再比，用帳戶與目的地的**實際餘額變化**算，不信池子回報的數字。**預設 0.25%**（第四輪 M-2：主網實測只要 0.11–0.16%，多出來的每 1 bp 都是被夾的空間），owner 可調（含調緊到 0），硬上限 1%。超過就整筆 revert（`PegExceeded`）。另外容許 3 個最小單位的取整（池子對 1 個最小單位的買單會收 2），不然零頭補不了 |
 | 呼叫者自己的滑價 | `maxUsdtIn`／`minUsdtOut`，由後端給（比合約的錨定上限緊） |
-| 成交量 | 補差額必須**剛好**買到 `amountOut`（少了、多了都 `InexactOutput`，所以進策略盒的量不可能超過上限）；換回現金賣掉的不得超過 `amountIn`（`Overcharged`） |
+| 成交量 | 補差額必須**剛好**買到 `amountOut`（少了、多了都 `InexactOutput`，所以進策略盒的量不可能超過上限）；換回現金賣掉的不得超過 `amountIn`（`Overcharged`）。`amountIn ≥ 2^255` 直接拒絕（第四輪 I-1：以前會被當成負數，變成「指定換出量」的單） |
 | 池子白名單 | 每個借款幣一個池子，存在這個合約自己（`poolOf(token)`）。owner＝`AtpRegistry.owner()`（跟 v2 registry 同一個，沒有另立 owner，核心換 owner 它就跟著換）。`setPool` 只收「token0／token1 剛好是 USDT 與這個幣」的合約，而且這個幣必須是 v2 registry 的借款幣、不能是 USDT。`setPool(token, 0)` 關掉這個幣 |
 | callback | `pancakeV3SwapCallback` 只替「正在進行的那一筆 swap」付款：池子、付款人、付款幣三者的雜湊在進入時記下、結束時清掉，callback 帶來的資料對不上就 `BadCallback`。平常誰呼叫都沒用；swap 進行中別的合約呼叫也沒用；池子想換付款人或換幣也沒用 |
 | 重入 | 兩個動作都是 `nonReentrant` |
+| 換回現金不限量 | `cashOut` 沒有視窗上限，也不算進補差額的視窗（跟核心「賣出不限、不計」同一個原則：退出永遠走得完）。借款幣只會從帳戶自己的策略盒回到帳戶，而盒裡的借款幣只有三個來源：借來的（還在的時候抵著負債）、vault 賺的、`topUp` 買的。所以要「換回 → 再換進去」繞一圈，一定要經過 `topUp`，被它的視窗管住 |
 | 換回現金不碰持股 | `token` 如果是這個帳戶的策略交易過的資產（`AtpRegistry.wasAssetAllowed`，例如策略本身持有 USDC）就拒絕（`StrategyAsset`）：那是持股，由核心處理 |
-| decimals | USDT、USDC、USD1、U 在 BSC 主網都是 18 位（2026-11-25 逐一實讀，U 也是 18）；合約不假設，登記池子時讀 `decimals()` 換算。6 位小數的借款幣有測試 |
+| decimals | USDT、USDC、USD1、U 在 BSC 主網都是 18 位（2026-11-25 逐一實讀，U 也是 18）；合約不假設，登記池子時讀 `decimals()` 換算。6 位小數的借款幣有測試。**只收 6–18 位**（第四輪 I-2）：取整容許是「較粗那個幣的 3 個最小單位」，低於 6 位時那是真的錢，所以 `setPool` 拒絕這種幣，USDT 低於 6 位也建不起這個合約 |
 
 ### 暫停
 
@@ -602,24 +606,49 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 ### 後端怎麼用
 
-1. **關閉／還款／搬離一條非 USDT 路線之前**：`eth_call swapper.shortfall(account, token)`。`gap == 0` 照舊。`gap > 0`：帳戶要有 `cap ×（1 + 預估溢價）` 的 USDT（不夠就先照 USDT 路線的做法賣資產），然後 `topUp(token, MAX, maxUsdtIn, deadline)`，接著原本要送的 `executeReduce`／`executeMigrate`（`maxCashIn` 可以是 0）。`maxUsdtIn` 建議 `cap × 1.003`（主網目前要付約 0.11–0.15%，見下表）。
-2. **Lista 小額部位**（§5：`routeDebt ≤ minDebt` 而且盒裡的錢不夠）：同上，補完再 `executeReduce(MAX, …)` 一次還清。
-3. **健康度接近減倉線而且 `gap > 0` 的部位**：先 `topUp`，第三方的 `executeDeleverage` 才有足夠的錢可還。
-4. **關閉之後**帳戶裡有 USDC／USD1／U（vault 多賺的利息、補差額時多買的緩衝）：`cashOut(token, MAX, minUsdtOut, deadline)`，`minUsdtOut` 建議 `餘額 × 0.997`。在換回之前，淨值把帳戶裡的這些幣當 1 美元算。
-5. **同一個 UserOp 還是分兩筆**：Venus／Aave 的 vault 可以同一個 UserOp（`topUp` 約 40 萬 gas）。**策略盒有 Lista vault 存款時，`topUp` 要讀 vault 的即時總額，Lista USD1 vault 一次約 590 萬 gas**，加上 `executeReduce` 自己的 600 萬會超過 §7 的 1,200 萬建議線：分兩個 UserOp 送（先 `topUp`，下一筆 `executeReduce`），1% 緩衝就是留給中間這幾個區塊的利息。送出前一樣 `eth_estimateGas`。
-6. 事件：`ToppedUp(account, token, usdtIn, tokenOut, shortfall)`、`CashedOut(account, token, tokenIn, usdtOut)`。
+1. **關閉／還款／搬離一條非 USDT 路線之前**：`eth_call swapper.shortfall(account, token)` 得到 `(gap, cap)`。`gap == 0` 照舊。`gap > 0`：要買的量 `amountOut = min(gap ×（1 + bufferBps ÷ 10000）, cap)`（緩衝是給送出到上鏈之間長出來的利息；**合約不再有「`MAX`＝上限」，數量由後端給**），帳戶要有 `amountOut ×（1 + 預估溢價）` 的 USDT（不夠就先照 USDT 路線的做法賣資產），然後 `topUp(token, amountOut, maxUsdtIn, deadline)`，接著原本要送的 `executeReduce`／`executeMigrate`（`maxCashIn` 可以是 0）。`maxUsdtIn` 建議 `amountOut × 1.003`（主網目前要付約 0.12–0.16%，見下表；合約自己的上限是 0.25%）。
+2. **補了 `gap` 還是 `VaultShortfall`（vault 讀得到但領不出來），或 `shortfall` 本身 revert（有 vault 讀不到）**：改讀 `topUpCap(account, token)`，買「這次還款要的量 − 盒內閒置」，最多到 `cap`（整筆關閉就是買 `cap`）。補完再送同一筆 `executeReduce`：合約先用盒裡閒置的借款幣，vault 領不出來不會擋（關閉時 vault 的份額留在策略盒，等它能領了用 `executeRelease` 放回帳戶，再 `cashOut`）。
+3. **`gap > cap`，或 `topUp` 回 `WindowExceeded`**：這個幣 24 小時內的額度用完了（正常流程一天內不會把整筆負債補滿兩次）。等到 `topUpWindowOf(account, token).start + 86400` 再送；等不了的話，帳戶 owner 可以自己把借款幣轉進帳戶，用 `executeReduce` 的 `maxCashIn` 還。
+4. **Lista 小額部位**（§5：`routeDebt ≤ minDebt` 而且盒裡的錢不夠）：同第 1 點，補完再 `executeReduce(MAX, …)` 一次還清。
+5. **健康度接近減倉線而且盒裡的錢不夠還的部位**：先 `topUp`，第三方的 `executeDeleverage` 才有足夠的錢可還（vault 領不出來時也是這樣：買 `lens.deleverageAmount` 那麼多）。
+6. **關閉之後**帳戶裡有 USDC／USD1／U（vault 多賺的利息、補差額時多買的緩衝）：`cashOut(token, MAX, minUsdtOut, deadline)`，`minUsdtOut` 建議 `餘額 × 0.997`。在換回之前，淨值把帳戶裡的這些幣當 1 美元算。
+7. **gas 與 UserOp**：`topUp` 不讀 vault，策略盒裡是哪一種 vault 都一樣，主網 fork 實測 32–38 萬 gas（gas limit 給到 47.5 萬就跑得完；建議估 60 萬），**可以跟 `executeReduce` 放同一個 UserOp**（Lista vault 的關閉自己約 600 萬，合計仍在 §7 的 1,200 萬建議線內）。`shortfall` 是 eth_call：策略盒有 Lista vault 時讀一次約 560–590 萬 gas，**不要替這個 eth_call 設低於 1,000 萬的 gas 上限**（gas 不夠它會 revert，不會回錯的數字）；`topUpCap` 不到 30 萬。送出前一樣 `eth_estimateGas`。
+8. 事件：`ToppedUp(account, token, usdtIn, tokenOut, need)`（`need`＝補之前的「負債 − 盒內閒置」）、`CashedOut(account, token, tokenIn, usdtOut)`。
 
-錯誤：`NoBox`（帳戶沒開過 v2）、`NoShortfall(debt, held)`（不用補）、`AboveShortfall(amount, cap)`、`PegExceeded(paid18, received18)`（脫錨或單子太大）、`Slippage(amount, bound)`、`InexactOutput`／`Overcharged`（池子沒有照要的數量成交）、`PoolNotSet(token)`、`StrategyAsset(token)`、`DeadlineExpired`、`ZeroAmount`。
+錯誤：`NoBox`（帳戶沒開過 v2）、`NoShortfall(debt, idle)`（盒內閒置已經蓋過負債）、`AboveShortfall(amount, cap)`（單筆超過「負債 − 閒置」加緩衝；`topUp` 傳 `MAX` 也是這個）、`WindowExceeded(bought, cap)`（24 小時額度用完）、`PegExceeded(paid18, received18)`（脫錨或單子太大）、`Slippage(amount, bound)`、`InexactOutput`／`Overcharged`（池子沒有照要的數量成交）、`PoolNotSet(token)`、`StrategyAsset(token)`、`DeadlineExpired`、`ZeroAmount`、`SafeCastOverflowedUintToInt`（數量 ≥ 2^255）。
 
 ### 最壞情況
 
-**session key 外洩多了什麼：** 可以把帳戶的 USDT 換成它欠的借款幣放進**它自己的策略盒**，上限是那個幣的差額加緩衝；可以把帳戶裡的 USDC／USD1／U 換成 USDT 回到帳戶本身。每一筆的成交價都在錨定上限內（預設 0.5%），錢沒有離開帳戶／策略盒。
+**session key 外洩多了什麼：** 可以把帳戶的 USDT 換成它欠的借款幣放進**它自己的策略盒**，也可以把帳戶裡的 USDC／USD1／U 換成 USDT 回到帳戶本身。每一筆的成交價都在錨定上限內（預設 0.25%），錢沒有離開帳戶／策略盒。能做的壞事是**來回磨損**：補滿整筆負債 → `executeReduce` 還清（vault 的錢與多買的回帳戶）→ `cashOut` → `executeOpen` 再借，每一腿被自己夾到錨定上限邊緣。第四輪審查前這可以無限次重複；現在：
 
-**vault 存款讀數被操縱或讀不到：** 上限裡的「vault 存款」讀小了，上限就變大，但最大只到「這個幣的負債 − 盒內閒置」再加緩衝（讀不到的 vault 當作 0，是刻意的：vault 或 adapter 壞掉時正是要靠現金還款才能走 `executeRescue`）。也就是驗證過上一位 agent 的結論：**最多把「負債那麼多」的 USDT 換成借款幣放進盒裡，價值仍在帳戶**（測試 `test_cap_unreadableVaultCountsAsEmpty_worstCaseIsTheDebt`）。補一次之後盒裡的閒置已經超過負債，第二次就是 `NoShortfall`；要再來一次得先還款（負債等額減少）再重新借（要過 `executeOpen` 的同意、上限、利差、LTV）。盒裡的閒置幣只有兩個去處：還這個帳戶的負債，或該幣負債歸零後回帳戶本身。繞一圈換回 USDT 的損失是兩次池子手續費加價差：測試裡是金額的 0.02%；合約允許的最壞值是每次 `maxPegBps`。讀大了（真的有人捐錢進 vault）只會讓上限變小，而那時盒裡真的有那些錢。
+| | 帳戶損失 |
+| --- | --- |
+| 合約允許的上限（每個借款幣、每個 24 小時視窗一圈） | `2 × maxPegBps ×（1 + bufferBps）× 視窗內最高負債`：預設 **0.505%**；兩個硬上限都拉滿是 2.1% |
+| 主網 fork 實測，不操縱池子（USD1，負債 1,005） | 每圈 0.203 USDT＝負債的 **2.02 bps**（兩次 0.01% 手續費） |
+| 主網 fork 實測，兩腿都被夾到上限邊緣（USD1，負債 1,005） | 每圈 5.06 USDT＝負債的 **50.3 bps**；夾的人這一圈 −65.2 USDT（推池子的成本比賺到的多） |
+| 同上，負債 60,319 | 每圈 304.06 USDT＝負債的 **50.4 bps**；夾的人這一圈 +221.5 USDT |
 
-**池子白名單放錯（owner 的權限）：** 惡意池子拿不走任何 approve 過的錢：callback 只在帳戶自己發起的那筆 swap 期間有效，而那一筆結束時要通過「付出 ≤ 實際換得 ×（1 + 上限）」。它最多每筆吃掉錨定上限以內的價差（硬上限 1%）。測試用一個會少給、成交兩倍、重複收款、換付款人、換幣、重入、找第三者呼叫 callback 的池子逐一驗證；不變量測試裡有一個 approve 過這個合約的旁觀者，餘額從頭到尾不變。
+（修正前審查員量到的是每圈 88.8 bps、次數不限；負債 60,136 時夾的人每圈賺 412。現在推池子的固定成本約 70–83 USDT 一圈，負債約 1.5 萬以上夾的人才有賺頭，而且每個幣每天只有一圈。）
 
-**脫錨：** 分不出是哪一邊脫錨。借款幣變便宜（例如 USDC 0.97）：補差額照做（用較少的 USDT 還掉債），換回現金被擋。USDT 變便宜或借款幣變貴超過上限：補差額被擋，這時 USDC／USD1／U 的負債暫時補不了（owner 可以把上限調到 1%；再超過就要等或由 owner 處理）。
+要講清楚的邊界：
+- **固定視窗**（跟核心的買入上限同一種）：視窗從第一次補差額開始算 24 小時。如果帳戶當天稍早已經有一筆正常的小額補差額，持 key 的人可以在那個視窗結束前用掉剩下的額度、視窗一過馬上再一圈，也就是**一開始可以連兩圈，之後每 24 小時一圈**（N 天最多 N+1 圈）。
+- **每個借款幣各算各的**：USDC、USD1、U 各有自己的視窗。同一份借款額度輪流借成三種幣，一天最多三圈（每個幣一圈）。每換一種幣都要過 `executeOpen`／`executeMigrate` 的同意、上限、利差、LTV 檢查。
+- **負債**是 `tokenDebt`：Venus 上不是 v2 開的同幣負債也算在裡面（第四輪 I-7，既有行為），額度跟著變大。v2 自己開的負債不超過抵押品的 20–35%（§6）。
+- **暫停時**（`registry.setPaused`）`executeOpen` 被擋，借不回來，每個有負債的幣最多一圈就停。
+- USDT 不夠補時 session key 仍可用核心賣資產換 USDT（賣出不限量），但換進策略盒的量一樣被視窗管住。
+- Kernel 的 GasPolicy 與 paymaster 限頻是第二層，不是這個上限的前提。
+
+**補差額的上限不讀 vault（第四輪 M-1、M-3）：** 平常任何帳戶都能把「負債 − 盒內閒置」那麼多的 USDT 換成借款幣放進自己的盒裡（修正前只有 vault 讀不到時才這樣，而少給 gas 就能讓 Lista vault 讀不到）。換進去的幣只有兩個去處：還這個帳戶的負債，或該幣負債歸零後回帳戶本身。補一次之後盒裡的閒置已經超過負債，第二次是 `NoShortfall`；還掉再借回來想再補，是 `WindowExceeded`。
+
+**池子白名單放錯（owner 的權限）：** 惡意池子拿不走任何 approve 過的錢：callback 只在帳戶自己發起的那筆 swap 期間有效，而那一筆結束時要通過「付出 ≤ 實際換得 ×（1 + 上限）」。它最多每筆吃掉錨定上限以內的價差（硬上限 1%），而且補差額那一邊的量被視窗管住。測試用一個會少給、成交兩倍、重複收款、換付款人、換幣、重入、找第三者呼叫 callback 的池子逐一驗證；不變量測試裡有一個 approve 過這個合約的旁觀者，餘額從頭到尾不變。
+
+**脫錨：** 分不出是哪一邊脫錨。借款幣變便宜（例如 USDC 0.97）：補差額照做（用較少的 USDT 還掉債），換回現金被擋。USDT 變便宜或借款幣變貴超過上限：補差額被擋，這時 USDC／USD1／U 的負債補不了，**合約不會自己處理，要 owner（Safe）手動**：
+
+脫錨 runbook（owner 手動，先寫在這裡，正式版放進營運手冊）：
+1. 先確認是哪一邊、多少：三個池子的價格（`slot0`）跟外部報價對照。只偏 0.25–1%：`setLimits(maxPegBps, bufferBps)` 把錨定上限調高，最多 100（1%）；事後記得調回 25。調高期間被夾的空間跟著變大，但每個幣每天仍然只有一圈。
+2. 偏超過 1%（硬上限）：這個合約補不了。有減倉需要的帳戶由帳戶 owner 自己在別處取得借款幣、轉進帳戶，用 `executeReduce` 的 `maxCashIn` 還（不經過這個合約）；後端要能列出「非 USDT 負債、健康度接近減倉線、盒內的錢不夠」的帳戶並通知。第三方的 `executeDeleverage` 只用得到策略盒與 vault 的錢。
+3. 池子本身壞了（流動性被抽走、價格被推到區間外）：`setPool(token, 別的池子)` 換池，或 `setPool(token, 0)` 先關掉（補差額與換回現金會一起關）。
+4. 借款幣脫錨往下（換回現金被擋）：不急，幣留在帳戶裡，等回錨或由帳戶 owner 自己處理。
 
 ### 主網實測（fork 區塊 135520469，2026-11-25，公開節點）
 
@@ -641,38 +670,52 @@ OWNER 目前只有 0.00396 tBNB，設定就要 0.00325，而且每筆送出前�
 
 扣掉當下的價差與手續費，5 萬的價格衝擊：USDC 約 0.1 bps、U 約 0.2 bps、USD1 約 4 bps（USD1 池最淺）。全部離 0.5% 上限很遠。量的方式：swap 是真的，只有 5 萬那種規模的「負債讀數」是測試墊高的（Venus 的 TSLAB 供給上限開不出那麼大的部位）。
 
-用真的流程補完再關閉（每個幣一次，借 2,077、過 180 天）：`topUp` 39.3–42.5 萬 gas、`cashOut` 20.6–21.2 萬 gas；補完後 `executeReduce(MAX, MAX, 0)` 成功、抵押品全數回帳戶、帳戶最後只有 USDT，這個合約與 executor 餘額都是 0。賣出比池子大三倍的 USD1 會被 `PegExceeded` 整筆擋下。Lista QQQB/USD1（存款一半在 Venus vUSD1、一半在 Lista USD1 vault）一年後 vault 賺得比負債多（這個市場目前借款利率很低），沒有差額，`topUp` 回 `NoShortfall`；這一筆讀兩個 vault 花 589 萬 gas。
+用真的流程補完再關閉（每個幣一次，借 2,077、過 180 天）：補完後 `executeReduce(MAX, MAX, 0)` 成功、抵押品全數回帳戶、帳戶最後只有 USDT，這個合約與 executor 餘額都是 0。賣出比池子大三倍的 USD1 會被 `PegExceeded` 整筆擋下。
+
+**第四輪修正後重跑（fork 區塊 135531000，2026-11-25，公開節點；`BSC_FORK_BLOCK=135531000`）：**
+
+| 量什麼 | 結果 |
+| --- | --- |
+| `topUp`（Venus vault 的部位，USDC／USD1／U） | 33.5 萬／34.2 萬／32.2 萬 gas |
+| `topUp`（策略盒有 Lista USD1 vault；修正前要讀 vault，約 590 萬） | **37.5 萬 gas**；gas limit 從 10 萬到 900 萬每 12.5 萬試一次，47.5 萬起都跑得完，而且買到的量都一樣 |
+| `topUpCap`（eth_call，不讀 vault） | 15.1 萬 gas |
+| `shortfall`（eth_call；讀一個 Lista vault／一個 Lista 加一個 Venus vault） | 561.6 萬／591.5 萬 gas；gas 不夠時整個 revert，不回錯的數字 |
+| `cashOut` | 20.7–21.2 萬 gas |
+| `executeReduce` 關閉（Venus vault） | 121.7–126.3 萬 gas |
+| 當下成交相對 1:1（含手續費）：1,000／10,000／50,000 的補差額 | USDC +13.77／+13.78／+13.86 bps；USD1 +11.85／+12.56／+16.32 bps；U +11.77／+11.80／+11.96 bps（都在 0.25% 內） |
+| Lista USD1 vault 讀得到領不出來（把 vault 的 `redeem`／`withdraw` 弄成 revert），負債 1,005 | `gap`＝0、`cap`＝1,016.13；一次 `topUp(cap)` 後 `executeReduce(MAX, MAX, 0)` 關閉成功、抵押品回帳戶；vault 恢復後 `executeRelease` 把 vault 的錢放回帳戶，`cashOut` 換成 USDT |
+| 來回一圈（不操縱池子，USD1，負債 1,005） | 損失 0.2033 USDT（2.02 bps）；同一個視窗第二圈 `WindowExceeded`，滿 24 小時才又一圈 |
 
 ### 部署
 
 **主網（`script/DeployBorrowCashSwapperMainnet.s.sol`，沒有執行；主網 v2 也還沒部署）：** 跟 §13 同一個做法。
 1. `ROUTING_EXECUTOR=<v2 executor> forge script script/DeployBorrowCashSwapperMainnet.s.sol --rpc-url <RPC> --broadcast`：1 筆，任何有 BNB 的 key。部署前檢查三個池子就是 factory 的 0.01% 池、有流動性、代幣都是 18 位。
 2. `--sig "printConfig(address)" <swapper>`：印出 owner（Safe）要送的 3 筆 `setPool`（先把 v2 registry 的借款幣設好，否則這一步會停下）。
-3. `ROUTING_EXECUTOR=<v2 executor> ATP_SAFE=<safe> forge script … --sig "verify(address)" <swapper>`：鏈上程式碼跟本 repo 的編譯結果逐 byte 相同（6 個 immutable 的值都必須是預期的）、綁的是 `ROUTING_EXECUTOR`、核心 registry 是 `deployments/mainnet.json` 記的那個、三個池子與 factory 查到的一致、兩個上限是預設值、Safe 是 owner 且沒有待接手的移轉。`ROUTING_EXECUTOR` 本身先用 §13 的 `verify` 驗過。查不出「名單以外還設了別的池子」（mapping 不能列舉），要掃 `PoolSet` 事件。
+3. **先把 §13 `verify` 驗過的 v2 executor 寫進 `deployments/mainnet.json` 的 `borrowV2.executor`**（v2 上主網後才會有這一欄），再跑 `ATP_SAFE=<safe> forge script … --sig "verify(address)" <swapper>`：鏈上程式碼跟本 repo 的編譯結果逐 byte 相同（6 個 immutable 的值都必須是預期的）、綁的是 **manifest 記的那個 executor**（第四輪 L-A：不再從環境變數拿；manifest 沒有這一欄就直接失敗並說明）、核心 registry 是 `deployments/mainnet.json` 記的那個、三個池子與 factory 查到的一致、兩個上限是預設值（0.25%、1%）、Safe 是 owner 且沒有待接手的移轉。查不出「名單以外還設了別的池子」（mapping 不能列舉），要掃 `PoolSet` 事件。
 
 **測試網（`script/testnet/DeployBorrowCashSwapperTestnet.s.sol`，還沒廣播，等使用者同意）：** v2 地址從 `deployments/testnet-97.json` 的 `borrowV2.executor` 讀（`ROUTING_EXECUTOR` 可以覆寫，給「manifest 還沒更新」的演練用），三個借款幣從 `borrowV2.loanTokens` 讀，再逐一跟鏈上核對。做的事：部署 swapper（CREATE2）→ 在測試網的 PancakeSwap V3 建 USDT/USDC、USDT/USD1、USDT/U 三個 0.01% 池（1:1）→ 各放 100 萬＋100 萬的流動性（±0.2% 區間）→ `setPool` 三次。可重複執行，第二次 0 筆。
 
-**本機 Anvil fork 演練（2026-11-25，chain 97 公開節點，fork 區塊 144655796；帳戶用 impersonate，沒有金鑰；gas price 0.15 gwei）。** 先在 fork 上把 §16 那套還沒廣播的 v2 重新部署跑完（135 筆，得到的 executor 就是 `0xeddd…600F`，跟 §16 記的一樣），再用 `ROUTING_EXECUTOR=0xeddd943d855a5F5A2880BBFD411449A65182600F` 跑這支腳本：
+**本機 Anvil fork 演練（2026-11-25，第四輪修正後重跑；chain 97 公開節點，fork 區塊 144666529；帳戶用 impersonate，沒有金鑰；gas price 0.15 gwei）。** 先在 fork 上把 §16 那套還沒廣播的 v2 重新部署跑完：135 筆、41,561,225 gas、0.006234 tBNB，跟 §16 記的逐項相同，得到的地址也相同（executor `0xeddd943d855a5F5A2880BBFD411449A65182600F`、registry `0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D`、lens `0x4fC68ead312aCfFCBF20f77884804F484226a27A`、策略盒實作 `0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76`）：**第四輪的修正沒有改到 v2 四個合約與核心的 bytecode**（另外把 v2 的 9 個合約（executor、extension、registry、lens、策略盒、部署器、三個 adapter）與核心 4 個合約的 creation／runtime bytecode 跟 PR #72 那次的編譯結果（`src/` 與 main 相同）逐一比對，全部相同，只有 swapper 不同）。再用 `ROUTING_EXECUTOR=0xeddd943d855a5F5A2880BBFD411449A65182600F` 跑這支腳本：
 
 | 誰送 | 交易 | gas | 花費 |
 | --- | --- | --- | --- |
-| DEPLOYER | 10 筆：swapper（CREATE2，1,628,375）、建池 3 筆（各 4,808,286）、approve 3 筆、加流動性 3 筆（各約 57 萬） | 17,910,751（最大單筆 4,808,286） | 0.002687 tBNB |
-| OWNER | 9 筆：USDT `setMinter` 開、鑄 USDT 300 萬、鑄 USDC／USD1／U 各 100 萬（都鑄給 DEPLOYER）、USDT `setMinter` 關、`setPool` 3 筆 | 468,566 | 0.0000703 tBNB |
-| 合計 | 19 筆，0 筆失敗 | 18,379,317 | 0.002757 tBNB |
+| DEPLOYER | 10 筆：swapper（CREATE2，1,801,810）、建池 3 筆（各 4,808,286）、approve 3 筆、加流動性 3 筆（各約 57–59 萬） | 18,088,615（最大單筆 4,808,286） | 0.002713 tBNB |
+| OWNER | 9 筆：USDT `setMinter` 開、鑄 USDT 300 萬、鑄 USDC／USD1／U 各 100 萬（都鑄給 DEPLOYER）、USDT `setMinter` 關、`setPool` 3 筆 | 468,911 | 0.0000703 tBNB |
+| 合計 | 19 筆，0 筆失敗 | 18,557,526 | 0.002784 tBNB |
 | 再跑一次 | 0 筆（`No transactions to broadcast`），兩個帳戶餘額不變 | | |
 
-餘額：DEPLOYER 現在 0.4333 tBNB（v2 重新部署後約 0.4203），夠；OWNER 這支只花 0.00007（v2 重新部署那邊已經要先補 0.01）。`--gas-estimate-multiplier 200` 下送出前要付得起最大一筆的 2 倍（約 0.00144 tBNB），由 DEPLOYER 付。
+餘額：DEPLOYER 現在 0.4333 tBNB（v2 重新部署後 0.4203，這支跑完 0.4176），夠；OWNER 這支只花 0.00007（v2 重新部署那邊已經要先補 0.01；跑完剩 0.01064）。`--gas-estimate-multiplier 200` 下送出前要付得起最大一筆的 2 倍（約 0.00144 tBNB），由 DEPLOYER 付。
 
-預期地址（swapper 的地址由 CREATE2 label、編譯結果與它綁的 executor 決定；用下面同一個指令、`src/` 沒再改動時就是這個。池子的地址由 factory、兩個代幣與費率決定）：
+預期地址（swapper 的地址由 CREATE2 label、編譯結果與它綁的 executor 決定；用下面同一個指令、`src/` 沒再改動時就是這個。**第四輪修正改了程式，所以跟 PR #72 記的 `0x5Cf4…26F7` 不一樣了。** 池子的地址由 factory、兩個代幣與費率決定，沒變）：
 
 | 合約 | 地址 |
 | --- | --- |
-| `AtpBorrowCashSwapper`（session key 的新 target；綁 executor `0xeddd…600F`） | `0x5Cf4A0f1cb39490a0C631fC6D120F3D2225626F7` |
+| `AtpBorrowCashSwapper`（session key 的新 target；綁 executor `0xeddd…600F`；7,732 bytes） | `0x99811a1115B36F8310deaDAda818cAE685360798` |
 | 池 USDT/USDC 0.01% | `0xB880D719455D11627A37cAc49493bFb54C884A01` |
 | 池 USDT/USD1 0.01% | `0x85945fAE445F06C129D61CF962849534c8332586` |
 | 池 USDT/U 0.01% | `0x8A84c8EBe1c97Ab212600714DdCb53760F25Ba32` |
 
-演練後在 fork 上實際換了一次（再還原）：經這個合約把 1,000／10,000／50,000 的 USDC、USD1、U 依序賣回 USDT，得到面額的 −1.01／−1.12／−1.72 bps（0.01% 手續費加一點點價格衝擊），13.6–18.7 萬 gas；OWNER 結束時不是 USDT minter；3 張 LP NFT 在 DEPLOYER。不會動到的東西：核心、v1、v2 的任何合約與設定都沒有被呼叫（19 筆的對象只有 CREATE2 工廠、PancakeSwap 的 position manager、四個模擬代幣與新的 swapper）。
+演練後在 fork 上實際呼叫了一次：`maxPegBps`＝25、`bufferBps`＝100、`TOP_UP_WINDOW`＝86400、`executor`＝`0xeddd…600F`；一個測試帳戶經這個合約把 10,000 的 USDC、USD1、U 各賣回 USDT，都拿到 9,998.90（−1.10 bps：0.01% 手續費加一點點價格衝擊），16.4–18.1 萬 gas；沒有策略盒的帳戶 `topUp` 得到 `NoBox`。OWNER 結束時不是 USDT minter；3 張 LP NFT 在 DEPLOYER。不會動到的東西：核心、v1、v2 的任何合約與設定都沒有被這支腳本呼叫（19 筆的對象只有 CREATE2 工廠、PancakeSwap 的 position manager、四個模擬代幣與新的 swapper）。演練用的 Anvil（自己的埠）已關掉。
 
 **要先做的事與順序：** 這支腳本要在 v2 重新部署廣播完、`deployments/testnet-97.json` 的 `borrowV2.executor` 改成新地址**之後**跑（不帶 `ROUTING_EXECUTOR`，讓它讀 manifest）。在那之前跑會綁到舊的 draft5 executor（`0x494C…6bB5`），之後還得再部署一次。
 
@@ -688,23 +731,61 @@ forge script script/testnet/DeployBorrowCashSwapperTestnet.s.sol:DeployBorrowCas
 
 ### 測試
 
-- 單元（`test/atp/borrow/v2/CashSwapper.t.sol`，26 個，mock 池）：缺口重現與補上、上限與緩衝、沒有策略盒／沒有差額／過期、陌生人只動得到自己、第三方減倉用得到補的錢、錨定上限兩個方向與 owner 調緊、6 位小數、1 個最小單位的零頭、暫停下照常、策略資產不能換回、vault 讀不到時的最壞情況、多個 vault 與閒置都算進去、惡意池子八種行為（少給、部分成交、成交兩倍、重複收款、換付款人、換幣、重入、找第三者呼叫 callback）、owner 跟著核心 registry 換手、真的 PancakeSwap V3 pool bytecode 的取整，以及兩個 fuzz（補差額不超過上限且不過錨定上限；換回只在錨定上限內）。
-- 不變量（`CashSwapperInvariant.t.sol`）：隨機的開倉／時間／補差額／還款／關閉／換回／價格偏移／池子變壞／owner 改上限／vault 讀不到／減倉序列。每一筆成功的呼叫前後比對 9 個地址的兩種幣餘額：補差額只有「帳戶 USDT → 池子」與「池子 USDC → 該帳戶的策略盒」，換回只有「帳戶 USDC → 池子」與「池子 USDT → 帳戶」，其他人一毛不動；不超過上限、不過錨定上限；合約餘額與 allowance 永遠是 0；approve 過合約的旁觀者餘額不變。
-- 變異檢查（手動，不在 CI）：拿掉上限檢查、拿掉錨定檢查、callback 不比對、買到的幣改送帳戶、上限不算 vault、拿掉策略資產檢查、拿掉重入保護、允許部分成交，八種改法每一種都至少讓一個測試失敗。
-- 主網 fork（`test/atp/fork/BorrowCashSwapperFork.t.sol`，7 個，需要 `BSC_RPC_URL`，CI 不跑）：上面的實測，加上主網腳本的部署、owner 呼叫、`verify` 與八種弄壞後會失敗的情況。
+- 單元（`test/atp/borrow/v2/CashSwapper.t.sol`，27 個，mock 池）：缺口重現與補上、單筆上限（負債 − 閒置，加緩衝，不算 vault；`MAX` 被拒）、沒有策略盒／沒有差額／過期、陌生人只動得到自己、第三方減倉用得到補的錢、錨定上限兩個方向與 owner 調緊／調到硬上限、6 位小數、低於 6 位的幣不能登記、1 個最小單位的零頭、暫停下照常、策略資產不能換回、vault 讀不到時上限不變而 `shortfall` 直接失敗、`gap` 把多個 vault 與閒置都算進去、惡意池子八種行為（少給、部分成交、成交兩倍、重複收款、換付款人、換幣、重入、找第三者呼叫 callback）、owner 跟著核心 registry 換手、真的 PancakeSwap V3 pool bytecode 的取整，以及兩個 fuzz（補差額不超過上限且不過錨定上限；換回只在錨定上限內）。
+- 第四輪回歸（`CashSwapperReview.t.sol`，7 個）：審查員的 PoC 反過來寫。M-3：vault 讀得到領不出來時，補得了、第三方減倉回到預算內、關閉成功、vault 恢復後放回。M-2：一個視窗一圈（再借也不會重開）、額度跟著視窗內最高負債、分批補與還不會卡住退出、視窗是每帳戶每幣的、三天內每 6 小時硬來一次只成功 3 圈且損失不超過「圈數 × 2 × 0.25% × 1.01 × 負債」。I-1：`amountIn ≥ 2^255` 被拒。
+- 不變量（`CashSwapperInvariant.t.sol`，5 條）：隨機的開倉／時間／補差額／還款／關閉／換回／**整圈來回（補滿、關閉、換回、再借、馬上再補一次）**／價格偏移／池子變壞／owner 改上限／vault 讀不到／減倉序列。每一筆成功的呼叫前後比對 9 個地址的兩種幣餘額：補差額只有「帳戶 USDT → 池子」與「池子 USDC → 該帳戶的策略盒」，換回只有「帳戶 USDC → 池子」與「池子 USDT → 帳戶」，其他人一毛不動；不超過上限、不過錨定上限；合約餘額與 allowance 永遠是 0；approve 過合約的旁觀者餘額不變。**新增的一條（累計損失有上界）：** 測試自己另外記每一個視窗，合約記的買進量要跟實際買的一樣、視窗不會提早重開、視窗數不超過天數加一；所有補差額加起來不超過各視窗「最高負債 ×（1＋緩衝硬上限）」的總和，補差額付出的溢價總和不超過那個總和的 1%（錨定硬上限）加取整。
+- 變異檢查（手動，不在 CI，11 種改法每一種都至少讓一個測試失敗）：拿掉視窗檢查、不記錄視窗、額度改用當下負債（分批補與還、vault 領不出來的減倉流程都會卡住）、拿掉單筆上限、`cashOut` 的轉型不檢查、接受低於 6 位小數的幣、預設錨定上限改回 50、視窗永不重開、視窗每次都重開、`shortfall` 把讀不到的 vault 當 0、不看盒內閒置。PR #72 的八種（拿掉錨定檢查、callback 不比對、買到的幣改送帳戶、拿掉策略資產檢查、拿掉重入保護、允許部分成交等）沒有重跑，對應的測試都還在。
+- 主網 fork（`test/atp/fork/BorrowCashSwapperFork.t.sol`，12 個，需要 `BSC_RPC_URL`，CI 不跑）：上面的實測；第四輪的五個回歸（gas limit 不影響上限與買到的量、真池子上一個視窗一圈、兩種負債規模的夾單一圈不超過上限且第二圈被拒、Lista vault 領不出來時補了就能關）；主網腳本的部署、owner 呼叫、`verify` 與弄壞後會失敗的情況（含「manifest 沒有 v2 executor 時 `verify` 直接失敗」）。
+- 腳本檢查（`test/script/DeployBorrowCashSwapperMainnetChecks.t.sol`，CI 會跑）：`verify` 只認 manifest 的 executor，環境變數給什麼都沒用。
 
-### slither（CI 的 `Slither` 工作，PR #72）
+### slither（跟 CI 的 `Slither` 工作同一組參數，第四輪修正後在本機用 slither 0.11.6 跑；PR #72 那次是 CI 跑的）
 
-這個合約被列出的都是設計如此，逐項看過：
+整個 repo 411 筆（CI 這個工作是 `fail-on: none`，不擋合併）。這個合約被列出的都是設計如此，逐項看過：
 - 「transferFrom 的 from 可任意指定」（callback）：付款人不是呼叫者給了就算，必須跟進入點記下的「池子、付款人、付款幣」雜湊相符，也就是正在進行的那一筆 swap 的呼叫者本人。
-- 「重入」（`_swap` 在外部呼叫之後才清掉 `_inFlight`）：那個值就是要在 swap 期間有效，callback 才認得；兩個進入點都是 `nonReentrant`，callback 自己只做一次比對後的轉帳。
+- 「重入」（`_swap` 在外部呼叫之後才清掉 `_inFlight`、之後才讀餘額）：那個值就是要在 swap 期間有效，callback 才認得；兩個進入點都是 `nonReentrant`，callback 自己只做一次比對後的轉帳。
+- 「重入」（`topUp` 先呼叫 `lens.syncToken` 才寫視窗；第四輪新增的一筆）：要先 accrue 才讀得到負債，視窗只能在那之後寫；它寫在 swap 之前，`topUp` 是 `nonReentrant`，`syncToken` 只會呼叫 registry 登記的 Venus／Lista 市場。
 - 「沒用到 `swap` 的回傳值」：刻意不信池子回報的數字，改用餘額差額。
-- 「迴圈裡的外部呼叫」：帳戶的 vault 清單，registry 限制最多 24 個。
-- 「嚴格相等」「用 block.timestamp 比較」「參數名稱跟 getter 同名」：`amountIn == 0`、`deadline`、介面 `setLimits` 的參數名，都無害。
+- 「迴圈裡的外部呼叫」：現在只剩給後端讀的 `shortfall`（帳戶的 vault 清單，registry 限制最多 24 個）；`topUp` 已經沒有迴圈。
+- 「嚴格相等」「用 block.timestamp 比較」「參數名稱跟 getter 同名」：`amountIn == 0`、`deadline` 與視窗的 24 小時（第四輪新增）、介面 `setLimits` 的參數名，都無害。
 
 ### 已知限制（要人決定或要後端配合的）
 
-- **vault 讀得到但領不出來（例如 Venus 存款池使用率 100%）**：上限照「vault 裡有錢」算，`gap` 可能是 0，`topUp` 不讓補，但 `executeReduce` 又領不到 vault 的錢。這種情況目前只能等 vault 有流動性，或換 vault。要放寬有兩個做法：owner 逐幣開關「上限不算 vault 存款」，或上限直接改成「負債 − 盒內閒置」（最壞情況跟上面一樣，但外洩的 session key 平常就能把那麼多 USDT 換進盒裡）。這次照定案的公式做，沒有加。
+- **每個借款幣各有自己的視窗**：同一份借款額度輪流借成 USDC／USD1／U，一天最多三圈（見「最壞情況」）。要壓到「整個帳戶一天一圈」得把三種幣的負債加總進同一個視窗，每次補差額都要多讀另外兩個幣的負債，任何一個幣的市場讀不到就會擋住別的幣的退出，這次沒有做。
+- **固定視窗的邊界**：已經開著的視窗快結束時用掉額度、視窗一過再來一次，可以連兩圈（跟核心的買入上限一樣）。
+- **vault 讀得到但領不出來時 `gap` 會偏小**（它照「vault 裡有錢」算）。後端要照「後端怎麼用」第 2 點處理：補了 `gap` 還是 `VaultShortfall` 就改買到 `cap`。合約這一邊已經不會擋。
+- **脫錨超過錨定上限時補差額被擋**，合約不會自己處理，要 owner 照上面的 runbook 手動；超過 1% 連 owner 也調不上去。
+- 一個視窗內把整筆負債補滿過之後，同一天再借、再遇到 vault 領不出來，就要等視窗過期或由帳戶 owner 自己轉借款幣進來還。
 - 換回現金賣 1、2 個最小單位時可能拿到 0（在取整容許內）。
 - 錨定上限保護的是「這一筆的成交價離 1:1 不超過上限」，不是「拿到市場最好的價」；被夾的空間由後端的 `maxUsdtIn`／`minUsdtOut` 管。
-- `StrategyAsset` 只看帳戶目前 enroll 的策略。
+- `StrategyAsset` 只看帳戶目前 enroll 的策略（第四輪 I-3：session key 不能 enroll，賣出也仍受錨定上限，沒有實質漏洞）。
+- 測試網的池子流動性只放在 ±0.2%（第四輪 I-8）：拿水龍頭代幣的人可以把池子推出區間讓 `topUp` 失敗，只是測試網上的干擾。
+
+## 18. 第四輪審查（2026-11-25，main `465a6e5`）的發現與處理
+
+第四輪結論：沒有 Critical／High，沒有任何路徑讓錢離開「帳戶＋它的策略盒」到第三方；3 個 Medium、1 個 Low、8 個 Info，都在外掛的 `AtpBorrowCashSwapper`（PR #72，還沒部署到任何鏈）與它的部署腳本。第三輪 L-1 的修正（PR #70）審查員確認正確。**這一節的修正只動 `AtpBorrowCashSwapper`、它的介面、主網部署腳本與測試；v2 四個合約與核心一個 byte 都沒改**（§17「部署」的演練裡實際核對過 v2 重新部署的地址不變）。
+
+審查員的 PoC（`R4ForkPoC.t.sol`、`R4SwapperPoC.t.sol`）在修正前的 main 上重跑過，全部成立；修正後原樣跑會失敗，反過來寫的回歸測試在上面的「測試」。
+
+| 發現 | 處理 | 測試／位置 |
+| --- | --- | --- |
+| **M-1** 補差額上限裡的「vault 存款」可以被呼叫者自己關掉：Lista vault 讀一次約 560 萬 gas，讀取包在 try/catch 裡，gas limit 給 312.5 萬到 587.5 萬時讀取 OOG 被當成 0，`topUp(MAX)` 把健康部位的整筆負債（1,002 × 1.01）換進策略盒 | **已修**：上限改成 `（負債 − 盒內閒置）×（1 + buffer）`，**不讀任何 vault**，try/catch 整段拿掉（給後端看的 `shortfall` 也沒有 try/catch：讀不到就 revert）。`topUp` 不再接受 `MAX` | fork `test_fork_R4_M1_gasLimitChangesNothingATopUpMayBuy`（72 種 gas limit：超過上限的一律被拒，上限內的不是 gas 用完就是買到一樣的量；`shortfall` 少給 gas 只會失敗）；單元 `test_cap_readsNoVault_anUnreadableVaultChangesNothingOnChain` |
+| **M-2** 外洩的 session key 可以無限次來回（補滿 → 關閉 → 換回 → 再借），每圈吃滑價上限；實測夾單每圈 88.8 bps，負債 6 萬時夾的人每圈賺 412 | **已修**：(a) `topUp` 加每帳戶每幣的固定 24 小時視窗（跟核心 `BUY_WINDOW` 同一種語意），視窗內累計買進 ≤ 視窗內最高負債 ×（1 + buffer），超過 `WindowExceeded`；(b) `maxPegBps` 預設 50 → 25，硬上限維持 100。`cashOut` 不設上限（理由在 §17「限制」）。修正後每個幣每個視窗最多一圈，實測夾到邊緣每圈 50.3–50.4 bps（合約上限 50.5） | 單元 `CashSwapperReview.t.sol` 的五個 `test_M2_*`；不變量 `invariant_topUpsFitTheirWindows_andTheirWearIsBounded`；fork `test_fork_R4_M2_roundTrip_oneLapPerWindow_realPool`、`test_fork_R4_M2_sandwichedLap_realPool`（與 `_largerDebt`） |
+| **M-3** vault 讀得到但領不出來（例如 Venus 存款池使用率 100%）：上限把它算進去不讓補，`executeReduce` 與第三方減倉又領不到，帳戶有 10 萬 USDT 也關不掉 | **已修**（同 M-1 的公式）：補得了整筆「負債 − 閒置」，關閉時 vault 的份額留在策略盒，之後 `executeRelease` | 單元 `test_M3_vaultReadsFullButCannotPay_topUpServesTheDeleverageAndTheClose`（審查員的 PoC 反過來：補完第三方減倉回到預算內、關閉成功）；fork `test_fork_R4_M3_listaVaultCannotPay_topUpCloses` |
+| **L-A** 主網 `DeployBorrowCashSwapperMainnet.verify()` 的 `ROUTING_EXECUTOR` 來自環境變數、沒有錨定：假 executor 加假 registry 只要指回真的核心 registry 就驗得過 | **已修**：`verify()` 改從 `deployments/mainnet.json` 的 `borrowV2.executor` 讀（v2 上主網、用 §13 的 `verify` 驗過之後才寫進去）；沒有這一欄就失敗並說明。環境變數不再被 `verify` 讀 | `test/script/DeployBorrowCashSwapperMainnetChecks.t.sol`（CI 會跑）；fork `test_fork_script_verify_andDriftIsCaught` |
+| **I-1** `cashOut` 的 `int256(amountIn)` 沒檢查，`amountIn ≥ 2^255` 會變成指定換出量的單（仍在錨定上限內） | **已修**：兩個方向都用 `SafeCast.toInt256` | `test_I1_cashOut_amountAboveInt256Max_isRefused` |
+| **I-2** 取整容許是「較粗那個幣的 3 個最小單位」，0–2 位小數的幣每筆容許 0.03–3 美元 | **已修**：只收 6–18 位小數（`setPool` 的借款幣與建構時的 USDT 都檢查） | `test_setPool_refusesATokenBelow6Decimals` |
+| **I-3** `StrategyAsset` 只看目前 enroll 的策略、沒 enroll 過等於不檢查 | 不改（審查員：沒有實質漏洞，session key 不能 enroll，賣出仍受錨定上限）。列在 §17「已知限制」 | — |
+| **I-4** 錨定上限的方向、decimals、手續費都對；USDT 跌超過 1% 或借款幣變貴時補不了，只能 owner 手動，要有 runbook | 合約不改；runbook 的步驟先寫在 §17「最壞情況／脫錨」，正式版要進營運手冊 | — |
+| **I-5** 不檢查暫停：合理，前提是來回需要 `executeOpen`（暫停時被擋）；全域開關只有 `setPool(token, 0)`，連誠實的退出一起關 | 不改。現在不靠暫停也有視窗上限 | `test_pause_neitherActionFollowsAPause_likeEveryExit` |
+| **I-6** 惡意白名單池：每筆最多吃錨定上限加 3 個最小單位，碰不到其他帳戶的 approve | 不改（同意文件的結論）。補差額那一邊現在另外被視窗管住 | 既有的八個惡意池測試與不變量 |
+| **I-7** `tokenDebt` 含不是 v2 開的 Venus 負債，會放大上限；明確金額的 `executeReduce` 可以用策略盒的錢還這種負債（錢仍在帳戶內，既有行為） | 不改（v2 四個合約不動）。寫進 §17「最壞情況」：額度照 `tokenDebt` 算 | — |
+| **I-8** 測試網的池子流動性只放在 ±0.2%，有水龍頭代幣的人可以把池子推出區間 | 不改（只是測試網的干擾）。列在 §17「已知限制」 | — |
+
+**這一輪做的判斷（請總管確認）：**
+1. **視窗的額度用「視窗內補差額時看過的最高負債」，不是定案字面上的「當下負債」。** 用當下負債時，補了 1,200、還掉之後負債剩 800，額度變成 808，已買的 1,200 超過它，剩下的 800 要等 24 小時才補得了；vault 領不出來又要分批減倉時正好會卡住。兩種算法對來回磨損的上限一樣（都是視窗內最高負債 ×（1＋緩衝）），所以選不會卡住退出的那個。要改回字面上的算法是一行（`_withBuffer(w.peakDebt)` 換成 `_withBuffer(owed)`），`test_M2_window_partialTopUpsAndRepaymentsNeverBlockTheExit` 會跟著失敗。
+2. **`cashOut` 不加視窗上限。** 借款幣要回到帳戶只能從自己的策略盒出來，要再繞一圈一定得經過 `topUp`；限制換回只會擋住退出的最後一步（跟核心「賣出不限、不計」一致）。
+3. **`topUp` 拿掉 `MAX`。** 新公式下 `MAX` 就是「整筆負債」，後端平常該買的是 `gap`；留著等於留一個一不小心就把整筆負債換掉的寫法。
+4. **`shortfall` 的 `gap` 維持「負債 −（閒置＋vault 存款）」，另外加 `topUpCap`。** `gap` 是後端平常要買的量；讀不到 vault 時它 revert 而不是當 0（當 0 的話，少給 gas 的 eth_call 會把整筆負債報成差額）。`cap` 與 `topUpCap` 不讀 vault，永遠答得出來。
+5. **視窗是每帳戶每幣（照定案），所以最壞情況是「每個幣每天一圈」，三種幣輪流借最多一天三圈**，不是整個帳戶一天一圈。要不要改成整個帳戶共用一個視窗請決定（代價寫在 §17「已知限制」）。
+
+**主網前還缺的（這個 PR 沒做）：** owner 換 Safe／timelock；session key 的 CallPolicy／paymaster 與這個合約的整合測試；USDC 與 U 的 Lista vault 個別實測（這次只測了 USD1；補差額已經不讀 vault，剩下的是 `executeReduce` 自己的 gas）；脫錨 runbook 正式版；第三輪留下的 I-3、I-5、I-6（§16）；修正後的程式再給審查員看一次。

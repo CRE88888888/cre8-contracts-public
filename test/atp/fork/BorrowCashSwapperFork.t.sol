@@ -32,6 +32,35 @@ interface ICashMoolah {
     function idToMarketParams(bytes32 id) external view returns (address, address, address, address, uint256);
 }
 
+interface ICashSwapPool {
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function swap(address recipient, bool zeroForOne, int256 amount, uint160 limit, bytes calldata data)
+        external
+        returns (int256, int256);
+}
+
+/// @dev Somebody trading on the allowlisted pool around the account's swap (the holder of a leaked key).
+contract CashSandwicher {
+    function swap(address pool, bool zeroForOne, int256 amount) external returns (int256 a0, int256 a1) {
+        (a0, a1) = ICashSwapPool(pool)
+            .swap(
+                address(this),
+                zeroForOne,
+                amount,
+                zeroForOne
+                    ? 4_295_128_740
+                    : 1_461_446_703_485_210_103_287_273_052_203_988_822_378_723_970_341,
+                ""
+            );
+    }
+
+    function pancakeV3SwapCallback(int256 a0, int256 a1, bytes calldata) external {
+        if (a0 > 0) IERC20(ICashSwapPool(msg.sender).token0()).transfer(msg.sender, uint256(a0));
+        if (a1 > 0) IERC20(ICashSwapPool(msg.sender).token1()).transfer(msg.sender, uint256(a1));
+    }
+}
+
 interface ICashQueue {
     function supplyQueueLength() external view returns (uint256);
     function supplyQueue(uint256 index) external view returns (bytes32);
@@ -53,8 +82,10 @@ contract DeployBorrowCashSwapperMainnetHarness is DeployBorrowCashSwapperMainnet
 /// @notice `AtpBorrowCashSwapper` against the live BSC venues and the real PancakeSwap V3 0.01% pools of USDT
 /// with USDC / USD1 / U: the gap of routing v2 reproduced with the real flow (a position whose vault earns
 /// less than its debt costs cannot be closed), closed with a top-up, the leftover cashed out; the price paid
-/// at 1,000 / 10,000 / 50,000; the mainnet script's deploy, owner calls and verification. Balances come from
-/// `deal`. Needs `BSC_RPC_URL` (a public endpoint is enough; pin with BSC_FORK_BLOCK); skipped without it.
+/// at 1,000 / 10,000 / 50,000; the fourth review's probes (a gas-starved read, the round trip, a sandwiched
+/// lap, a vault that cannot pay) turned into regressions; the mainnet script's deploy, owner calls and
+/// verification. Balances come from `deal`. Needs `BSC_RPC_URL` (a public endpoint is enough; pin with
+/// BSC_FORK_BLOCK); skipped without it.
 contract BorrowCashSwapperForkTest is Test {
     uint256 internal constant MAX = type(uint256).max;
     address internal constant MOOLAH = 0x8F73b65B4caAf64FBA2aF91cC5D4a2A1318E5D8C;
@@ -228,6 +259,22 @@ contract BorrowCashSwapperForkTest is Test {
         if (ok) vm.mockCall(target, data, ret);
     }
 
+    function _withBuffer(uint256 amount) internal view returns (uint256) {
+        return amount + (amount * swapper.bufferBps() + 9_999) / 10_000;
+    }
+
+    /// @dev What the backend buys before a repayment: the gap the vaults leave plus the buffer.
+    function _want(address token) internal returns (uint256 amount) {
+        (uint256 gap, uint256 cap) = swapper.shortfall(address(this), token);
+        amount = _withBuffer(gap);
+        if (amount > cap) amount = cap;
+    }
+
+    function _owed(address token) internal returns (uint256) {
+        lens.syncToken(address(this), token);
+        return lens.tokenDebt(address(this), token);
+    }
+
     function _swapperHoldsNothing() internal view {
         address[4] memory all = [USDT, USDC, USD1, U];
         for (uint256 i; i < 4; ++i) {
@@ -284,24 +331,29 @@ contract BorrowCashSwapperForkTest is Test {
         vm.expectRevert();
         lend.executeReduce(address(this), routes[i], vaults[i], MAX, MAX, 100_000e18, block.timestamp);
 
+        // The backend buys the gap plus the buffer; the contract would allow up to the debt (no vault read).
+        assertEq(cap, _withBuffer(owed), "cap = debt + buffer");
+        uint256 want = _withBuffer(gap);
         uint256 gasBefore = gasleft();
-        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(token, MAX, cap * 1_005 / 1_000, block.timestamp);
+        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(token, want, want * 1_003 / 1_000, block.timestamp);
         console2.log("  topUp gas", gasBefore - gasleft());
         console2.log(string.concat("  topUp USDT in / token out, bps vs 1:1 ", _bps(usdtIn, tokenOut)));
         console2.log("  ", usdtIn, tokenOut);
-        assertEq(tokenOut, cap);
-        assertEq(lens.idleOf(address(this), token), cap, "bought token sits in the account's box");
+        assertEq(tokenOut, want);
+        assertEq(lens.idleOf(address(this), token), want, "bought token sits in the account's box");
         assertEq(IERC20(USDT).balanceOf(address(this)), 100_000e18 - usdtIn);
         _swapperHoldsNothing();
 
         // The ordinary close, with no account cash.
+        gasBefore = gasleft();
         lend.executeReduce(address(this), routes[i], vaults[i], MAX, MAX, 0, block.timestamp);
+        console2.log("  executeReduce (close) gas", gasBefore - gasleft());
         assertEq(lens.tokenDebt(address(this), token), 0, "debt closed");
         assertEq(lens.collateral(routes[i], address(this)), 0);
         assertApproxEqAbs(IERC20(TSLAB).balanceOf(address(this)), 60e18, 1e11, "collateral back");
         assertEq(lens.idleOf(address(this), token), 0);
         uint256 leftover = IERC20(token).balanceOf(address(this));
-        assertApproxEqAbs(leftover, cap - gap, 1e12, "the buffer comes back as loan token");
+        assertApproxEqAbs(leftover, want - gap, 1e12, "the buffer comes back as loan token");
 
         gasBefore = gasleft();
         (uint256 tokenIn, uint256 usdtOut) = swapper.cashOut(token, MAX, 0, block.timestamp);
@@ -315,9 +367,10 @@ contract BorrowCashSwapperForkTest is Test {
     }
 
     /// @dev A Lista debt (QQQB / USD1) with its money split between Venus vUSD1 and the Lista USD1 vault:
-    /// the cap reads a Lista market's debt and both kinds of vault. Whether a year leaves a gap depends on
-    /// the live rates (the Lista vault can out-earn the QQQB market); both outcomes are checked.
-    function test_fork_listaDebt_twoVaultKinds_capReadsBoth() public {
+    /// `gap` reads a Lista market's debt and both kinds of vault; the cap and `topUp` read neither, so a
+    /// top-up costs the same with a Lista vault in the box. Whether a year leaves a gap depends on the live
+    /// rates (the Lista vault can out-earn the QQQB market); both outcomes are checked.
+    function test_fork_listaDebt_twoVaultKinds_gapReadsBoth_topUpReadsNone() public {
         lend.executeOpen(address(this), L_QQQB_USD1, bytes32(0), 5e18, 0, block.timestamp);
         uint256 borrowed = _target(L_QQQB_USD1);
         lend.executeOpen(address(this), L_QQQB_USD1, vaults[1], 0, borrowed, block.timestamp);
@@ -327,7 +380,7 @@ contract BorrowCashSwapperForkTest is Test {
         uint256 gasBefore = gasleft();
         (uint256 gap, uint256 cap) = swapper.shortfall(address(this), USD1);
         console2.log("== Lista QQQB/USD1, half in Venus vUSD1, half in the Lista USD1 vault, after 365 days");
-        console2.log("  shortfall() gas (reads both vaults)", gasBefore - gasleft());
+        console2.log("  shortfall() gas (eth_call; gap reads both vaults)", gasBefore - gasleft());
         uint256 owed = lens.tokenDebt(address(this), USD1);
         uint256 held = lens.vaultStatus(vaults[1], address(this)).assets
             + lens.vaultStatus(K_LISTA_USD1, address(this)).assets + lens.idleOf(address(this), USD1);
@@ -335,14 +388,17 @@ contract BorrowCashSwapperForkTest is Test {
         console2.log("  ", borrowed, owed);
         console2.log("  ", held, gap);
         assertEq(gap, owed > held ? owed - held : 0, "gap = debt - both vaults - idle");
-        if (gap == 0) {
-            vm.expectPartialRevert(ISwapper.NoShortfall.selector);
-            swapper.topUp(USD1, MAX, MAX, block.timestamp);
-            return;
-        }
+        assertEq(cap, _withBuffer(owed), "cap = debt + buffer, whatever the vaults hold");
+        // A top-up with a Lista vault in the box: no vault is read, so it costs what any top-up costs.
+        uint256 snapshot = vm.snapshotState();
         gasBefore = gasleft();
-        swapper.topUp(USD1, MAX, cap * 1_005 / 1_000, block.timestamp);
-        console2.log("  topUp gas", gasBefore - gasleft());
+        swapper.topUp(USD1, 10e18, MAX, block.timestamp);
+        uint256 used = gasBefore - gasleft();
+        console2.log("  topUp gas with a Lista vault in the box", used);
+        assertLt(used, 700_000, "a top-up reads no vault");
+        vm.revertToState(snapshot);
+        if (gap == 0) return;
+        swapper.topUp(USD1, _withBuffer(gap), MAX, block.timestamp);
         (gap,) = swapper.shortfall(address(this), USD1);
         assertEq(gap, 0, "covered");
         // Two vaults: empty the Lista vault into the debt first, then close on the Venus one.
@@ -405,9 +461,9 @@ contract BorrowCashSwapperForkTest is Test {
                     )
                 );
                 console2.log("    usdtIn / usdtOut (raw)", usdtIn, usdtOut);
-                // Well inside the 0.5% bound at every size.
-                assertLt(usdtIn, out + out * 50 / 10_000);
-                assertLt(tokenIn, usdtOut + usdtOut * 50 / 10_000);
+                // Inside the 0.25% bound at every size.
+                assertLt(usdtIn, out + out * 25 / 10_000);
+                assertLt(tokenIn, usdtOut + usdtOut * 25 / 10_000);
             }
             vm.clearMockedCalls();
         }
@@ -431,17 +487,257 @@ contract BorrowCashSwapperForkTest is Test {
         }
     }
 
+    // ---- fourth review: the reviewer's fork probes (scratchpad R4ForkPoC.t.sol), turned around ----
+
+    /// @dev A fresh, healthy Lista QQQB / USD1 position whose whole deposit sits in the Lista USD1 vault.
+    /// Every step is one a session key may send (§4): executeOpen, executeSwitchVault.
+    function _openIntoListaVault(uint256 collateral) internal returns (uint256 borrowed) {
+        lend.executeOpen(address(this), L_QQQB_USD1, bytes32(0), collateral, 0, block.timestamp);
+        borrowed = _target(L_QQQB_USD1);
+        lend.executeOpen(address(this), L_QQQB_USD1, vaults[1], 0, borrowed, block.timestamp);
+        lend.executeSwitchVault(address(this), vaults[1], K_LISTA_USD1, MAX, block.timestamp);
+        deal(USDT, address(this), 1_000_000e18);
+    }
+
+    /// M-1 (probe F-1): a Lista vault read costs millions of gas, and the old cap read it inside a
+    /// try/catch: with 3.1-5.9M gas the read ran dry, counted as zero, and `topUp(MAX)` bought the whole
+    /// debt of a healthy position whose honest cap was dust. Now no gas limit changes what a top-up may buy
+    /// or buys: at every limit it either runs out of gas or does exactly what it does with all the gas.
+    function test_fork_R4_M1_gasLimitChangesNothingATopUpMayBuy() public {
+        _openIntoListaVault(5e18);
+        uint256 owed = _owed(USD1);
+        uint256 gasBefore = gasleft();
+        (uint256 gap, uint256 cap) = swapper.shortfall(address(this), USD1);
+        console2.log("== R4 M-1: real Lista USD1 vault, fresh position");
+        console2.log("  shortfall() gas (eth_call, reads the vault)", gasBefore - gasleft());
+        console2.log("  debt / gap / cap", owed, gap, cap);
+        assertEq(cap, _withBuffer(owed), "the cap is the debt + buffer: no vault in it");
+        assertLt(gap, 1e12, "nothing to buy on a fresh position");
+        uint256 completed;
+        uint256 ranDry;
+        uint256 least;
+        for (uint256 g = 100_000; g <= 9_000_000; g += 125_000) {
+            uint256 snapshot = vm.snapshotState();
+            // Above the cap: refused at every gas limit (the old code let it through between 3.1M and 5.9M).
+            try swapper.topUp{ gas: g }(USD1, cap + 1, MAX, block.timestamp) {
+                revert("a starved top-up bought more than the cap");
+            } catch { }
+            // Inside it: the same purchase or none.
+            try swapper.topUp{ gas: g }(USD1, 100e18, MAX, block.timestamp) returns (uint256, uint256 out) {
+                assertEq(out, 100e18);
+                assertEq(lens.idleOf(address(this), USD1), 100e18);
+                if (completed++ == 0) least = g;
+            } catch {
+                ++ranDry;
+            }
+            vm.revertToState(snapshot);
+        }
+        console2.log("  gas limits tried / completed / ran dry", completed + ranDry, completed, ranDry);
+        console2.log("  least gas limit that completes a top-up", least);
+        assertGt(completed, 60);
+        assertGt(ranDry, 0);
+        assertLt(least, 700_000, "a top-up with a Lista vault in the box needs no vault read");
+        // The reader is not a quiet zero either: starved of gas, `shortfall` fails instead of reporting the
+        // whole debt as the gap; `topUpCap` (no vault read) answers with a fraction of the gas.
+        for (uint256 g = 500_000; g <= 9_000_000; g += 250_000) {
+            (bool ok, bytes memory ret) =
+                address(swapper).call{ gas: g }(abi.encodeCall(swapper.shortfall, (address(this), USD1)));
+            if (!ok) continue;
+            (uint256 starvedGap, uint256 sameCap) = abi.decode(ret, (uint256, uint256));
+            assertEq(starvedGap, gap, "a starved read reported another gap");
+            assertEq(sameCap, cap);
+        }
+        gasBefore = gasleft();
+        assertEq(swapper.topUpCap{ gas: 300_000 }(address(this), USD1), cap);
+        console2.log("  topUpCap() gas", gasBefore - gasleft());
+    }
+
+    /// M-2 (probe F-2): the round trip a leaked session key could repeat without limit. Now the second lap
+    /// of a window is refused, and the next one has to wait for `start + TOP_UP_WINDOW`.
+    function test_fork_R4_M2_roundTrip_oneLapPerWindow_realPool() public {
+        uint256 borrowed = _openIntoListaVault(5e18);
+        console2.log("== R4 M-2: round trip on the real USDT/USD1 pool, debt", borrowed);
+        uint256 opened = vm.getBlockTimestamp();
+        uint256 lost = _lap(borrowed);
+        console2.log("  lap 1: USDT lost / bps of the debt (x100)", lost, lost * 1_000_000 / borrowed);
+        assertLt(lost, borrowed * 2 * 25 / 10_000, "an unmanipulated lap stays far inside the bound");
+        (uint64 start, uint192 bought, uint256 peak) = swapper.topUpWindowOf(address(this), USD1);
+        assertEq(start, opened);
+        assertEq(bought, _withBuffer(peak));
+
+        // The same block, and every hour of the window: the box is short of the new debt, nothing may be
+        // bought beyond the interest the debt earned since.
+        for (uint256 h; h < 24; h += 6) {
+            (, uint256 cap) = swapper.shortfall(address(this), USD1);
+            assertLt(cap, borrowed / 1_000, "the window is used up");
+            vm.expectPartialRevert(ISwapper.WindowExceeded.selector);
+            swapper.topUp(USD1, borrowed / 100, MAX, block.timestamp);
+            _accrue(h == 18 ? 6 hours - 1 : 6 hours);
+        }
+        vm.expectPartialRevert(ISwapper.WindowExceeded.selector);
+        swapper.topUp(USD1, borrowed / 100, MAX, block.timestamp);
+        _accrue(1);
+        assertEq(vm.getBlockTimestamp(), opened + 1 days);
+        lost = _lap(borrowed);
+        console2.log("  lap 2 (24 hours later): USDT lost", lost);
+        (start,,) = swapper.topUpWindowOf(address(this), USD1);
+        assertEq(start, opened + 1 days);
+    }
+
+    /// @dev Top up all that is allowed, close the token's debt (collateral stays), sell what came back,
+    /// borrow again into the Lista vault. Returns what the two swaps cost the account at face value.
+    function _lap(uint256 borrowed) internal returns (uint256 lost) {
+        (, uint256 cap) = swapper.shortfall(address(this), USD1);
+        (uint256 usdtIn, uint256 bought) = swapper.topUp(USD1, cap, MAX, block.timestamp);
+        lend.executeReduce(address(this), L_QQQB_USD1, K_LISTA_USD1, MAX, 0, 0, block.timestamp);
+        assertEq(lens.tokenDebt(address(this), USD1), 0);
+        (uint256 sold, uint256 usdtOut) = swapper.cashOut(USD1, MAX, 0, block.timestamp);
+        _report();
+        lend.executeOpen(address(this), L_QQQB_USD1, K_LISTA_USD1, 0, borrowed, block.timestamp);
+        lost = usdtIn + sold - bought - usdtOut;
+    }
+
+    /// M-2 (probe F-2b): the same lap with the pool walked to the edge of the peg bound around each leg by
+    /// the key holder. The reviewer measured 88.8 bps of the debt per lap at the old 0.5% bound, laps without
+    /// limit. Now: at most 2 x maxPegBps x (1 + buffer) = 50.5 bps, once per window.
+    function test_fork_R4_M2_sandwichedLap_realPool() public {
+        _sandwichedLap(5e18);
+    }
+
+    /// @dev The larger position of the probe (300 QQQB, about 60,000 of debt), where the walk paid off.
+    function test_fork_R4_M2_sandwichedLap_realPool_largerDebt() public {
+        deal(qqqb, address(this), 300e18);
+        _sandwichedLap(300e18);
+    }
+
+    function _sandwichedLap(uint256 collateral) internal {
+        uint256 borrowed = _openIntoListaVault(collateral);
+        CashSandwicher bot = new CashSandwicher();
+        deal(USDT, address(bot), 50_000_000e18);
+        deal(USD1, address(bot), 50_000_000e18);
+        address pool = swapper.poolOf(USD1);
+        uint256 owed = _owed(USD1);
+        (, uint256 cap) = swapper.shortfall(address(this), USD1);
+        console2.log("== R4 M-2: sandwiched lap, debt", owed);
+        int256 botBefore = int256(IERC20(USDT).balanceOf(address(bot)) + IERC20(USD1).balanceOf(address(bot)));
+
+        // Leg 1: push USD1 up (buy it with USDT) as far as the account's top-up still clears, sell it back.
+        uint256 size =
+            _walk(pool, bot, true, abi.encodeCall(swapper.topUp, (USD1, cap, MAX, block.timestamp)));
+        (, int256 a1) = bot.swap(pool, true, int256(size));
+        (uint256 usdtIn, uint256 bought) = swapper.topUp(USD1, cap, MAX, block.timestamp);
+        bot.swap(pool, false, -a1);
+        console2.log("  leg 1 account premium paid (bps x100)", (usdtIn - bought) * 1_000_000 / bought);
+
+        lend.executeReduce(address(this), L_QQQB_USD1, K_LISTA_USD1, MAX, 0, 0, block.timestamp);
+
+        // Leg 2: push USD1 down (sell it for USDT) as far as the cash-out still clears, buy it back.
+        size = _walk(pool, bot, false, abi.encodeCall(swapper.cashOut, (USD1, MAX, 0, block.timestamp)));
+        (int256 a0,) = bot.swap(pool, false, int256(size));
+        (uint256 sold, uint256 usdtOut) = swapper.cashOut(USD1, MAX, 0, block.timestamp);
+        bot.swap(pool, true, -a0);
+        console2.log("  leg 2 account discount taken (bps x100)", (sold - usdtOut) * 1_000_000 / sold);
+
+        uint256 lost = usdtIn - bought + sold - usdtOut;
+        console2.log("  account lost over the lap (face value) / bps of the debt (x100)");
+        console2.log("  ", lost, lost * 1_000_000 / owed);
+        console2.log(
+            "  key holder's P&L over the lap (face value, 1e18)",
+            int256(IERC20(USDT).balanceOf(address(bot)) + IERC20(USD1).balanceOf(address(bot))) - botBefore
+        );
+        // Each leg trades about debt x (1 + buffer) at most maxPegBps from parity.
+        assertLe(lost, 2 * (_withBuffer(owed) * swapper.maxPegBps() / 10_000 + 3), "above the lap bound");
+
+        // And that was the window's lap: borrow again, the next top-up is refused whatever the pool does.
+        _report();
+        lend.executeOpen(address(this), L_QQQB_USD1, K_LISTA_USD1, 0, borrowed, block.timestamp);
+        vm.expectPartialRevert(ISwapper.WindowExceeded.selector);
+        swapper.topUp(USD1, borrowed / 100, MAX, block.timestamp);
+    }
+
+    /// @dev The largest front-run after which the account's call still goes through (steps of x1.5, then
+    /// eight halvings of the last step: within 0.2% of the edge of the peg bound).
+    function _walk(address pool, CashSandwicher bot, bool zeroForOne, bytes memory call)
+        internal
+        returns (uint256 best)
+    {
+        uint256 size = 20_000e18;
+        for (; size <= 40_000_000e18; size = size * 3 / 2) {
+            if (!_clears(pool, bot, zeroForOne, size, call)) break;
+            best = size;
+        }
+        assertGt(best, 0, "front-run size");
+        for (uint256 i; i < 8; ++i) {
+            uint256 mid = (best + size) / 2;
+            if (_clears(pool, bot, zeroForOne, mid, call)) best = mid;
+            else size = mid;
+        }
+    }
+
+    function _clears(address pool, CashSandwicher bot, bool zeroForOne, uint256 size, bytes memory call)
+        internal
+        returns (bool ok)
+    {
+        uint256 snapshot = vm.snapshotState();
+        try bot.swap(pool, zeroForOne, int256(size)) {
+            (ok,) = address(swapper).call(call);
+        } catch { }
+        vm.revertToState(snapshot);
+    }
+
+    /// M-3 on the real Lista vault: it reads full and does not pay (its redemptions revert). Before, the
+    /// honest cap was dust and the close failed. Now the account buys the debt (one top-up, no vault read),
+    /// closes with no account cash, and gets the vault's holding back once the vault pays again.
+    function test_fork_R4_M3_listaVaultCannotPay_topUpCloses() public {
+        uint256 borrowed = _openIntoListaVault(5e18);
+        _accrue(30 days);
+        vm.mockCallRevert(
+            LISTA_VAULT_USD1, abi.encodeWithSignature("redeem(uint256,address,address)"), "no liquidity"
+        );
+        vm.mockCallRevert(
+            LISTA_VAULT_USD1, abi.encodeWithSignature("withdraw(uint256,address,address)"), "no liquidity"
+        );
+        console2.log("== R4 M-3: the Lista USD1 vault reads full and cannot pay, debt", borrowed);
+        vm.expectPartialRevert(IExec.VaultShortfall.selector);
+        lend.executeReduce(address(this), L_QQQB_USD1, K_LISTA_USD1, MAX, MAX, 0, block.timestamp);
+        (uint256 gap, uint256 cap) = swapper.shortfall(address(this), USD1);
+        console2.log("  gap (the vault reads full) / cap", gap, cap);
+        uint256 gasBefore = gasleft();
+        (uint256 usdtIn, uint256 bought) = swapper.topUp(USD1, cap, cap * 1_003 / 1_000, block.timestamp);
+        console2.log("  topUp gas", gasBefore - gasleft());
+        console2.log(string.concat("  topUp bps vs 1:1 ", _bps(usdtIn, bought)));
+        gasBefore = gasleft();
+        lend.executeReduce(address(this), L_QQQB_USD1, K_LISTA_USD1, MAX, MAX, 0, block.timestamp);
+        console2.log("  executeReduce (close, the vault refuses) gas", gasBefore - gasleft());
+        assertEq(lens.tokenDebt(address(this), USD1), 0, "debt closed");
+        assertEq(lens.collateral(L_QQQB_USD1, address(this)), 0, "collateral out");
+        assertEq(IERC20(qqqb).balanceOf(address(this)), 60e18);
+        // The vault pays again.
+        vm.clearMockedCalls();
+        _pinPrices();
+        lend.executeRelease(address(this), K_LISTA_USD1, block.timestamp);
+        assertGt(IERC20(USD1).balanceOf(address(this)), borrowed, "the vault's holding and the buffer");
+        swapper.cashOut(USD1, MAX, 0, block.timestamp);
+        assertEq(IERC20(USD1).balanceOf(address(this)), 0);
+        _swapperHoldsNothing();
+    }
+
     // ---- the mainnet script ----
 
     function test_fork_script_verify_andDriftIsCaught() public {
         vm.setEnv("ATP_SAFE", vm.toString(address(this)));
         script.verifyWith(address(swapper), address(lend), address(registry));
 
-        // The real entry point insists on the core recorded in deployments/mainnet.json: this fork's
-        // stand-in core is not it.
+        // The real entry point takes the routing executor from deployments/mainnet.json and from nowhere
+        // else (fourth review L-A): naming this fork's executor in the environment does not help, and the
+        // manifest has none until routing v2 is on mainnet.
         vm.setEnv("ROUTING_EXECUTOR", vm.toString(address(lend)));
         vm.chainId(56);
-        vm.expectRevert(bytes("core registry is not the AtpRegistry in deployments/mainnet.json"));
+        vm.expectRevert(
+            bytes(
+                "deployments/mainnet.json has no borrowV2.executor: record the verified routing v2 executor first"
+            )
+        );
         script.verify(address(swapper));
 
         // A pool switched off; another pool of the same pair (the 0.05% one); limits moved.

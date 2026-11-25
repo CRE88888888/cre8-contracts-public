@@ -5,9 +5,9 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { AtpRegistry } from "../../AtpRegistry.sol";
-import { RoutingTypes as R } from "./RoutingTypes.sol";
 import { IAtpBorrowExecutorV2 } from "./IAtpBorrowExecutorV2.sol";
 import { IAtpBorrowLensV2 } from "./IAtpBorrowLensV2.sol";
 import { AtpBorrowRegistryV2 } from "./AtpBorrowRegistryV2.sol";
@@ -37,14 +37,26 @@ interface ISwapPool {
 /// loan token from the caller -> pool, USDT pool -> the caller (`cashOut`). No account or receiver argument.
 /// This contract never holds a token: the pool pays the destination itself and the callback moves the input
 /// from the caller straight to the pool. No oracle: a swap must clear a fixed peg bound (pay at most what it
-/// received x (1 + maxPegBps), both tokens at 1:1), measured on real balances, or it reverts. A top-up is
-/// capped at what the box is short of the debt, plus a small buffer. Neither action adds risk, so neither
-/// follows a pause (like every exit of routing v2); the owner switches a token off with `setPool(token, 0)`.
+/// received x (1 + maxPegBps), both tokens at 1:1), measured on real balances, or it reverts.
+/// @dev Top-up limits (fourth review M-1 / M-3): one top-up buys at most the debt in the token less the loan
+/// token idle in the box, plus a small buffer. No vault is read for it: a vault that cannot be read, or reads
+/// full but cannot pay, neither widens the limit (a read starved of gas used to) nor blocks the purchase the
+/// repayment then needs. What keeps this from being a lever is the window below.
+/// @dev Top-up window (fourth review M-2; the same fixed window as the core's buy limit, A10-1): a leaked
+/// session key could trade an account back and forth (top up, close, cash out, borrow again), each leg inside
+/// the peg bound. Every lap needs a top-up, so top-ups are capped per account and token per fixed 24-hour
+/// window at the highest debt a top-up of that window saw, plus the buffer. Cash-outs are neither limited nor
+/// counted (like the core's sales): loan token only reaches the account from its own box, an exit stays open.
+/// Neither action adds risk, so neither follows a pause (like every exit of routing v2); the owner switches a
+/// token off with `setPool(token, 0)`.
 contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint16 public constant MAX_PEG_BPS = 100;
     uint16 public constant MAX_BUFFER_BPS = 500;
+    /// @notice Length of the fixed top-up window. It opens with an account's first top-up of a token and
+    /// resets with the first top-up at or after `start + TOP_UP_WINDOW`.
+    uint256 public constant TOP_UP_WINDOW = 1 days;
     uint256 private constant MAX = type(uint256).max;
     /// @dev The pool's own price limits (+/- 1): the peg bound below is the price check, not these.
     uint160 private constant MIN_SQRT_LIMIT = 4_295_128_740;
@@ -68,9 +80,20 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
         uint88 scale;
     }
 
+    /// @dev `bought` is the loan token bought since `start`; `peakDebt` the highest debt in the token a
+    /// top-up found since then.
+    struct TopUpWindow {
+        uint64 start;
+        uint192 bought;
+        uint256 peakDebt;
+    }
+
     mapping(address => Pool) private _pools;
-    uint16 public maxPegBps = 50;
+    uint16 public maxPegBps = 25;
     uint16 public bufferBps = 100;
+    /// @notice Top-up window per account and loan token; `start == 0` means never opened, and a window is
+    /// stale (treated as empty) once `start + TOP_UP_WINDOW` has passed.
+    mapping(address account => mapping(address token => TopUpWindow)) public topUpWindowOf;
     /// @dev keccak256(pool, payer, input token) of the one swap in flight; the callback pays for nothing else.
     bytes32 private _inFlight;
 
@@ -121,9 +144,25 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
 
     // ---- the account ----
 
+    function topUpCap(address account, address token) external returns (uint256 cap) {
+        (uint256 owed, uint256 idle) = _position(account, token);
+        if (owed > idle) cap = _cap(account, token, owed, idle);
+    }
+
     function shortfall(address account, address token) external returns (uint256 gap, uint256 cap) {
-        (uint256 owed, uint256 held) = _position(account, token);
-        if (owed > held) (gap, cap) = (owed - held, _cap(owed - held));
+        (uint256 owed, uint256 idle) = _position(account, token);
+        if (owed <= idle) return (0, 0);
+        cap = _cap(account, token, owed, idle);
+        // For the reader only, nothing on chain depends on it: what the box's vault deposits leave uncovered.
+        // A vault that cannot be read fails the whole read (no quiet zero: a read starved of gas must not
+        // report the whole debt as the gap); `topUpCap` still answers then.
+        uint256 held = idle;
+        bytes32[] memory ids = AtpBorrowRegistryV2(borrowRegistry).accountVaults(account);
+        for (uint256 i; i < ids.length; ++i) {
+            if (AtpBorrowRegistryV2(borrowRegistry).vault(ids[i]).token != token) continue;
+            held += IAtpBorrowLensV2(lens).vaultStatus(ids[i], account).assets;
+        }
+        if (owed > held) gap = owed - held;
     }
 
     function topUp(address token, uint256 amountOut, uint256 maxUsdtIn, uint256 deadline)
@@ -134,16 +173,22 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
         Pool memory p = _pool(token, deadline);
         address box = IAtpBorrowExecutorV2(executor).boxOf(msg.sender);
         if (box.code.length == 0) revert NoBox();
-        (uint256 owed, uint256 held) = _position(msg.sender, token);
-        if (owed <= held) revert NoShortfall(owed, held);
-        uint256 cap = _cap(owed - held);
-        if (amountOut == MAX) amountOut = cap;
+        (uint256 owed, uint256 idle) = _position(msg.sender, token);
+        if (owed <= idle) revert NoShortfall(owed, idle);
         if (amountOut == 0) revert ZeroAmount();
+        uint256 cap = _withBuffer(owed - idle);
         if (amountOut > cap) revert AboveShortfall(amountOut, cap);
-        (usdtIn, tokenOut) = _swap(p, usdt, _usdtScale, token, p.scale, box, -int256(amountOut));
+        // Counted against the window before any token moves.
+        TopUpWindow memory w = _window(msg.sender, token, owed);
+        uint256 bought = w.bought + amountOut;
+        cap = _withBuffer(w.peakDebt);
+        if (bought > cap) revert WindowExceeded(bought, cap);
+        w.bought = SafeCast.toUint192(bought);
+        topUpWindowOf[msg.sender][token] = w;
+        (usdtIn, tokenOut) = _swap(p, usdt, _usdtScale, token, p.scale, box, -SafeCast.toInt256(amountOut));
         if (tokenOut != amountOut) revert InexactOutput(tokenOut, amountOut);
         if (usdtIn > maxUsdtIn) revert Slippage(usdtIn, maxUsdtIn);
-        emit ToppedUp(msg.sender, token, usdtIn, tokenOut, owed - held);
+        emit ToppedUp(msg.sender, token, usdtIn, tokenOut, owed - idle);
     }
 
     function cashOut(address token, uint256 amountIn, uint256 minUsdtOut, uint256 deadline)
@@ -158,7 +203,8 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
         }
         if (amountIn == MAX) amountIn = IERC20(token).balanceOf(msg.sender);
         if (amountIn == 0) revert ZeroAmount();
-        (tokenIn, usdtOut) = _swap(p, token, p.scale, usdt, _usdtScale, msg.sender, int256(amountIn));
+        (tokenIn, usdtOut) =
+            _swap(p, token, p.scale, usdt, _usdtScale, msg.sender, SafeCast.toInt256(amountIn));
         if (tokenIn > amountIn) revert Overcharged(tokenIn, amountIn);
         if (usdtOut < minUsdtOut) revert Slippage(usdtOut, minUsdtOut);
         emit CashedOut(msg.sender, token, tokenIn, usdtOut);
@@ -176,26 +222,37 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
 
     // ---- internals ----
 
-    /// @dev After accrual: the account's debt in `token`, and what its box holds against it (idle loan token
-    /// plus its deposits in every vault of that token).
-    function _position(address account, address token) private returns (uint256 owed, uint256 held) {
+    /// @dev After accrual: the account's debt in `token` and the loan token idle in its box. No vault is read.
+    function _position(address account, address token) private returns (uint256 owed, uint256 idle) {
         IAtpBorrowLensV2 l = IAtpBorrowLensV2(lens);
         l.syncToken(account, token);
-        owed = l.tokenDebt(account, token);
-        held = l.idleOf(account, token);
-        bytes32[] memory ids = AtpBorrowRegistryV2(borrowRegistry).accountVaults(account);
-        for (uint256 i; i < ids.length; ++i) {
-            if (AtpBorrowRegistryV2(borrowRegistry).vault(ids[i]).token != token) continue;
-            // A vault that cannot even be read counts as empty: its money cannot repay anything now, and
-            // the cap can only grow up to the debt itself.
-            try l.vaultStatus(ids[i], account) returns (R.VaultStatus memory s) {
-                held += s.assets;
-            } catch { }
-        }
+        (owed, idle) = (l.tokenDebt(account, token), l.idleOf(account, token));
     }
 
-    function _cap(uint256 gap) private view returns (uint256) {
-        return gap + Math.mulDiv(gap, bufferBps, 10_000, Math.Rounding.Ceil);
+    /// @dev The account's window in `token` as of now, with a debt of `owed` counted into its peak. An
+    /// expired (or never opened) window starts afresh at this block.
+    function _window(address account, address token, uint256 owed)
+        private
+        view
+        returns (TopUpWindow memory w)
+    {
+        w = topUpWindowOf[account][token];
+        if (w.start == 0 || block.timestamp >= uint256(w.start) + TOP_UP_WINDOW) {
+            (w.start, w.bought, w.peakDebt) = (SafeCast.toUint64(block.timestamp), 0, 0);
+        }
+        if (owed > w.peakDebt) w.peakDebt = owed;
+    }
+
+    /// @dev The most a top-up may buy now: the debt less the idle loan token, plus the buffer, and no more
+    /// than the window has left.
+    function _cap(address account, address token, uint256 owed, uint256 idle) private view returns (uint256) {
+        TopUpWindow memory w = _window(account, token, owed);
+        uint256 allowance = _withBuffer(w.peakDebt);
+        return Math.min(_withBuffer(owed - idle), allowance > w.bought ? allowance - w.bought : 0);
+    }
+
+    function _withBuffer(uint256 amount) private view returns (uint256) {
+        return amount + Math.mulDiv(amount, bufferBps, 10_000, Math.Rounding.Ceil);
     }
 
     function _pool(address token, uint256 deadline) private view returns (Pool memory p) {
@@ -239,7 +296,8 @@ contract AtpBorrowCashSwapper is IAtpBorrowCashSwapper, ReentrancyGuard {
 
     function _scale(address token) private view returns (uint256) {
         uint8 decimals = IERC20Metadata(token).decimals();
-        if (decimals > 18) revert BadParameter();
+        // Below 6 decimals the rounding allowance (ROUNDING units of the coarser token) is real money.
+        if (decimals < 6 || decimals > 18) revert BadParameter();
         return 10 ** (18 - decimals);
     }
 }

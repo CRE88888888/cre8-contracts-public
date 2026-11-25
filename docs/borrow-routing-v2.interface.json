@@ -9,7 +9,8 @@
     "v2.0-draft4 (independent review fixes, 2026-11-24): (1) NEW executor.executeRescue(account, vaultId, deadline) + event Rescued: with no debt in the vault's token, the box's receipts go to the account as they are; owner only, must NOT be in a session key's allowed selectors. (2) NEW lens.idleOf(account, token): loan token sitting directly in the strategy box; add it to vault holdings for the net value; repayments use it first, releases pay it out. (3) executeDeleverage: the health line is the only trigger (vault utilization > 95% no longer lets a stranger act; VaultStatus.shouldExit is informational, the backend exits with executeReduce / executeSwitchVault); when the box holds less than the amount due it repays what it holds but always leaves at least 1.01 x the venue's minimum loan. (4) executeSwitchVault now requires the destination to pass the deposit gates (utilization <= 90% where readable, enrollment not paused). (5) routeLines moved from the registry to the lens; registry error ForeignDebt added (an account with Venus debt this registry did not open cannot open a Venus route); executor views extension() and boxImplementation() added. (6) collateral-out check tightened: within budget, OR (budget before != 0 AND debt/budget not higher AND health factor not lower than before). (7) repay-only paths and debt-free collateral withdrawals read no oracle. (8) StrategyBox ERC-1271: only isValidSignature(bytes32,bytes) with the EIP-191 hash (verified on mainnet: the only form Lista uses). (9) the executor's code is split into the executor and AtpBorrowExecutorV2Extension (delegatecall): address, ABI and session-key target are unchanged. (10) at most one call into a Lista vault per action; ERC4626 vaults need >= 1,000 tokens of assets to be listed.",
     "v2.0-draft5 (re-review fixes, 2026-11-24; additive ABI only, every draft4 call is unchanged): (1) NEW lens.minDebt(routeId) = minLoan x 1.01 (0 on Venus): the smallest debt a partial repayment may leave. A Lista position whose debt is at or below it can only be repaid in full, so a third-party executeDeleverage (box money only) repays nothing of it when the box holds less than the debt: the backend must top it up (executeReduce with maxCashIn) or close it. (2) NEW read-only executor.venusComptroller() / moolah() and lens.venusComptroller() / moolah() (post-deploy verification). (3) an asset whose tier was removed (Tier.NONE, budget 0) can be wound down in steps: collateral may leave whenever the health factor does not drop (draft4 required full repayment first). (4) ForeignDebt now means: the account owes the loan token on Venus and holds no v2 Venus position in that token (interest left after the principal was repaid no longer trips it; such a position stays in accountRoutes until the token's debt is zero). (5) executeRescue: the contract cannot tell the owner from a session key (it checks msg.sender == account only); keeping it owner-only is a backend / paymaster rule.",
     "v2.0-draft6 (third review fixes, 2026-11-25; NO ABI change, two behaviours change; NOT deployed yet: chain 97 still runs the draft5 code): (1) a Venus -> Venus executeMigrate is now refused with ForeignDebt like any open (in draft5 that path always passed the check: the new route was put into the account's list before the check looked at the list). The account's own debt is unaffected. (2) lens.routeDebt with no principal left in the loan token on Venus (interest that outlived it): the whole debt is attributed to ONE route, the account's first Venus position in that token in accountRoutes; every other route of the token reads 0, and so does every route when the account holds no v2 Venus position in the token (foreign debt). draft5 returned the whole debt for every Venus route of the token. executeReduce(repayAmount = MAX) repays routeDebt, so on a route that reads 0 it repays nothing. For the account's debt in a token use lens.tokenDebt(account, token), never a sum of routeDebt (correct on draft5 and draft6). (3) mainnet verify() requires ATP_EXECUTOR and holds it against deployments/mainnet.json.",
-    "cash-swapper add-on (2026-11-25; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; NOT deployed on any chain): NEW separate contract AtpBorrowCashSwapper, bound to one routing executor. topUp(token, amountOut, maxUsdtIn, deadline): the calling account's USDT -> the loan token it owes, delivered into its own strategy box, capped at what the box is short of the debt (+ buffer). cashOut(token, amountIn, minUsdtOut, deadline): the calling account's loan token -> USDT, to the account itself. shortfall(account, token) (eth_call) -> (gap, cap). Fixed peg bound instead of an oracle. See `cashSwapper` and docs §17."
+    "cash-swapper add-on (2026-11-25; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; NOT deployed on any chain): NEW separate contract AtpBorrowCashSwapper, bound to one routing executor. topUp(token, amountOut, maxUsdtIn, deadline): the calling account's USDT -> the loan token it owes, delivered into its own strategy box, capped at what the box is short of the debt (+ buffer). cashOut(token, amountIn, minUsdtOut, deadline): the calling account's loan token -> USDT, to the account itself. shortfall(account, token) (eth_call) -> (gap, cap). Fixed peg bound instead of an oracle. See `cashSwapper` and docs §17.",
+    "cash-swapper fourth-review fixes (2026-11-25, docs §18; the v2 ABI and behaviour are unchanged, interfaceVersion stays v2.0-draft6; still NOT deployed on any chain; the swapper's ABI and behaviour CHANGED): (1) the top-up cap reads no vault: per call amountOut <= (tokenDebt - idle in the box) * (1 + bufferBps); a vault that cannot be read, is read with too little gas, or reads full but cannot pay no longer changes it. (2) NEW 24-hour window per (account, token): purchases <= the highest debt a topUp of the window saw * (1 + bufferBps), error WindowExceeded(bought, cap); NEW getters TOP_UP_WINDOW, topUpWindowOf(account, token), topUpCap(account, token). (3) topUp no longer accepts type(uint256).max (AboveShortfall): the backend passes min(gap * (1 + bufferBps), cap). (4) shortfall: gap is unchanged in meaning but the call now reverts when a vault cannot be read; cap is the enforced limit (no vault read, window included). (5) maxPegBps default 50 -> 25. (6) NoShortfall(debt, idle): the second field is the idle loan token only; ToppedUp's last field is tokenDebt - idle. (7) amounts >= 2^255 revert (SafeCast); loan tokens need 6-18 decimals. (8) mainnet verify() reads the routing executor from deployments/mainnet.json only."
   ],
   "status": "deployed on BSC testnet (chain 97) on 2026-11-25 with the draft5 code (commit 1888572), see `deployments`; the draft6 fixes are in the repository only (a redeploy of the whole v2 set is needed: the registry pins its executor); not deployed on chain 56",
   "humanDoc": "docs/borrow-routing-v2.zh-TW.md",
@@ -236,20 +237,24 @@
     "smallPositions": "if routeDebt <= minDebt(routeId) and vaultStatus(vaultId).assets + idleOf(account, token) < routeDebt, nobody but the account can repay it (executeDeleverage reverts VaultShortfall): the backend sends executeReduce(account, routeId, vaultId, MAX, withdrawAmount, maxCashIn, deadline) with the account's own loan token for the gap, or closes the position"
   },
   "cashSwapper": {
-    "status": "in the repository only; not deployed on chain 97 or 56. One swapper per routing executor (a redeployed executor needs a new swapper).",
+    "status": "in the repository only; not deployed on chain 97 or 56. One swapper per routing executor (a redeployed executor needs a new swapper). Changed after the fourth review (2026-11-25, docs §18): top-up cap without vault reads, a 24-hour top-up window, no MAX for topUp, default maxPegBps 25.",
     "humanDoc": "docs/borrow-routing-v2.zh-TW.md §17",
     "source": "src/atp/borrow/v2/AtpBorrowCashSwapper.sol, IAtpBorrowCashSwapper.sol",
     "why": "executeReduce / executeMigrate / executeDeleverage repay from the strategy box (idle loan token, then the vault) and from the account's own loan token (maxCashIn). For USDC / USD1 / U nothing else turns the account's USDT into the token it owes, so a position whose vault grew slower than its debt cannot be closed (VaultShortfall). The mirror case: loan token left in the account after a close cannot become USDT.",
     "caller": "the account itself (msg.sender). No account argument and no receiver argument on any function.",
-    "units": "raw token units; type(uint256).max = all (topUp: the cap; cashOut: the whole balance)",
+    "units": "raw token units; type(uint256).max = all for cashOut only (the whole balance). topUp takes an explicit amount: MAX reverts AboveShortfall",
     "actions": {
-      "topUp": "topUp(address token, uint256 amountOut, uint256 maxUsdtIn, uint256 deadline) returns (usdtIn, tokenOut): buys exactly amountOut of token with the caller's USDT; the pool delivers it to executor.boxOf(caller). Reverts NoBox (no strategy box yet), NoShortfall(debt, held) (box already covers the debt), AboveShortfall(amount, cap), PegExceeded, Slippage (usdtIn > maxUsdtIn), InexactOutput (the pool did not deliver exactly amountOut), PoolNotSet",
-      "cashOut": "cashOut(address token, uint256 amountIn, uint256 minUsdtOut, uint256 deadline) returns (tokenIn, usdtOut): sells the caller's own token for USDT paid to the caller. Reverts StrategyAsset(token) when the caller's strategy ever traded token (it is a holding), PegExceeded, Slippage (usdtOut < minUsdtOut), Overcharged (the pool took more than amountIn), ZeroAmount, PoolNotSet",
-      "shortfall": "shortfall(address account, address token) returns (gap, cap) - use eth_call (it accrues). gap = lens.tokenDebt(account, token) - lens.idleOf(account, token) - sum(lens.vaultStatus(vaultId, account).assets over registry.accountVaults(account) whose token is `token`), floored at 0. cap = gap + ceil(gap * bufferBps / 10000): the most a topUp may buy now. A vault whose status cannot be read counts as 0."
+      "topUp": "topUp(address token, uint256 amountOut, uint256 maxUsdtIn, uint256 deadline) returns (usdtIn, tokenOut): buys exactly amountOut of token with the caller's USDT; the pool delivers it to executor.boxOf(caller). Two limits, neither reads a vault: (1) amountOut <= (tokenDebt - idle in the box) * (1 + bufferBps/10000), else AboveShortfall(amount, cap); NoShortfall(debt, idle) when the idle loan token already covers the debt. (2) the window's purchases including this one <= the highest debt a top-up of the window saw * (1 + bufferBps/10000), else WindowExceeded(bought, cap). Also reverts NoBox (no strategy box yet), PegExceeded, Slippage (usdtIn > maxUsdtIn), InexactOutput (the pool did not deliver exactly amountOut), PoolNotSet, ZeroAmount",
+      "cashOut": "cashOut(address token, uint256 amountIn, uint256 minUsdtOut, uint256 deadline) returns (tokenIn, usdtOut): sells the caller's own token for USDT paid to the caller. Not limited by the window and not counted in it. Reverts StrategyAsset(token) when the caller's strategy ever traded token (it is a holding), PegExceeded, Slippage (usdtOut < minUsdtOut), Overcharged (the pool took more than amountIn), ZeroAmount, PoolNotSet, SafeCastOverflowedUintToInt (amountIn >= 2^255 other than MAX)",
+      "shortfall": "shortfall(address account, address token) returns (gap, cap) - use eth_call (it accrues). gap = what the backend normally buys = lens.tokenDebt(account, token) - lens.idleOf(account, token) - sum(lens.vaultStatus(vaultId, account).assets over registry.accountVaults(account) whose token is `token`), floored at 0. Information only, nothing on chain uses it: a vault that reads full but cannot pay still counts (a repayment can then need more than gap, up to cap), and the call REVERTS when a vault of the token cannot be read or the eth_call runs out of gas (no quiet zero) - use topUpCap then. cap = as topUpCap. gap > cap: the window is used up.",
+      "topUpCap": "topUpCap(address account, address token) returns (cap) - use eth_call (it accrues). The most a topUp may buy now: min((tokenDebt - idle) * (1 + bufferBps/10000), window allowance left); 0 when nothing is owed beyond the idle loan token or the window is used up. Reads no vault (about 0.15M gas).",
+      "topUpWindowOf": "topUpWindowOf(address account, address token) view returns (uint64 start, uint192 bought, uint256 peakDebt): the account's window in the token. start = when it opened (0 = never); it is stale once block.timestamp >= start + TOP_UP_WINDOW (86400) and the next topUp opens a fresh one; bought = loan token bought since start; peakDebt = the highest tokenDebt a topUp found since start."
     },
     "limits": {
-      "maxPegBps": "default 50, owner-set, hard ceiling MAX_PEG_BPS = 100. Every swap must satisfy paid <= received * (1 + maxPegBps/10000) + 3 raw units, both tokens counted at 1:1 after scaling to 18 decimals, measured on real balance changes (caller, destination)",
-      "bufferBps": "default 100, owner-set, hard ceiling MAX_BUFFER_BPS = 500",
+      "maxPegBps": "default 25 (was 50 before the fourth review), owner-set, hard ceiling MAX_PEG_BPS = 100. Every swap must satisfy paid <= received * (1 + maxPegBps/10000) + 3 raw units of the coarser token, both tokens counted at 1:1 after scaling to 18 decimals, measured on real balance changes (caller, destination)",
+      "bufferBps": "default 100, owner-set, hard ceiling MAX_BUFFER_BPS = 500. Applies to the per-call cap and to the window allowance",
+      "topUpWindow": "TOP_UP_WINDOW = 86400 s, fixed window per (account, token), the same semantics as AtpExecutor.BUY_WINDOW: it opens with the first topUp and resets with the first topUp at or after start + 86400. Allowance = highest debt a topUp of the window saw * (1 + bufferBps/10000); borrowing more inside the window adds only the new debt, repaying does not lower it",
+      "decimals": "the loan token and USDT must have 6 to 18 decimals (setPool / constructor revert BadParameter otherwise)",
       "poolOf(token)": "the one allowlisted USDT/token PancakeSwap V3 pool; zero = both actions are off for the token (owner: setPool(token, 0))",
       "owner": "AtpRegistry.owner() (the same owner as the routing registry; no owner of its own)"
     },
@@ -264,17 +269,21 @@
     },
     "paymaster": "sponsor UserOps whose call target is the cash swapper with selector topUp or cashOut",
     "backend": {
-      "beforeClosingOrRepayingANonUsdtRoute": "eth_call shortfall(account, token). gap == 0: nothing to do. gap > 0: make sure the account holds about cap * 1.003 USDT (sell assets through the core as for a USDT route), send topUp(token, MAX, maxUsdtIn = cap * 1003 / 1000, deadline), then the usual executeReduce / executeMigrate (maxCashIn may be 0).",
-      "listaSmallPositions": "routeDebt <= minDebt and box money < routeDebt (see lista.smallPositions): topUp, then executeReduce(MAX, ...).",
-      "beforeAThirdPartyDeleverageIsNeeded": "a position near its deleverage line with gap > 0: topUp early so executeDeleverage finds enough in the box.",
+      "beforeClosingOrRepayingANonUsdtRoute": "eth_call shortfall(account, token) -> (gap, cap). gap == 0: nothing to do. gap > 0: amountOut = min(gap + ceil(gap * bufferBps / 10000), cap) (the buffer covers the interest until the repayment lands; the contract has no 'MAX = the cap' any more), make sure the account holds about amountOut * 1.003 USDT (sell assets through the core as for a USDT route), send topUp(token, amountOut, maxUsdtIn = amountOut * 1003 / 1000, deadline), then the usual executeReduce / executeMigrate (maxCashIn may be 0).",
+      "whenTheVaultCannotPayOrCannotBeRead": "executeReduce still simulates VaultShortfall after topping up gap (the vault reads full but does not pay), or shortfall itself reverts (a vault cannot be read): eth_call topUpCap(account, token) and buy what this repayment needs minus the idle loan token, at most cap (a full close: cap). Then the same executeReduce: the box's idle loan token pays first and a vault that refuses does not block the close; its holding stays in the box until executeRelease, then cashOut.",
+      "whenTheWindowIsUsedUp": "gap > cap, or topUp reverts WindowExceeded: the token's 24-hour allowance is used up. Retry at topUpWindowOf(account, token).start + 86400, or the account owner sends the loan token to the account and repays with executeReduce's maxCashIn.",
+      "listaSmallPositions": "routeDebt <= minDebt and box money < routeDebt (see lista.smallPositions): topUp as above, then executeReduce(MAX, ...).",
+      "beforeAThirdPartyDeleverageIsNeeded": "a position near its deleverage line whose box cannot pay (gap > 0, or its vault cannot pay): topUp early (lens.deleverageAmount is what the keeper will want) so executeDeleverage finds enough idle loan token in the box.",
       "afterAClose": "loan token in the account (vault yield beyond the debt, the unused part of the buffer): cashOut(token, MAX, minUsdtOut = balance * 997 / 1000, deadline). Until then count it at 1 USD in the net value.",
-      "oneUserOpOrTwo": "Venus / Aave vault holdings: topUp is about 0.4M gas and can share a UserOp with executeReduce. A box holding a Lista vault makes topUp read the vault's live total (about 5.9M gas for the Lista USD1 vault): send topUp and executeReduce as two UserOps (the 1% buffer covers the interest in between) and always eth_estimateGas.",
-      "events": "ToppedUp(account, token, usdtIn, tokenOut, shortfall), CashedOut(account, token, tokenIn, usdtOut)"
+      "gas": "topUp reads no vault: 0.32-0.38M gas measured on a mainnet fork whatever the box holds (a 0.475M gas limit completes; budget 0.6M). It can share a UserOp with executeReduce, also for a Lista vault (the close itself is about 6M). shortfall is an eth_call that reads the vaults: about 5.6-5.9M gas with a Lista vault in the box - do not cap that eth_call below 10M (short of gas it reverts, it never returns a wrong number). topUpCap: about 0.15M. Always eth_estimateGas before sending.",
+      "events": "ToppedUp(account, token, usdtIn, tokenOut, need) (need = tokenDebt - idle in the box before the swap), CashedOut(account, token, tokenIn, usdtOut)"
     },
-    "worstCase": "A leaked session key can convert the account's USDT into a loan token it owes, into its own strategy box, up to (token debt - idle in the box) * (1 + bufferBps) even if every vault reading is manipulated or unreadable, each swap inside the peg bound; and convert the account's USDC / USD1 / U into USDT in the account. Nothing leaves the account / its box. A second topUp reverts NoShortfall until the debt is repaid and borrowed again. A wrongly allowlisted pool cannot take approved funds: the callback pays only the pool, payer and token of the swap in flight, and that swap must still clear the peg bound.",
+    "worstCase": "A leaked session key can convert the account's USDT into a loan token it owes, into its own strategy box, and the account's USDC / USD1 / U into USDT in the account; nothing leaves the account / its box, every swap is inside the peg bound. The damage it can do is wear by round trips (topUp the whole debt, executeReduce, cashOut, executeOpen again). Bound per loan token and per 24-hour window: one lap, at most 2 * maxPegBps * (1 + bufferBps) of the window's highest debt in that token = 0.505% at the defaults (2.1% with both hard ceilings). Measured on a mainnet fork (USD1, block 135531000): 2.02 bps of the debt per lap on an unmanipulated pool; 50.3-50.4 bps with both legs sandwiched to the edge of the bound (before the fix: 88.8 bps per lap, laps without limit). Edges: the window is fixed, so a window that was already open can be finished and the next one used right after (two laps in a row once, then one per 24 hours); each of USDC / USD1 / U has its own window, so rotating the same borrowing capacity through the three tokens gives up to three laps a day (each re-borrow passes executeOpen's gates; none while the registry is paused); tokenDebt includes Venus debt in the token that routing v2 did not open. A wrongly allowlisted pool cannot take approved funds: the callback pays only the pool, payer and token of the swap in flight, and that swap must still clear the peg bound.",
     "knownLimits": [
-      "a vault that reads fine but cannot pay out (e.g. a Venus supply market at 100% utilization) still counts in the cap: shortfall can read 0 while executeReduce cannot reach the vault's money",
-      "depeg beyond maxPegBps blocks the affected direction (USDT cheap or loan token dear: topUp; loan token cheap: cashOut)",
+      "one window per loan token, not per account: up to three laps a day by rotating the debt through USDC / USD1 / U (see worstCase)",
+      "gap counts a vault that reads full but cannot pay: the backend must fall back to topUpCap when the repayment still fails (backend.whenTheVaultCannotPayOrCannotBeRead)",
+      "depeg beyond maxPegBps blocks the affected direction (USDT cheap or loan token dear: topUp; loan token cheap: cashOut). The contract does nothing by itself: the owner raises maxPegBps (up to 100) or the account owner repays with its own loan token (runbook in docs §17)",
+      "after a window bought the whole debt, a second full top-up the same day has to wait for the window (or for the account owner's own loan token)",
       "cashOut of 1-2 raw units may return 0"
     ],
     "mainnetPools2026_11_25": {
@@ -283,9 +292,11 @@
       "USD1": "0x9c4Ee895e4f6Ce07Ada631C508D1306Db7502cCE",
       "U": "0xA0909f81785f87f3e79309F0E73A7d82208094E4",
       "measuredAtBlock": 135520469,
-      "costVsParityBps": "topUp pays / cashOut returns, fee included, USDT about 0.10% below the three tokens at that block: 1,000: USDC +11.51/+9.50, USD1 +10.70/+8.56, U +11.76/+9.75; 10,000: USDC +11.52/+9.48, USD1 +11.38/+7.92, U +11.79/+9.71; 50,000: USDC +11.60/+9.41, USD1 +14.93/+4.89, U +11.95/+9.55"
+      "costVsParityBps": "topUp pays / cashOut returns, fee included, USDT about 0.10% below the three tokens at that block: 1,000: USDC +11.51/+9.50, USD1 +10.70/+8.56, U +11.76/+9.75; 10,000: USDC +11.52/+9.48, USD1 +11.38/+7.92, U +11.79/+9.71; 50,000: USDC +11.60/+9.41, USD1 +14.93/+4.89, U +11.95/+9.55",
+      "remeasuredAtBlock135531000": "after the fourth-review fixes: topUp pays, fee included, 1,000 / 10,000 / 50,000: USDC +13.77 / +13.78 / +13.86 bps, USD1 +11.85 / +12.56 / +16.32 bps, U +11.77 / +11.80 / +11.96 bps (all inside the 25 bps bound)"
     },
-    "testnet97": "not deployed. script/testnet/DeployBorrowCashSwapperTestnet.s.sol reads borrowV2.executor and borrowV2.loanTokens from deployments/testnet-97.json, creates PancakeSwap V3 0.01% pools USDT/USDC, USDT/USD1, USDT/U at 1:1 with 1,000,000 a side and allowlists them; rehearsed on a local fork (19 transactions, docs §17)"
+    "testnet97": "not deployed. script/testnet/DeployBorrowCashSwapperTestnet.s.sol reads borrowV2.executor and borrowV2.loanTokens from deployments/testnet-97.json, creates PancakeSwap V3 0.01% pools USDT/USDC, USDT/USD1, USDT/U at 1:1 with 1,000,000 a side and allowlists them; rehearsed on a local fork (19 transactions, 18,557,526 gas, 0.002784 tBNB at 0.15 gwei, docs §17). The expected swapper address changed with the fourth-review fixes: 0x99811a1115B36F8310deaDAda818cAE685360798 (bound to the pending executor 0xeddd943d855a5F5A2880BBFD411449A65182600F)",
+    "mainnetVerify": "script/DeployBorrowCashSwapperMainnet.s.sol verify(swapper) takes the routing executor from deployments/mainnet.json (borrowV2.executor, written after routing v2 is on mainnet and verified) and from nowhere else; it fails with a message while that field is missing. ROUTING_EXECUTOR is only read by run() (the deployment)."
   },
   "liveVenueNotes2026_11_24": [
     "Venus bStock supply caps are small: vNVDAB 1,500 NVDAB cap with 1,499.2 used (full), vTSLAB 236 cap / 34.9 used, vSPCXB 2,000 / 264: check comptroller.supplyCaps headroom before choosing a Venus route",
@@ -3895,6 +3906,19 @@
       },
       {
         "type": "function",
+        "name": "TOP_UP_WINDOW",
+        "inputs": [],
+        "outputs": [
+          {
+            "name": "",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
         "name": "borrowRegistry",
         "inputs": [],
         "outputs": [
@@ -4135,6 +4159,64 @@
       },
       {
         "type": "function",
+        "name": "topUpCap",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "cap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable"
+      },
+      {
+        "type": "function",
+        "name": "topUpWindowOf",
+        "inputs": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "start",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "bought",
+            "type": "uint192",
+            "internalType": "uint192"
+          },
+          {
+            "name": "peakDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ],
+        "stateMutability": "view"
+      },
+      {
+        "type": "function",
         "name": "usdt",
         "inputs": [],
         "outputs": [
@@ -4244,7 +4326,7 @@
             "internalType": "uint256"
           },
           {
-            "name": "shortfall",
+            "name": "need",
             "type": "uint256",
             "indexed": false,
             "internalType": "uint256"
@@ -4319,7 +4401,7 @@
             "internalType": "uint256"
           },
           {
-            "name": "held",
+            "name": "idle",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -4399,6 +4481,22 @@
         "type": "error",
         "name": "Unauthorized",
         "inputs": []
+      },
+      {
+        "type": "error",
+        "name": "WindowExceeded",
+        "inputs": [
+          {
+            "name": "bought",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cap",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       },
       {
         "type": "error",

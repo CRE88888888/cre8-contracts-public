@@ -29,8 +29,9 @@ contract CashSwapperTest is CashSwapperBase {
         assertEq(swapper.lens(), address(lens));
         assertEq(swapper.registry(), address(registry));
         assertEq(swapper.usdt(), address(usdt));
-        assertEq(swapper.maxPegBps(), 50);
+        assertEq(swapper.maxPegBps(), 25);
         assertEq(swapper.bufferBps(), 100);
+        assertEq(swapper.TOP_UP_WINDOW(), 1 days);
         assertEq(swapper.poolOf(address(usdc)), address(pool));
         vm.expectRevert(ISwapper.BadParameter.selector);
         new AtpBorrowCashSwapper(address(0xDEAD));
@@ -115,18 +116,20 @@ contract CashSwapperTest is CashSwapperBase {
         uint256 held = _held(K_VC);
         assertEq(gap, owed - held, "gap = debt - vault holding (nothing idle yet)");
         assertApproxEqRel(gap, 24.6e18, 0.02e18, "about 180 days of 2.5% on 2,000");
-        assertEq(cap, gap + (gap + 99) / 100, "1% buffer, rounded up");
+        assertEq(cap, owed + (owed + 99) / 100, "the most a top-up may buy: the debt + 1%, no vault counted");
+        // The backend buys the gap plus the buffer, not the cap.
+        uint256 want = gap + (gap + 99) / 100;
 
         uint256 usdtBefore = usdt.balanceOf(address(this));
         uint256 poolUsdt = usdt.balanceOf(address(pool));
         vm.expectEmit(true, true, false, false, address(swapper));
         emit ISwapper.ToppedUp(address(this), address(usdc), 0, 0, 0);
-        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
-        assertEq(tokenOut, cap);
-        assertEq(lens.idleOf(address(this), address(usdc)), cap, "the box got exactly what was bought");
+        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), want, MAX, block.timestamp);
+        assertEq(tokenOut, want);
+        assertEq(lens.idleOf(address(this), address(usdc)), want, "the box got exactly what was bought");
         assertEq(usdtBefore - usdt.balanceOf(address(this)), usdtIn, "paid by the account");
         assertEq(usdt.balanceOf(address(pool)) - poolUsdt, usdtIn, "straight to the pool");
-        assertApproxEqRel(usdtIn, cap, 0.00011e18, "parity plus the pool's 0.01% fee");
+        assertApproxEqRel(usdtIn, want, 0.00011e18, "parity plus the pool's 0.01% fee");
         assertEq(usdc.balanceOf(address(this)), 0, "nothing lands in the account");
         _swapperHoldsNothing();
         (gap,) = _gap();
@@ -137,7 +140,7 @@ contract CashSwapperTest is CashSwapperBase {
         assertEq(lens.tokenDebt(address(this), address(usdc)), 0);
         assertEq(nvda.balanceOf(address(this)), 1_000e18, "collateral back");
         uint256 leftover = usdc.balanceOf(address(this));
-        assertApproxEqAbs(leftover, cap - (owed - held), 1e11, "what the top-up bought beyond the gap");
+        assertApproxEqAbs(leftover, want - (owed - held), 1e11, "what the top-up bought beyond the gap");
         assertEq(lens.idleOf(address(this), address(usdc)), 0);
 
         usdtBefore = usdt.balanceOf(address(this));
@@ -153,38 +156,43 @@ contract CashSwapperTest is CashSwapperBase {
         _noResidue();
     }
 
-    function test_topUp_capIsTheShortfallPlusBuffer() public {
+    function test_topUp_capIsTheDebtLessIdlePlusBuffer_noVaultCounted() public {
         _openNegativeCarry(2_000e18);
-        // Opened this block: the vault covers the debt (to the vToken's rounding), nothing to top up.
-        skip(1 hours);
-        (uint256 gap, uint256 cap) = _gap();
-        assertGt(gap, 0);
         skip(90 days);
-        (gap, cap) = _gap();
+        (uint256 gap, uint256 cap) = _gap();
+        uint256 owed = lens.tokenDebt(address(this), address(usdc));
+        assertGt(gap, 0);
+        assertLt(gap, owed / 50, "the vault holds nearly all of the debt");
+        assertEq(cap, owed + (owed + 99) / 100, "the vault's deposit does not shrink the cap");
         vm.expectRevert(abi.encodeWithSelector(ISwapper.AboveShortfall.selector, cap + 1, cap));
         swapper.topUp(address(usdc), cap + 1, MAX, block.timestamp);
+        // No "all" for a top-up: the caller names what it buys.
+        vm.expectRevert(abi.encodeWithSelector(ISwapper.AboveShortfall.selector, MAX, cap));
+        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
         vm.expectRevert(ISwapper.ZeroAmount.selector);
         swapper.topUp(address(usdc), 0, MAX, block.timestamp);
-        // A part of it, then the rest: the cap follows what is already in the box.
+        // A part of it, then the rest: both numbers follow what is already idle in the box.
+        uint256 snapshot = vm.snapshotState();
         swapper.topUp(address(usdc), gap / 2, MAX, block.timestamp);
         (uint256 gap2, uint256 cap2) = _gap();
         assertEq(gap2, gap - gap / 2);
+        assertEq(cap2, _withBuffer(owed - gap / 2));
         vm.expectRevert(abi.encodeWithSelector(ISwapper.AboveShortfall.selector, cap, cap2));
         swapper.topUp(address(usdc), cap, MAX, block.timestamp);
         swapper.topUp(address(usdc), cap2, MAX, block.timestamp);
-        // Covered (by the buffer too): refused until the debt grows past the box again.
-        uint256 owed = lens.tokenDebt(address(this), address(usdc));
-        uint256 held = _held(K_VC) + lens.idleOf(address(this), address(usdc));
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.NoShortfall.selector, owed, held));
+        // The idle loan token covers the debt (and the buffer): refused, whatever the vault holds.
+        uint256 idle = lens.idleOf(address(this), address(usdc));
+        assertEq(idle, gap / 2 + cap2);
+        vm.expectRevert(abi.encodeWithSelector(ISwapper.NoShortfall.selector, owed, idle));
         swapper.topUp(address(usdc), 1, MAX, block.timestamp);
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.NoShortfall.selector, owed, held));
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
-        // Without a buffer the cap is the gap itself.
-        swapper.setLimits(50, 0);
-        skip(30 days);
         (gap, cap) = _gap();
-        assertGt(gap, 0);
-        assertEq(cap, gap);
+        assertEq(gap + cap, 0, "covered: nothing to buy, nothing may be bought");
+        // Without a buffer the cap is the debt less the idle loan token itself.
+        vm.revertToState(snapshot);
+        swapper.setLimits(25, 0);
+        usdc.mint(_box(), 10e18);
+        (, cap) = _gap();
+        assertEq(cap, owed - 10e18);
     }
 
     function test_topUp_needsABox_aPool_andALiveDeadline() public {
@@ -239,7 +247,7 @@ contract CashSwapperTest is CashSwapperBase {
         vm.expectPartialRevert(ILens.VaultShortfall.selector);
         lend.executeDeleverage(address(this), V_NVDA_C, K_C, MAX);
         // ...until the account's top-up sits in the box.
-        (, uint256 bought) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        (, uint256 bought) = _topUpGap();
         uint256 owed = lens.tokenDebt(address(this), address(usdc));
         vm.prank(KEEPER);
         uint256 repaid = lend.executeDeleverage(address(this), V_NVDA_C, K_C, MAX);
@@ -253,37 +261,46 @@ contract CashSwapperTest is CashSwapperBase {
     function test_peg_topUpRefusedAboveTheBound_ownerCanTighten() public {
         _openNegativeCarry(2_000e18);
         skip(180 days);
-        _setPremium(60); // USDC at 1.006 USDT
+        uint256 want = _want();
+        _setPremium(30); // USDC at 1.003 USDT
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
-        _setPremium(40);
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
+        _setPremium(20);
         uint256 snapshot = vm.snapshotState();
-        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
-        assertApproxEqRel(usdtIn, tokenOut * 10_041 / 10_000, 0.0001e18, "0.40% premium + 0.01% fee");
-        assertLe(usdtIn, tokenOut + tokenOut * 50 / 10_000 + 3);
+        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), want, MAX, block.timestamp);
+        assertApproxEqRel(usdtIn, tokenOut * 10_021 / 10_000, 0.0001e18, "0.20% premium + 0.01% fee");
+        assertLe(usdtIn, tokenOut + tokenOut * 25 / 10_000 + 3);
         vm.revertToState(snapshot);
         // The caller's own bound is tighter than the contract's.
         vm.expectRevert(abi.encodeWithSelector(ISwapper.Slippage.selector, usdtIn, usdtIn - 1));
-        swapper.topUp(address(usdc), MAX, usdtIn - 1, block.timestamp);
-        swapper.setLimits(30, 100);
+        swapper.topUp(address(usdc), want, usdtIn - 1, block.timestamp);
+        swapper.setLimits(15, 100);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
+        // The owner may loosen it up to the hard ceiling (a depeg runbook step), no further.
+        swapper.setLimits(100, 100);
+        _setPremium(95);
+        vm.revertToState(vm.snapshotState());
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
+        _setPremium(105);
+        vm.expectPartialRevert(ISwapper.PegExceeded.selector);
+        swapper.topUp(address(usdc), 1e18, MAX, block.timestamp);
         // A cheap loan token is no reason to refuse buying it.
         _setPremium(-300);
-        (usdtIn, tokenOut) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        (usdtIn, tokenOut) = swapper.topUp(address(usdc), 1e18, MAX, block.timestamp);
         assertLt(usdtIn, tokenOut);
     }
 
     function test_peg_cashOutRefusedBelowTheBound() public {
         usdc.mint(address(this), 1_000e18);
-        _setPremium(-60); // USDC at 0.994 USDT: selling it would lose more than the bound
+        _setPremium(-30); // USDC at 0.997 USDT: selling it would lose more than the bound
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
         swapper.cashOut(address(usdc), 1_000e18, 0, block.timestamp);
-        _setPremium(-40);
+        _setPremium(-20);
         uint256 snapshot = vm.snapshotState();
         (uint256 tokenIn, uint256 usdtOut) = swapper.cashOut(address(usdc), 1_000e18, 0, block.timestamp);
         assertEq(tokenIn, 1_000e18);
-        assertApproxEqRel(usdtOut, 995.9e18, 0.0001e18, "0.40% discount + 0.01% fee");
+        assertApproxEqRel(usdtOut, 997.9e18, 0.0001e18, "0.20% discount + 0.01% fee");
         vm.revertToState(snapshot);
         vm.expectRevert(abi.encodeWithSelector(ISwapper.Slippage.selector, usdtOut, usdtOut + 1));
         swapper.cashOut(address(usdc), 1_000e18, usdtOut + 1, block.timestamp);
@@ -336,14 +353,15 @@ contract CashSwapperTest is CashSwapperBase {
 
         (uint256 gap, uint256 cap) = swapper.shortfall(address(this), address(usd6));
         assertApproxEqRel(gap, 24.6e6, 0.02e18);
-        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usd6), MAX, MAX, block.timestamp);
-        assertEq(tokenOut, cap);
-        assertApproxEqRel(usdtIn, cap * 1e12, 0.00011e18, "18-decimal USDT for 6-decimal token, at parity");
+        assertEq(cap, _withBuffer(lens.tokenDebt(address(this), address(usd6))));
+        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usd6), gap, MAX, block.timestamp);
+        assertEq(tokenOut, gap);
+        assertApproxEqRel(usdtIn, gap * 1e12, 0.00011e18, "18-decimal USDT for 6-decimal token, at parity");
         // 0.6% away from parity, in raw terms a factor of 1e12 either way: refused both ways.
         pool6.setPrice(usdtFirst ? uint256(1e6) * 10_000 / 10_060 : uint256(1e30) * 10_060 / 10_000);
         skip(30 days);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
-        swapper.topUp(address(usd6), MAX, MAX, block.timestamp);
+        swapper.topUp(address(usd6), 5e6, MAX, block.timestamp);
         usd6.mint(address(this), 500e6);
         pool6.setPrice(usdtFirst ? uint256(1e6) * 10_000 / 9_940 : uint256(1e30) * 9_940 / 10_000);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
@@ -352,6 +370,23 @@ contract CashSwapperTest is CashSwapperBase {
         (, uint256 usdtOut) = swapper.cashOut(address(usd6), 500e6, 0, block.timestamp);
         assertApproxEqRel(usdtOut, 500e18, 0.00011e18);
         assertEq(usd6.balanceOf(address(swapper)), 0);
+    }
+
+    /// Fourth review I-2: the rounding allowance is three raw units of the coarser token, which is real
+    /// money below 6 decimals (0.03 USD at 2 decimals, 3 USD at 0): such a token cannot be listed, and the
+    /// contract cannot be built on such a USDT.
+    function test_setPool_refusesATokenBelow6Decimals() public {
+        TestnetToken usd5 = new TestnetToken("USD five", "USD5", 5, address(this));
+        credit.setLoanToken(address(usd5), true);
+        MockStablePool pool5 = new MockStablePool(address(usdt), address(usd5), 1e18);
+        vm.expectRevert(ISwapper.BadParameter.selector);
+        swapper.setPool(address(usd5), address(pool5));
+        TestnetToken usd6 = new TestnetToken("USD six", "USD6", 6, address(this));
+        credit.setLoanToken(address(usd6), true);
+        swapper.setPool(address(usd6), address(new MockStablePool(address(usdt), address(usd6), 1e18)));
+        vm.mockCall(address(usdt), abi.encodeWithSignature("decimals()"), abi.encode(uint8(5)));
+        vm.expectRevert(ISwapper.BadParameter.selector);
+        new AtpBorrowCashSwapper(address(lend));
     }
 
     function test_peg_dustTopUp_roundingDoesNotBlockIt() public {
@@ -376,7 +411,7 @@ contract CashSwapperTest is CashSwapperBase {
         credit.setPaused(true);
         atp.setGlobalPaused(true);
         registry.setPaused(address(this), true);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        _topUpGap();
         _reduce(V_NVDA_C, K_VC, MAX, MAX, 0);
         swapper.cashOut(address(usdc), MAX, 0, block.timestamp);
         assertEq(usdc.balanceOf(address(this)), 0);
@@ -400,42 +435,40 @@ contract CashSwapperTest is CashSwapperBase {
 
     // ---- vault readings ----
 
-    function test_cap_unreadableVaultCountsAsEmpty_worstCaseIsTheDebt() public {
+    /// Fourth review M-1: the limit of a top-up reads no vault, so a vault reading that fails (a broken
+    /// adapter, or a read starved of gas) changes nothing a top-up may do. The reader's `gap` does not turn
+    /// such a vault into a quiet zero either: `shortfall` fails, `topUpCap` still answers.
+    function test_cap_readsNoVault_anUnreadableVaultChangesNothingOnChain() public {
         _openNegativeCarry(2_000e18);
         skip(180 days);
-        (uint256 trueGap,) = _gap();
+        (, uint256 cap) = _gap();
         uint256 owed = lens.tokenDebt(address(this), address(usdc));
-        // The vault's status cannot be read (broken adapter, or a read starved of gas): it counts as empty.
+        assertEq(cap, owed + (owed + 99) / 100);
+        assertEq(swapper.topUpCap(address(this), address(usdc)), cap);
         vm.mockCallRevert(
             address(lens), abi.encodeCall(ILens.vaultStatus, (K_VC, address(this))), "unreadable"
         );
-        (uint256 gap, uint256 cap) = _gap();
-        assertEq(gap, owed, "the whole debt");
-        assertEq(cap, owed + (owed + 99) / 100);
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.AboveShortfall.selector, cap + 1, cap));
-        swapper.topUp(address(usdc), cap + 1, MAX, block.timestamp);
-        // The most that can be converted: the debt plus the buffer. It sits in the account's own box.
-        uint256 usdtBefore = usdt.balanceOf(address(this));
-        (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
-        assertEq(tokenOut, cap);
-        assertEq(lens.idleOf(address(this), address(usdc)), cap);
-        // Once is all: the box now holds more than the debt whatever the vault reads.
-        vm.expectPartialRevert(ISwapper.NoShortfall.selector);
-        swapper.topUp(address(usdc), 1, MAX, block.timestamp);
-        vm.clearMockedCalls();
-        // Closing pays the debt from the box and hands the rest back; converted back, the detour cost two
-        // pool fees on the amount and nothing else.
-        _reduce(V_NVDA_C, K_VC, MAX, MAX, 0);
-        (uint256 sold,) = swapper.cashOut(address(usdc), MAX, 0, block.timestamp);
-        uint256 cost = usdtBefore - usdt.balanceOf(address(this));
-        assertEq(usdc.balanceOf(address(this)), 0);
-        assertApproxEqAbs(cost, trueGap + (usdtIn + sold) / 10_000, 1e12, "the real gap + two 0.01% fees");
-        _swapperHoldsNothing();
+        vm.expectRevert(bytes("unreadable"));
+        swapper.shortfall(address(this), address(usdc));
+        assertEq(swapper.topUpCap(address(this), address(usdc)), cap, "the cap is the same, vault unreadable");
+        // The same purchases go through and are refused, with or without the reading.
+        uint256 snapshot = vm.snapshotState();
+        for (uint256 blind; blind < 2; ++blind) {
+            if (blind == 1) vm.clearMockedCalls();
+            vm.expectRevert(abi.encodeWithSelector(ISwapper.AboveShortfall.selector, cap + 1, cap));
+            swapper.topUp(address(usdc), cap + 1, MAX, block.timestamp);
+            (, uint256 tokenOut) = swapper.topUp(address(usdc), cap, MAX, block.timestamp);
+            assertEq(tokenOut, cap);
+            vm.expectPartialRevert(ISwapper.NoShortfall.selector);
+            swapper.topUp(address(usdc), 1, MAX, block.timestamp);
+            assertEq(swapper.topUpCap(address(this), address(usdc)), 0);
+            vm.revertToState(snapshot);
+        }
     }
 
-    function test_cap_countsEveryVaultOfTheToken_andIdleMoney() public {
+    function test_gap_countsEveryVaultOfTheToken_andIdleMoney() public {
         _openNegativeCarry(2_000e18);
-        // Half of the deposit moves to the ERC4626 USDC vault: the cap reads both.
+        // Half of the deposit moves to the ERC4626 USDC vault: the gap reads both.
         lend.executeSwitchVault(address(this), K_VC, K_C, 1_000e18, block.timestamp);
         skip(180 days);
         (uint256 gap,) = _gap();
@@ -448,8 +481,10 @@ contract CashSwapperTest is CashSwapperBase {
         // A USDT vault of the same box is not USDC money.
         _report(uint256(VAULT_APR) * 1e14, 0, 0.05e18);
         _open(V_NVDA_T, K_T, 0, 500e18);
-        (uint256 gap3,) = _gap();
+        (uint256 gap3, uint256 cap3) = _gap();
         assertEq(gap3, gap2);
+        // The cap counts the idle loan token and no vault.
+        assertEq(cap3, _withBuffer(lens.tokenDebt(address(this), address(usdc)) - 1e18));
     }
 
     // ---- a pool that misbehaves ----
@@ -458,9 +493,9 @@ contract CashSwapperTest is CashSwapperBase {
         _openNegativeCarry(2_000e18);
         skip(180 days);
         _mode(MockStablePool.Mode.PARTIAL);
-        (, uint256 cap) = _gap();
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.InexactOutput.selector, cap / 2, cap));
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        uint256 want = _want();
+        vm.expectRevert(abi.encodeWithSelector(ISwapper.InexactOutput.selector, want / 2, want));
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
     }
 
     function test_pool_cannotTradeMoreThanAsked() public {
@@ -470,9 +505,9 @@ contract CashSwapperTest is CashSwapperBase {
         // At a fair price, but twice the size: more of the account's USDT into the box than the cap allows,
         // or more of its loan token sold than it offered.
         _mode(MockStablePool.Mode.OVERFILL);
-        (, uint256 cap) = _gap();
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.InexactOutput.selector, cap * 2, cap));
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        uint256 want = _want();
+        vm.expectRevert(abi.encodeWithSelector(ISwapper.InexactOutput.selector, want * 2, want));
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
         vm.expectRevert(abi.encodeWithSelector(ISwapper.Overcharged.selector, 800e18, 400e18));
         swapper.cashOut(address(usdc), 400e18, 0, block.timestamp);
     }
@@ -481,14 +516,15 @@ contract CashSwapperTest is CashSwapperBase {
         _openNegativeCarry(2_000e18);
         skip(180 days);
         usdc.mint(address(this), 1_000e18);
+        uint256 want = _want();
         _mode(MockStablePool.Mode.SKIM);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
         swapper.cashOut(address(usdc), 1_000e18, 0, block.timestamp);
         _mode(MockStablePool.Mode.DOUBLE_CHARGE);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
         vm.expectPartialRevert(ISwapper.PegExceeded.selector);
         swapper.cashOut(address(usdc), 400e18, 0, block.timestamp);
     }
@@ -501,8 +537,9 @@ contract CashSwapperTest is CashSwapperBase {
         vm.prank(STRANGER);
         usdt.approve(address(swapper), MAX);
         pool.setMode(MockStablePool.Mode.WRONG_PAYER, STRANGER, address(0), "");
+        uint256 want = _want();
         vm.expectRevert(ISwapper.BadCallback.selector);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        swapper.topUp(address(usdc), want, MAX, block.timestamp);
         // The caller's other approved token instead of the one being sold.
         usdc.mint(address(this), 1_000e18);
         pool.setMode(MockStablePool.Mode.WRONG_TOKEN, address(0), address(usdt), "");
@@ -524,7 +561,7 @@ contract CashSwapperTest is CashSwapperBase {
         swapper.pancakeV3SwapCallback(int256(1e18), -int256(1e18), data);
         // In the middle of the account's own swap, a third contract tries the callback with the right data.
         _mode(MockStablePool.Mode.ACCOMPLICE);
-        swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        _topUpGap();
         assertEq(bytes4(pool.reentryResult()), ISwapper.BadCallback.selector);
         _swapperHoldsNothing();
     }
@@ -540,7 +577,7 @@ contract CashSwapperTest is CashSwapperBase {
         for (uint256 i; i < 2; ++i) {
             uint256 snapshot = vm.snapshotState();
             pool.setMode(MockStablePool.Mode.REENTER, address(0), address(0), calls[i]);
-            swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+            _topUpGap();
             assertEq(bytes4(pool.reentryResult()), ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
             vm.revertToState(snapshot);
         }
@@ -564,8 +601,8 @@ contract CashSwapperTest is CashSwapperBase {
         (uint256 usdtIn, uint256 tokenOut) = swapper.topUp(address(usdc), gap - 1, MAX, block.timestamp);
         assertEq(tokenOut, gap - 1, "a V3 pool delivers an exact output exactly");
         assertApproxEqRel(usdtIn, gap, 0.00051e18);
-        // One raw unit short: the cap is that unit plus its buffer, rounded up to one more.
-        (usdtIn, tokenOut) = swapper.topUp(address(usdc), MAX, MAX, block.timestamp);
+        // One raw unit short: the backend buys that unit plus its buffer, rounded up to one more.
+        (usdtIn, tokenOut) = _topUpGap();
         assertEq(tokenOut, 2);
         assertLe(usdtIn, 5, "dust costs at most itself plus the rounding allowance");
         assertLt(tokenOut, cap);
@@ -600,8 +637,8 @@ contract CashSwapperTest is CashSwapperBase {
         premium = bound(premium, -200, 200);
         _setPremium(premium);
         swapper.setLimits(uint16(bound(peg, 0, 100)), uint16(bound(buffer, 0, 500)));
-        (uint256 gap, uint256 cap) = _gap();
-        assertEq(cap, gap + (gap * swapper.bufferBps() + 9_999) / 10_000);
+        (, uint256 cap) = _gap();
+        assertEq(cap, _withBuffer(lens.tokenDebt(address(this), address(usdc))), "debt + buffer, no vault");
         amount = bound(amount, 1, cap * 2);
         uint256 usdtBefore = usdt.balanceOf(address(this));
         uint256 poolUsdt = usdt.balanceOf(address(pool));

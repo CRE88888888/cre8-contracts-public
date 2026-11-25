@@ -31,11 +31,13 @@ interface ICashOwned {
 ///   1. `run()`           ROUTING_EXECUTOR=<routing v2 executor>: one creation, by any funded key.
 ///   2. `printConfig(s)`  read-only: the `setPool` calls the owner still has to send (to = the swapper).
 ///                        `configure(s)` sends them from the broadcaster (fork rehearsal, or an owner key).
-///   3. `verify(s)`       read-only: code equals this build, bound to ROUTING_EXECUTOR and through it to the
-///                        core in `deployments/mainnet.json`, the three pools are PancakeSwap V3's own
-///                        0.01% USDT pools, limits at their defaults, ATP_SAFE owns it.
-/// The routing stack itself is verified by `DeployBorrowRoutingMainnet.verify(ROUTING_EXECUTOR)`; run that
-/// first: this script trusts ROUTING_EXECUTOR to be that stack.
+///   3. `verify(s)`       read-only: code equals this build, bound to the routing executor recorded in
+///                        `deployments/mainnet.json` (`borrowV2.executor`) and through it to the core
+///                        recorded there, the three pools are PancakeSwap V3's own 0.01% USDT pools,
+///                        limits at their defaults, ATP_SAFE owns it.
+/// The routing stack itself is verified by `DeployBorrowRoutingMainnet.verify(executor)`; its executor is
+/// written into `deployments/mainnet.json` after that, and `verify` here takes it from nowhere else (fourth
+/// review L-A: an executor from the environment could be a stand-in that only points at the real core).
 contract DeployBorrowCashSwapperMainnet is Script {
     address internal constant PANCAKE_V3_FACTORY = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865;
     uint24 internal constant POOL_FEE = 100; // 0.01%
@@ -47,7 +49,7 @@ contract DeployBorrowCashSwapperMainnet is Script {
     address internal constant POOL_USDC = 0x92b7807bF19b7DDdf89b706143896d05228f3121;
     address internal constant POOL_USD1 = 0x9c4Ee895e4f6Ce07Ada631C508D1306Db7502cCE;
     address internal constant POOL_U = 0xA0909f81785f87f3e79309F0E73A7d82208094E4;
-    uint16 internal constant MAX_PEG_BPS = 50;
+    uint16 internal constant MAX_PEG_BPS = 25;
     uint16 internal constant BUFFER_BPS = 100;
 
     struct Call {
@@ -167,13 +169,20 @@ contract DeployBorrowCashSwapperMainnet is Script {
 
     // ---- 3. read-only verification ----
 
-    /// @notice ROUTING_EXECUTOR and ATP_SAFE are required. The core is anchored to `deployments/mainnet.json`:
-    /// the swapper's registry must be the `AtpRegistry` recorded there for this chain.
+    /// @notice ATP_SAFE is required. Both anchors come from `deployments/mainnet.json` and from nowhere
+    /// else: the routing executor the swapper must be bound to (`borrowV2.executor`, recorded once routing
+    /// v2 is on mainnet and verified; until then this fails) and the core `AtpRegistry` behind it.
     function verify(address swapper) external view {
         string memory json = vm.readFile(string.concat(vm.projectRoot(), "/deployments/mainnet.json"));
         require(vm.parseJsonUint(json, ".chainId") == block.chainid, "deployments/mainnet.json: other chain");
+        require(
+            vm.keyExistsJson(json, ".borrowV2.executor"),
+            "deployments/mainnet.json has no borrowV2.executor: record the verified routing v2 executor first"
+        );
         _verify(
-            swapper, vm.envAddress("ROUTING_EXECUTOR"), vm.parseJsonAddress(json, ".contracts.AtpRegistry")
+            swapper,
+            vm.parseJsonAddress(json, ".borrowV2.executor"),
+            vm.parseJsonAddress(json, ".contracts.AtpRegistry")
         );
     }
 

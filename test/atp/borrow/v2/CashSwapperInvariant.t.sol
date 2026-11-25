@@ -20,6 +20,9 @@ import { TestnetToken } from "../../../../src/testnet/TestnetToken.sol";
 /// call that went through, the handler compares every balance it knows before and after:
 /// a top-up moved USDT account -> pool and USDC pool -> the account's box, nothing else, no more than the cap,
 /// within the peg bound; a cash-out moved USDC account -> pool and USDT pool -> account, within the peg bound.
+/// It also keeps its own count of every top-up window (fourth review M-2): what was bought in a window is what
+/// the contract counted, a window never reopens early, and everything ever bought fits in the allowances of
+/// the windows it was bought in, which bounds what the top-ups can have lost to the peg.
 contract CashSwapperHandler is Test {
     uint256 internal constant MAX = type(uint256).max;
 
@@ -47,6 +50,19 @@ contract CashSwapperHandler is Test {
     uint256 public cashedOutTokens;
     uint256 public refusedByPeg;
     uint256 public refusedByCap;
+    uint256 public refusedByWindow;
+    uint256 public laps;
+    uint256 public blindReads;
+    /// @dev Top-up windows seen, the allowance (highest debt + the buffer's hard ceiling: the owner moves the
+    /// buffer inside a window) of the closed ones and of the open one, and what the open one bought.
+    uint256 public windows;
+    uint256 public firstWindowAt;
+    uint256 public closedAllowance;
+    uint256 public openAllowance;
+    uint64 public openStart;
+    uint256 public openBought;
+    /// @dev USDT the top-ups paid above the face value of what they bought.
+    uint256 public topUpWear;
     uint256 public hostileAttempts;
     /// @dev Calls that went through on a misbehaving pool (they still had to pass every check above).
     uint256 public hostileSuccesses;
@@ -115,9 +131,20 @@ contract CashSwapperHandler is Test {
     }
 
     function topUp(uint256 amount, uint256 maxIn) external {
-        (uint256 gap, uint256 cap) = swapper.shortfall(account, address(usdc));
-        // Mostly inside the cap; sometimes "all", sometimes a little above.
-        if (amount % 5 == 0) amount = MAX;
+        uint256 cap = swapper.topUpCap(account, address(usdc));
+        // The reader's gap fails while a vault cannot be read; the cap never does.
+        uint256 gap = cap;
+        try swapper.shortfall(account, address(usdc)) returns (uint256 g, uint256 c) {
+            gap = g;
+            if (c != cap) violation = "shortfall and topUpCap disagree";
+        } catch {
+            ++blindReads;
+        }
+        // What the backend buys (the gap), all that is allowed (a lap), anything up to a little above it,
+        // or the "all" a top-up does not have.
+        if (amount % 5 == 0) amount = cap == 0 ? 1e18 : cap;
+        else if (amount % 5 == 1) amount = gap;
+        else if (amount % 23 == 2) amount = MAX;
         else amount = _bound(amount, 1, cap == 0 ? 10e18 : cap * 21 / 20);
         maxIn = maxIn % 4 == 0 ? _bound(maxIn, 0, 2 * cap) : MAX;
         address box = lend.boxOf(account);
@@ -130,8 +157,10 @@ contract CashSwapperHandler is Test {
             ++toppedUp;
             toppedUpTokens += tokenOut;
             if (hostile) ++hostileSuccesses;
-            if (gap == 0 || tokenOut > cap) violation = "top-up above the cap";
-            if (amount != MAX && tokenOut != amount) violation = "top-up delivered another amount";
+            if (tokenOut > cap) violation = "top-up above the cap";
+            if (tokenOut != amount) violation = "top-up delivered another amount";
+            _countWindow(tokenOut);
+            if (usdtIn > tokenOut) topUpWear += usdtIn - tokenOut;
             if (usdtIn > maxIn) violation = "top-up above the caller's bound";
             if (usdtIn > tokenOut + tokenOut * swapper.maxPegBps() / 10_000 + 3) {
                 violation = "top-up past the peg bound";
@@ -172,6 +201,19 @@ contract CashSwapperHandler is Test {
         _calm();
     }
 
+    /// @dev What a leaked key would repeat: buy all a top-up may, close every debt in the token (collateral
+    /// out too), sell what came back, borrow again, and try to buy once more at once.
+    function lap(uint256 seed, uint256 collateral, uint256 borrow) external {
+        ++laps;
+        this.topUp(5, 1);
+        for (uint256 i; i < routes.length; ++i) {
+            this.reduce(i, seed, 100, true);
+        }
+        this.cashOut(0, 1);
+        this.open(seed, seed >> 8, collateral == 0 ? 1 : collateral, borrow == 0 ? 1 : borrow);
+        this.topUp(5, 1);
+    }
+
     // ---- the world ----
 
     function warp(uint256 time) external {
@@ -184,7 +226,7 @@ contract CashSwapperHandler is Test {
         usdc.mint(account, _bound(amount, 1, 50e18));
     }
 
-    /// @dev The ERC4626 vault's status cannot be read (or reads again): the cap then counts it as empty.
+    /// @dev The ERC4626 vault's status cannot be read (or reads again): only the reader's `shortfall` fails.
     function blindVault(bool blind) external {
         bytes memory call = abi.encodeCall(lens.vaultStatus, (vaults[1], account));
         if (blind) vm.mockCallRevert(address(lens), call, "unreadable");
@@ -255,9 +297,33 @@ contract CashSwapperHandler is Test {
         credit.reportRates(r, v);
     }
 
+    /// @dev After a top-up that went through: the contract's window against this handler's own count.
+    function _countWindow(uint256 tokenOut) internal {
+        (uint64 start, uint192 bought, uint256 peak) = swapper.topUpWindowOf(account, address(usdc));
+        if (start != openStart) {
+            if (start != vm.getBlockTimestamp()) violation = "a new window did not start now";
+            if (start < uint256(openStart) + swapper.TOP_UP_WINDOW() && openStart != 0) {
+                violation = "a window reopened before the last one was over";
+            }
+            if (windows == 0) firstWindowAt = start;
+            ++windows;
+            closedAllowance += openAllowance;
+            (openStart, openBought) = (start, 0);
+        }
+        if (vm.getBlockTimestamp() >= uint256(start) + swapper.TOP_UP_WINDOW()) {
+            violation = "a top-up was counted into a stale window";
+        }
+        openBought += tokenOut;
+        if (bought != openBought) violation = "the window's count is not what was bought in it";
+        openAllowance = peak + (peak * swapper.MAX_BUFFER_BPS() + 9_999) / 10_000;
+        if (bought > openAllowance) violation = "a window bought more than its highest debt allows";
+        if (peak == 0) violation = "a window without a debt";
+    }
+
     function _count(bytes memory reason) internal {
         bytes4 s = bytes4(reason);
         if (s == ISwapper.PegExceeded.selector) ++refusedByPeg;
+        if (s == ISwapper.WindowExceeded.selector) ++refusedByWindow;
         if (s == ISwapper.AboveShortfall.selector || s == ISwapper.NoShortfall.selector) {
             ++refusedByCap;
         }
@@ -350,7 +416,7 @@ contract CashSwapperInvariantTest is CashSwapperBase {
             holders
         );
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](19);
+        bytes4[] memory selectors = new bytes4[](22);
         selectors[0] = CashSwapperHandler.open.selector;
         selectors[1] = CashSwapperHandler.open.selector;
         selectors[2] = CashSwapperHandler.open.selector;
@@ -370,6 +436,9 @@ contract CashSwapperInvariantTest is CashSwapperBase {
         selectors[16] = CashSwapperHandler.leftover.selector;
         selectors[17] = CashSwapperHandler.blindVault.selector;
         selectors[18] = CashSwapperHandler.cashOut.selector;
+        selectors[19] = CashSwapperHandler.lap.selector;
+        selectors[20] = CashSwapperHandler.lap.selector;
+        selectors[21] = CashSwapperHandler.lap.selector;
         targetSelector(FuzzSelector({ addr: address(handler), selectors: selectors }));
     }
 
@@ -384,6 +453,26 @@ contract CashSwapperInvariantTest is CashSwapperBase {
     /// account -> pool and pool -> account (cash-out); never above the cap, never past the peg bound.
     function invariant_moneyOnlyGoesToTheBoxOrTheAccount() public view {
         assertEq(bytes(handler.violation()).length, 0, handler.violation());
+    }
+
+    /// Fourth review M-2: whatever the sequence (laps included: top up the whole debt, close, cash out, borrow
+    /// again), all the top-ups ever made fit in the allowances of the 24-hour windows they were made in, one
+    /// window at a time; so what they lost to the peg is bounded by MAX_PEG_BPS of that, plus rounding.
+    function invariant_topUpsFitTheirWindows_andTheirWearIsBounded() public view {
+        uint256 allowance = handler.closedAllowance() + handler.openAllowance();
+        assertLe(handler.toppedUpTokens(), allowance, "bought more than the windows allowed");
+        assertLe(
+            handler.topUpWear(),
+            allowance * swapper.MAX_PEG_BPS() / 10_000 + 3 * handler.toppedUp(),
+            "top-ups lost more than the peg bound on the windows' allowances"
+        );
+        if (handler.windows() != 0) {
+            assertLe(
+                handler.windows(),
+                1 + (block.timestamp - handler.firstWindowAt()) / swapper.TOP_UP_WINDOW(),
+                "more windows than days"
+            );
+        }
     }
 
     /// Nobody else's approval of the swapper is ever used: the victim keeps everything.
@@ -408,6 +497,10 @@ contract CashSwapperInvariantTest is CashSwapperBase {
         _tally("cash_out_whole_tokens", handler.cashedOutTokens() / 1e18);
         _tally("refused_by_peg", handler.refusedByPeg());
         _tally("refused_by_cap", handler.refusedByCap());
+        _tally("refused_by_window", handler.refusedByWindow());
+        _tally("top_up_windows", handler.windows());
+        _tally("laps_tried", handler.laps());
+        _tally("top_ups_tried_with_a_vault_unreadable", handler.blindReads());
         _tally("attempts_on_a_hostile_pool", handler.hostileAttempts());
         _tally("of_which_went_through", handler.hostileSuccesses());
         _tally("deleveraged", handler.deleveraged());

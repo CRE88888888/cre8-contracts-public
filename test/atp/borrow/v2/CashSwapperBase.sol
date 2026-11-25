@@ -47,6 +47,28 @@ abstract contract CashSwapperBase is RoutingBase {
         return swapper.shortfall(address(this), address(usdc));
     }
 
+    function _withBuffer(uint256 amount) internal view returns (uint256) {
+        return amount + (amount * swapper.bufferBps() + 9_999) / 10_000;
+    }
+
+    /// @dev What the backend buys before a repayment: the gap the vaults leave, plus the buffer (the debt
+    /// grows until the repayment lands), never above what a top-up may buy now.
+    function _want() internal returns (uint256 amount) {
+        (uint256 gap, uint256 cap) = _gap();
+        amount = _withBuffer(gap);
+        if (amount > cap) amount = cap;
+    }
+
+    function _topUpGap() internal returns (uint256 usdtIn, uint256 tokenOut) {
+        return swapper.topUp(address(usdc), _want(), MAX, block.timestamp);
+    }
+
+    /// @dev The Venus vUSDC supply market has no cash: every redemption fails, every read still works.
+    function _freezeVenusVault() internal {
+        vm.mockCallRevert(address(vUsdc), abi.encodeWithSignature("redeem(uint256)"), "no cash");
+        vm.mockCallRevert(address(vUsdc), abi.encodeWithSignature("redeemUnderlying(uint256)"), "no cash");
+    }
+
     function _swapperHoldsNothing() internal view {
         assertEq(usdt.balanceOf(address(swapper)), 0, "swapper holds USDT");
         assertEq(usdc.balanceOf(address(swapper)), 0, "swapper holds USDC");
