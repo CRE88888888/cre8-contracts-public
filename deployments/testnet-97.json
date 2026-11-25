@@ -1520,21 +1520,21 @@
     }
   },
   "borrowV2": {
-    "note": "Strategy earn routing v2 (chain 97 only, simulated venues and rates). Runs next to v1 (`borrow`), which is untouched. One portfolio account uses v1 or v2, never both. Interface: docs/borrow-routing-v2.interface.json.",
-    "interfaceVersion": "v2.0-draft5",
-    "gitCommit": "1888572dc89cf7720bce50a9b96f6e28086474a8",
-    "deployedAt": "2026-11-24T16:17Z..16:26Z",
-    "verifiedAtBlock": 144629543,
-    "executor": "0x494C106498e8221D3f72474f36995C191ACf6bB5",
-    "extension": "0x7bC1E80Cd0a684D56333775423a95efF13602bf8",
-    "registry": "0x7eae73a76Ff2359fE1aB059A77Dd36840A32559E",
-    "lens": "0x18A55C04aE72A00ED7790577FbdA9159DAc94000",
-    "boxImplementation": "0xa448e0108f31Ab1d084FfdDcD4827D9CB5D4E191",
-    "deployer": "0x4dd93ae54afc573190916f823022e3355a477787",
+    "note": "Strategy earn routing v2 (chain 97 only, simulated venues and rates). Runs next to v1 (`borrow`), which is untouched. One portfolio account uses v1 or v2, never both. Interface: docs/borrow-routing-v2.interface.json. This is the set with the third-review fixes (draft6); the set it replaced is under `previous` and its registry is paused for new risk.",
+    "interfaceVersion": "v2.0-draft6",
+    "gitCommit": "465a6e5236f13be995f815e44a7c6fb5b3837888",
+    "deployedAt": "2026-11-25T02:19Z..02:23Z",
+    "verifiedAtBlock": 144709526,
+    "executor": "0xeddd943d855a5F5A2880BBFD411449A65182600F",
+    "extension": "0x2A385aBc1358c92f43C1480ff499f8Ff6415025e",
+    "registry": "0x2461599b76dA4EDd0A128DdCcb3DC3BEAA54CC0D",
+    "lens": "0x4fC68ead312aCfFCBF20f77884804F484226a27A",
+    "boxImplementation": "0x42EfA4422e81E126D83D9322ab3aD5faC6a4cC76",
+    "deployer": "0x353434F4B0cf98389fe0163b3991F40Db2176936",
     "adapters": {
-      "erc4626": "0x3548A7641bae787A48E263f8aF053899e46fF02d",
-      "venus": "0x861e91a0a3d46c391587323B3FE32A43E53CFe91",
-      "aave": "0x432f96D0790f3bc3ceBed379Fd476F367CE63BAa"
+      "erc4626": "0x6242869aDEe4ad6Df35505d0Cabb76249FD49D58",
+      "venus": "0x769567B0e45F04Cd962c11CdC95018870Fa1AF66",
+      "aave": "0x06DD79a73A9351B3580ae0769F35209910BDEe7c"
     },
     "venusComptroller": "0x93AB77260c8C62b26698bBB0ee8da3E175b9ad8D",
     "listaMoolah": "0x993237aC050512f3749bfEE2dE759b6B86Aea653",
@@ -1602,10 +1602,11 @@
       }
     },
     "deployedAtBlocks": [
-      144626656,
-      144628034
+      144707011,
+      144707575
     ],
-    "deployTxCount": 331,
+    "deployTxCount": 135,
+    "deployGasUsed": 41561225,
     "routes": [
       {
         "routeId": "0x73bcc3c49105bd0bd06e6f0acf3026c564e6d6fda4291e97816ce5ea175aeb90",
@@ -2692,36 +2693,61 @@
         "receipt": "0x65A2e100D66DFE0bC8050C232B257AC1ea81CbC6"
       }
     ],
-    "demo": {
-      "note": "RoutingDemoTestnet: a demo account owned by OWNER; every position closed again. The deleverage step tightens the QQQB/USD1 route lines and resets them (the shared lending oracle is not touched).",
-      "account": "0x65c3251F4854A53Cc01C2386A44ec372F292C37c",
-      "box": "0xf56bc1EC1185F5Dbf31a7b6E38afA9029eF8B520",
-      "deleverageRepaidUsd1": "504971896875000000001",
-      "rewardCollected": "1000000000000000000",
-      "txCount": 41,
-      "failed": 0,
-      "gasUsed": 9644612,
-      "blocks": [
-        144629276,
-        144629454
+    "previous": {
+      "note": "The draft5 set this one replaced. Its registry is paused for new risk (no open, migrate or vault switch on the old executor); repayments, collateral withdrawals, deleverage, releases and rewards there stay open. Routes, vaults, tokens and markets were the same ids and addresses as above.",
+      "interfaceVersion": "v2.0-draft5",
+      "gitCommit": "1888572dc89cf7720bce50a9b96f6e28086474a8",
+      "deployedAt": "2026-11-24T16:17Z..16:26Z",
+      "executor": "0x494C106498e8221D3f72474f36995C191ACf6bB5",
+      "extension": "0x7bC1E80Cd0a684D56333775423a95efF13602bf8",
+      "registry": "0x7eae73a76Ff2359fE1aB059A77Dd36840A32559E",
+      "lens": "0x18A55C04aE72A00ED7790577FbdA9159DAc94000",
+      "boxImplementation": "0xa448e0108f31Ab1d084FfdDcD4827D9CB5D4E191",
+      "deployer": "0x4dd93ae54afc573190916f823022e3355a477787",
+      "adapters": {
+        "erc4626": "0x3548A7641bae787A48E263f8aF053899e46fF02d",
+        "venus": "0x861e91a0a3d46c391587323B3FE32A43E53CFe91",
+        "aave": "0x432f96D0790f3bc3ceBed379Fd476F367CE63BAa"
+      },
+      "deployedAtBlocks": [
+        144626656,
+        144628034
       ],
-      "txs": {
-        "open: QQQB collateral on Lista QQQB/USDC": "0xa1b8f553e56ff122e2f61b7c27c2e18b83a2ad3a83ccc5a5afee3d19deadc084",
-        "open: borrow USDC into the USDC earn vault": "0x3ab9fce14ed3114dcc22f7ddf0bf24f06e373332d3311cadabe0171e66e49c55",
-        "partial repay from the vault": "0xbf8620fab49e66a668db8c5607682583fa449f7ebc3c87b94767301fa5fa0e4e",
-        "migrate to Lista QQQB/USD1 (other loan token, one tx)": "0x556336361f55e4394b0d17dd556652b0162802174b5293bef2176f6e0b7dcfc7",
-        "switch vault: USD1 earn vault -> Venus vUSD1": "0x865770e363bb20cbc930ab99a1a85c98b671a7947a23fe672cf1ce3e1e8d49c2",
-        "owner tightens the route's lines (target 10%, deleverage 20%)": "0x61d09ee6dbf090764227f5e1b3347baee960e41f917dd2e3319db67e0d61ed9b",
-        "deleverage by a third party (from the box)": "0xd26b6ab4f142e00e198837fdbe3c4c4d3e48b93cfc76cdf60b38b7533a4902ae",
-        "owner resets the lines": "0x02f0d37c0ef7158bee2b85c45a62276c2119e89b22d00413a4bcfd6fc243e9d7",
-        "close QQQB (repay all, collateral back)": "0xfe45618efc34fc405a1dab1087803de8136a298a6e9782e43c6e7c71d1f19d58",
-        "open: NVDAB collateral on Venus NVDAB/USDT": "0xedb002fd943295abc60a9f871c91b7896908bbb433f20d1d54804c0f1ac17d9a",
-        "open: borrow USDT into Aave": "0x110b3ae89fad3ca63243de209b15197c4fbaa8b754fc18ed6246a253ee8847f6",
-        "migrate Venus -> Lista NVDAB/USDT (same token, one tx)": "0x51fb2a18ad89727aa53a812587bea6d866d1de9749b78bd3a936ba1587151165",
-        "close NVDAB": "0x529718d752392878ca20de3eef373e9fe2c5955ffa939290ba5b0d28e9b8b292",
-        "vault pays its incentive to the box": "0x67c7612fa2cff76c112fcbc9ac1f7da51a88d2e81888815e279e66c9c8004b63",
-        "collectRewards: box -> account": "0xa18ea135a3ab42de90b7b5239172104e790b5348d20fe8adb3a8c231e18aba49",
-        "executeSweepRewards: account -> owner's recipient": "0x108769eb122f14313fd8ba7d9c77d9b58bcfa15d13d15f8c2cfc224b03e87f72"
+      "deployTxCount": 331,
+      "paused": true,
+      "pausedAtBlock": 144707575,
+      "pausedTx": "0x1c12d1d80b727130079d45ec11f15cf74340fdc666f3aa9cb2c266ce52c16aa7",
+      "demo": {
+        "note": "RoutingDemoTestnet: a demo account owned by OWNER; every position closed again. The deleverage step tightens the QQQB/USD1 route lines and resets them (the shared lending oracle is not touched).",
+        "account": "0x65c3251F4854A53Cc01C2386A44ec372F292C37c",
+        "box": "0xf56bc1EC1185F5Dbf31a7b6E38afA9029eF8B520",
+        "deleverageRepaidUsd1": "504971896875000000001",
+        "rewardCollected": "1000000000000000000",
+        "txCount": 41,
+        "failed": 0,
+        "gasUsed": 9644612,
+        "blocks": [
+          144629276,
+          144629454
+        ],
+        "txs": {
+          "open: QQQB collateral on Lista QQQB/USDC": "0xa1b8f553e56ff122e2f61b7c27c2e18b83a2ad3a83ccc5a5afee3d19deadc084",
+          "open: borrow USDC into the USDC earn vault": "0x3ab9fce14ed3114dcc22f7ddf0bf24f06e373332d3311cadabe0171e66e49c55",
+          "partial repay from the vault": "0xbf8620fab49e66a668db8c5607682583fa449f7ebc3c87b94767301fa5fa0e4e",
+          "migrate to Lista QQQB/USD1 (other loan token, one tx)": "0x556336361f55e4394b0d17dd556652b0162802174b5293bef2176f6e0b7dcfc7",
+          "switch vault: USD1 earn vault -> Venus vUSD1": "0x865770e363bb20cbc930ab99a1a85c98b671a7947a23fe672cf1ce3e1e8d49c2",
+          "owner tightens the route's lines (target 10%, deleverage 20%)": "0x61d09ee6dbf090764227f5e1b3347baee960e41f917dd2e3319db67e0d61ed9b",
+          "deleverage by a third party (from the box)": "0xd26b6ab4f142e00e198837fdbe3c4c4d3e48b93cfc76cdf60b38b7533a4902ae",
+          "owner resets the lines": "0x02f0d37c0ef7158bee2b85c45a62276c2119e89b22d00413a4bcfd6fc243e9d7",
+          "close QQQB (repay all, collateral back)": "0xfe45618efc34fc405a1dab1087803de8136a298a6e9782e43c6e7c71d1f19d58",
+          "open: NVDAB collateral on Venus NVDAB/USDT": "0xedb002fd943295abc60a9f871c91b7896908bbb433f20d1d54804c0f1ac17d9a",
+          "open: borrow USDT into Aave": "0x110b3ae89fad3ca63243de209b15197c4fbaa8b754fc18ed6246a253ee8847f6",
+          "migrate Venus -> Lista NVDAB/USDT (same token, one tx)": "0x51fb2a18ad89727aa53a812587bea6d866d1de9749b78bd3a936ba1587151165",
+          "close NVDAB": "0x529718d752392878ca20de3eef373e9fe2c5955ffa939290ba5b0d28e9b8b292",
+          "vault pays its incentive to the box": "0x67c7612fa2cff76c112fcbc9ac1f7da51a88d2e81888815e279e66c9c8004b63",
+          "collectRewards: box -> account": "0xa18ea135a3ab42de90b7b5239172104e790b5348d20fe8adb3a8c231e18aba49",
+          "executeSweepRewards: account -> owner's recipient": "0x108769eb122f14313fd8ba7d9c77d9b58bcfa15d13d15f8c2cfc224b03e87f72"
+        }
       }
     }
   }
