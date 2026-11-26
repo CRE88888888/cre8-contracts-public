@@ -237,3 +237,5 @@ fork 區塊 143672040（2026-11-20）實測：三輪、**236 筆交易、284,613
 - `buyWindowOf` 的形狀不變（`bought` 改成扣回後的淨額），總買入與最高上限在 `buyChurnOf`。`buyAllowance` 的 `bought` 是兩條上限裡較緊的那條換算成的已用量，所以後端照舊用 `cap - bought`。
 
 executor 不是 proxy：這是新地址（新的 `AtpYieldRegistry`），舊 executor 留在鏈上不暫停（routing v2 的 registry 讀它的 `globalPaused`，策略加息 v1 綁著它）。既有帳戶要由 owner 重簽一次 session key（target 換成新 executor）並對新 executor approve，後端在那之前不替它們送交易。
+
+2026-11-26 部署（`DeployExecutorTestnet.executorOnly()`，main `de4225f`，區塊 144934928–144935169，61 筆交易、25,355,300 gas）：新 executor `0x027f11beF2f93EeFAc9Df7C466218375713043a6`、新 yield registry `0x8Ed07a58607c45CB7430BACc620Df60A0Faf074B`（30 個市場）。舊的一對記在 manifest 的 `superseded`。

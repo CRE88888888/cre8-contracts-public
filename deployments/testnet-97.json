@@ -2,9 +2,9 @@
   "chainId": 97,
   "mode": "public",
   "note": "deployed on public BSC testnet (chain 97)",
-  "verifiedAtBlock": 143775403,
-  "generatedAt": "2026-11-20T05:37:10Z",
-  "gitCommit": "cc53e91a833c62d3efe3c8e4c76d3dde2ab8ecf7",
+  "verifiedAtBlock": 144935225,
+  "generatedAt": "2026-11-26T06:54:22Z",
+  "gitCommit": "de4225f495d675a11509e523e7df38a7377a00a0",
   "versioning": {
     "enrollAbi": "enroll(address,uint256,uint16)",
     "publicationDelaySeconds": 86400,
@@ -31,8 +31,8 @@
     "ownedDeployer": "0xC92079CCB13Ebd608D5Cd03f5e302DcDE5b37096",
     "registry": "0x7ff384fC959bf70fF7b2f011C6A84a36244264EA",
     "router": "0x8e9371550fC397144D198A7C159C2DA5D143239E",
-    "executor": "0xB65Ec2EC6f5aB0a345b50cAA454cf792C1EF2bB9",
-    "yieldRegistry": "0xA234531b1ace7B7106562A5554f1F8b173F7087b",
+    "executor": "0x027f11beF2f93EeFAc9Df7C466218375713043a6",
+    "yieldRegistry": "0x8Ed07a58607c45CB7430BACc620Df60A0Faf074B",
     "yieldView": "0xC8EEBa84f9C74B2D879dFaEdb02a0a523aA02657",
     "usdt": "0x7Ad6E310B0F6744B66d97Cb7cb525BD974501cb5",
     "feed.USDT/USD": "0x1F720990C22C7496EDa9156eAD91Ca334eF097dB",
@@ -2804,5 +2804,10 @@
       "deployFailed": 0,
       "deployGasUsed": 18557526
     }
+  },
+  "superseded": {
+    "note": "cre8-contracts#76 (2026-11-26): the AtpExecutor with the sale credit and gross cap on the 24h buy limit is a new address with its own AtpYieldRegistry (script/testnet/DeployExecutorTestnet.s.sol, blocks 144934928-144935169, 61 transactions). The previous pair stays on chain and unpaused: AtpBorrowExecutor (borrow.executor) is bound to it and AtpBorrowRegistryV2 reads its globalPaused. Session keys installed before point at it and need an owner renewal.",
+    "executor": "0xB65Ec2EC6f5aB0a345b50cAA454cf792C1EF2bB9",
+    "yieldRegistry": "0xA234531b1ace7B7106562A5554f1F8b173F7087b"
   }
 }
