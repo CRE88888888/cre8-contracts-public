@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # lib/ 是直接 commit 進來的（vendored），不是 submodule，也沒有 package.json，
+  # 所以只追 GitHub Actions 的版本。OpenZeppelin 版本刻意 pin 住，手動升級。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
