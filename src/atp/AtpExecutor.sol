@@ -30,7 +30,13 @@ import { YieldActions } from "./yield/YieldActions.sol";
 /// @dev Buy limit (A10-1, cre8-contracts#10): a leaked session key could grind an account down by trading
 /// back and forth, each step clearing the floor. Every round trip needs a buy, so buys (numeraire -> asset)
 /// are capped per account at `maxBuyBps` of the account's current value per fixed 24-hour window. Sales to the
-/// numeraire are never limited nor counted, so exits always go through.
+/// numeraire are never limited, so exits always go through.
+/// @dev Sale credit (cre8-contracts#76): a sale's numeraire output is credited back against the window's buys, so an
+/// account that sells everything can buy again the same day (a re-buy, a DCA period, a top-up) instead of waiting
+/// for the window to end. The credit alone would let a leaked key round-trip without end, so every buy is also
+/// counted, never credited, against a gross cap of `GROSS_BUY_MULTIPLE` x the highest cap (value x `maxBuyBps`) any
+/// buy of the window has seen. The key cannot add money to the account, so that peak is what the account held; a
+/// churning key is stopped after buying `GROSS_BUY_MULTIPLE` x `maxBuyBps` of it in a window.
 /// @dev Venues (cre8-contracts#15): every step names a venue from a Safe-managed allowlist - the Pancake
 /// Universal Router (commands allowlisted, recipient pinned here, as before) or an aggregator / DEX router
 /// whose calldata is passed through undecoded. What bounds a malicious or compromised venue is not decoding but
@@ -71,6 +77,9 @@ contract AtpExecutor is ReentrancyGuard {
     uint256 public constant BUY_WINDOW = 1 days;
     /// @notice Upper bound for `maxBuyBps` (2x the account value per window).
     uint16 public constant MAX_BUY_BPS_CEILING = 20_000;
+    /// @notice A window's buys, sale credits ignored, never exceed this multiple of the highest cap a buy of the
+    /// window has seen (cre8-contracts#76).
+    uint256 public constant GROSS_BUY_MULTIPLE = 2;
     /// @notice The minimum-fee top-up never exceeds this share of the batch notional (1%).
     uint16 public constant MIN_FEE_MAX_BPS = 100;
     /// @notice Length of the fixed minimum-fee window: it opens with an account's first batch with a swap and
@@ -108,7 +117,8 @@ contract AtpExecutor is ReentrancyGuard {
     /// @notice Minimum fee per swap batch in numeraire units (registry owner only; 0 = proportional fee only).
     uint256 public minBatchFee;
 
-    /// @dev One slot per account. `bought` is the numeraire spent on buys since `start`.
+    /// @dev One slot per account. `bought` is the numeraire spent on buys since `start`, less what sales have
+    /// credited back since (never below zero).
     struct BuyWindow {
         uint64 start;
         uint192 bought;
@@ -117,6 +127,28 @@ contract AtpExecutor is ReentrancyGuard {
     /// @notice Buy-limit window per account; `start == 0` means never opened, and a window is stale (treated as
     /// empty) once `start + BUY_WINDOW` has passed.
     mapping(address => BuyWindow) public buyWindowOf;
+
+    /// @dev Second slot of the same window (cre8-contracts#76), valid only while `buyWindowOf` is: `gross` is every
+    /// buy since `start` with no sale credit, `peakCap` the highest cap (value x `maxBuyBps`) a buy of it has seen.
+    struct BuyChurn {
+        uint128 gross;
+        uint128 peakCap;
+    }
+
+    /// @notice Gross side of the buy window, read together with `buyWindowOf` (stale when that one is).
+    mapping(address => BuyChurn) public buyChurnOf;
+
+    /// @dev The buy window as a batch works on it.
+    struct BuyState {
+        bool hasBuy;
+        bool live;
+        uint64 start;
+        uint256 bought;
+        uint256 gross;
+        uint256 cap;
+        uint256 peakCap;
+        uint256 grossCap;
+    }
 
     /// @dev `notional` is the numeraire volume of the window's batches, `paid` the minimum-fee top-ups pulled.
     struct MinFeeWindow {
@@ -211,7 +243,8 @@ contract AtpExecutor is ReentrancyGuard {
     /// @dev `floor` is the bound that failed: `minGross` when `amountOutMin` is below it (checked before any token
     /// moves), otherwise the step's `amountOutMin` (checked against the realised output after the swap).
     error BelowFloor(uint256 realised, uint256 floor);
-    /// @dev This batch would take the window's buys to `bought`, above `cap` (value x `maxBuyBps`).
+    /// @dev This batch would take the window's buys to `bought`, above `cap` (value x `maxBuyBps`); or its gross buys
+    /// to `bought`, above `cap` = `GROSS_BUY_MULTIPLE` x the window's peak cap.
     error BuyLimitExceeded(uint256 bought, uint256 cap);
     error BuyBpsTooHigh(uint16 bps);
     error MinBatchFeeTooHigh(uint256 amount);
@@ -458,7 +491,8 @@ contract AtpExecutor is ReentrancyGuard {
                 }
             }
         }
-        (bool hasBuy, uint256 cap, BuyWindow memory window) = _openBuyWindow(account, enrollment, steps);
+        BuyState memory buys = _openBuyWindow(account, enrollment, steps);
+        bool credited;
 
         uint256 count = steps.length;
         // Numeraire volume of the batch: a buy's input plus a sale's gross output (every step has exactly one
@@ -469,22 +503,36 @@ contract AtpExecutor is ReentrancyGuard {
             uint256 floor = _checkStep(account, step, enrollment, feeBps);
             bool isBuy = step.tokenOut != numeraire;
             if (isBuy) {
-                // A buy: counted against the window, before any token moves.
+                // A buy: counted against the window, before any token moves - net of sale credits against the
+                // current cap, and gross against the window's churn cap.
                 if (step.tokenIn != numeraire) revert NotNumeraireRoute(step.tokenIn, step.tokenOut);
-                uint256 bought = window.bought + step.amountIn;
-                if (bought > cap) revert BuyLimitExceeded(bought, cap);
-                window.bought = SafeCast.toUint192(bought);
+                buys.bought += step.amountIn;
+                if (buys.bought > buys.cap) revert BuyLimitExceeded(buys.bought, buys.cap);
+                buys.gross += step.amountIn;
+                if (buys.gross > buys.grossCap) revert BuyLimitExceeded(buys.gross, buys.grossCap);
             }
             uint256 gross = _swap(account, step, deadline);
             // `_checkStep` already required amountOutMin >= floor, so this bound also covers the oracle floor.
             if (gross < step.amountOutMin) revert BelowFloor(gross, step.amountOutMin);
+            if (!isBuy && buys.live && buys.bought != 0) {
+                // A sale credits its numeraire output back to an open window (never below zero, never past it).
+                buys.bought -= Math.min(buys.bought, gross);
+                credited = true;
+            }
             notional += isBuy ? step.amountIn : gross;
             uint256 fee = _splitFee(step.tokenOut, gross, feeBps, account);
             emit SwapExecuted(
                 account, step.tokenIn, step.tokenOut, step.amountIn, gross, fee, gross - fee, floor
             );
         }
-        if (hasBuy) buyWindowOf[account] = window;
+        if (buys.hasBuy || credited) {
+            buyWindowOf[account] = BuyWindow({ start: buys.start, bought: SafeCast.toUint192(buys.bought) });
+        }
+        if (buys.hasBuy) {
+            buyChurnOf[account] = BuyChurn({
+                gross: SafeCast.toUint128(buys.gross), peakCap: SafeCast.toUint128(buys.peakCap)
+            });
+        }
         _chargeMinFee(account, notional, feeBps);
     }
 
@@ -559,46 +607,60 @@ contract AtpExecutor is ReentrancyGuard {
     // ---- buy limit ----
 
     /// @notice What `account` may still buy: `cap` is the current account value x `maxBuyBps`, `bought` what the
-    /// open window already spent, `windowEndsAt` when it resets (0 = no open window: the next buy opens one).
+    /// open window has used of it, `windowEndsAt` when it resets (0 = no open window: the next buy opens one).
     /// Remaining = `cap - bought` when positive. All zero for an account that is not enrolled.
-    /// @dev Runs the same valuation as `executeRebalance`, so the value can move slightly between this read
-    /// and the transaction; leave a margin.
+    /// @dev `bought` is the larger of the window's buys net of sale credits and `cap - (gross cap - gross buys)`, so
+    /// `cap - bought` is what both bounds still allow (cre8-contracts#76). Runs the same valuation as
+    /// `executeRebalance`, so the value can move slightly between this read and the transaction; leave a margin.
     function buyAllowance(address account)
         external
         view
         returns (uint256 cap, uint256 bought, uint64 windowEndsAt)
     {
         if (!registry.isEnrolled(account)) return (0, 0, 0);
+        cap = _buyCap(account, registry.enrollments(account));
         BuyWindow memory window = buyWindowOf[account];
         if (window.start != 0 && block.timestamp < uint256(window.start) + BUY_WINDOW) {
+            BuyChurn memory churn = buyChurnOf[account];
+            uint256 grossCap = Math.max(churn.peakCap, cap) * GROSS_BUY_MULTIPLE;
+            uint256 grossUsed = uint256(churn.gross) + cap;
             bought = window.bought;
+            if (grossUsed > grossCap && grossUsed - grossCap > bought) bought = grossUsed - grossCap;
             windowEndsAt = SafeCast.toUint64(uint256(window.start) + BUY_WINDOW);
         }
-        cap = _buyCap(account, registry.enrollments(account));
     }
 
-    /// @dev Only a batch with a buy pays for the valuation; a sales-only batch (an exit) reads nothing extra.
-    /// An expired (or never opened) window starts afresh at this block.
+    /// @dev Only a batch with a buy pays for the valuation; a sales-only batch (an exit) reads only the window, to
+    /// credit an open one. An expired (or never opened) window starts afresh at a buy's block.
     function _openBuyWindow(
         address account,
         AtpRegistry.Enrollment memory enrollment,
         SwapStep[] calldata steps
-    ) internal view returns (bool hasBuy, uint256 cap, BuyWindow memory window) {
+    ) internal view returns (BuyState memory buys) {
         uint256 count = steps.length;
         for (uint256 i; i < count; ++i) {
             if (steps[i].tokenOut != numeraire) {
-                hasBuy = true;
+                buys.hasBuy = true;
                 break;
             }
         }
-        if (!hasBuy) return (false, 0, window);
-
-        window = buyWindowOf[account];
-        if (window.start == 0 || block.timestamp >= uint256(window.start) + BUY_WINDOW) {
-            window.start = SafeCast.toUint64(block.timestamp);
-            window.bought = 0;
+        BuyWindow memory window = buyWindowOf[account];
+        if (window.start != 0 && block.timestamp < uint256(window.start) + BUY_WINDOW) {
+            BuyChurn memory churn = buyChurnOf[account];
+            buys.live = true;
+            buys.start = window.start;
+            buys.bought = window.bought;
+            buys.gross = churn.gross;
+            buys.peakCap = churn.peakCap;
         }
-        cap = _buyCap(account, enrollment);
+        if (!buys.hasBuy) return buys;
+        if (!buys.live) {
+            buys.live = true;
+            buys.start = SafeCast.toUint64(block.timestamp);
+        }
+        buys.cap = _buyCap(account, enrollment);
+        if (buys.cap > buys.peakCap) buys.peakCap = buys.cap;
+        buys.grossCap = buys.peakCap * GROSS_BUY_MULTIPLE;
     }
 
     function _buyCap(address account, AtpRegistry.Enrollment memory enrollment)

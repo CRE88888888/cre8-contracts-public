@@ -126,8 +126,10 @@ contract AtpExecutorManyAssetsTest is Test {
             assertEq(tokens[i].balanceOf(address(this)), 0);
         }
         assertApproxEqAbs(usdt.balanceOf(address(this)), DEPOSIT, ROUNDING);
-        // Sales are never counted against the buy window.
-        assertEq(_bought(), BUY_EACH * ASSETS);
+        // Sales credit their output back to the window (cre8-contracts#76); the gross side keeps every buy.
+        assertLe(_bought(), ROUNDING);
+        (uint128 gross,) = executor.buyChurnOf(address(this));
+        assertEq(gross, BUY_EACH * ASSETS);
     }
 
     function test_buyAndSellEveryAssetInOneBatch() public {

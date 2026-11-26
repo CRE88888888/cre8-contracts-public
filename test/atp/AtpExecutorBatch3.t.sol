@@ -228,7 +228,9 @@ contract AtpExecutorBatch3Test is Batch3Fixture {
         _run(address(this), _one(_step(false, 10e18)));
         assertEq(asset.balanceOf(address(this)), before - 10e18);
         (, bought) = executor.buyWindowOf(address(this));
-        assertEq(bought, cap, "sale did not alter the buy counter");
+        assertLt(bought, cap, "the sale credited its output back (cre8-contracts#76)");
+        (uint128 gross,) = executor.buyChurnOf(address(this));
+        assertEq(gross, cap, "gross side never credited");
         _assertClean();
     }
 
@@ -307,7 +309,9 @@ contract AtpExecutorBatch3Test is Batch3Fixture {
         assertEq(usdt.balanceOf(FEE_RECIPIENT), feeUsdt + topUp);
         assertEq(asset.balanceOf(FEE_RECIPIENT), feeAsset);
         (, uint192 bought) = executor.buyWindowOf(address(this));
-        assertEq(bought, 8e18, "sales never replenish or consume buy quota");
+        assertLt(bought, 8e18, "sales credit the window back (cre8-contracts#76)");
+        (uint128 gross,) = executor.buyChurnOf(address(this));
+        assertEq(gross, 8e18, "every buy counted gross, sales never consume quota");
         (, uint192 c, uint256 paid) = executor.minFeeWindowOf(address(this));
         assertEq(c, notional);
         assertEq(paid, topUp);

@@ -237,6 +237,15 @@ manifest = {
     "yieldMarkets": yield_markets,
     "yieldMarketCountNote": "C3 table heading says 32, but has 30 rows (21 Venus, 4 Lista, 5 Aave); no unspecified markets added",
 }
+# Sections other deploy scripts own (DeployBorrowTestnet, the routing v2 set) and the record of superseded core
+# contracts are carried over from the manifest being replaced (cre8-contracts#76).
+try:
+    previous = json.load(open(path))
+except (OSError, ValueError):
+    previous = {}
+for key in ("borrow", "borrowV2", "superseded"):
+    if key in previous:
+        manifest[key] = previous[key]
 json.dump(manifest, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 print(f"{len(entries) - len(roles)} addresses have code; wrote {path}")

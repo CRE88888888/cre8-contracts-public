@@ -123,7 +123,8 @@ contract DeployTestnet is YieldViewPin {
     // ---- the same parameters as DeployAtpMainnet ----
     uint32 internal constant TWAP_WINDOW = 30 minutes;
     uint32 internal constant MAX_ORACLE_AGE = 1 hours;
-    uint16 internal constant MAX_BUY_BPS = 10_000;
+    /// @dev The ceiling: chain 97 runs at 2x since 2026-11 (setMaxBuyBps on the first executor; constructor arg since #76).
+    uint16 internal constant MAX_BUY_BPS = 20_000;
     /// @notice Minimum fee per swap batch (cre8-contracts#33): 0.30 USDT (mock USDT has 18 decimals); settable by the owner.
     uint256 internal constant MIN_BATCH_FEE = 0.3e18;
     /// @notice Proportional swap fee, the parameter table's 0.1% of max(0.1%, 0.30 USDT) (cre8-contracts#47).

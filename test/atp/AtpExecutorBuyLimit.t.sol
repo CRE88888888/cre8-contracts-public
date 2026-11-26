@@ -230,6 +230,10 @@ contract AtpExecutorBuyLimitTest is Test {
         (start,) = executor.buyWindowOf(address(this));
     }
 
+    function _gross() internal view returns (uint256 gross) {
+        (gross,) = executor.buyChurnOf(address(this));
+    }
+
     /// @dev The steps are built (oracle reads included) before `expectRevert` is armed, so the expectation
     /// binds to `executeRebalance` and not to a quote.
     function _runExpectLimit(AtpExecutor.SwapStep memory a, uint256 bought, uint256 cap) internal {
@@ -323,20 +327,137 @@ contract AtpExecutorBuyLimitTest is Test {
         assertEq(_bought(), 0, "a reverted batch records nothing");
     }
 
-    function test_roundTrip_isBlockedOnceTheCapIsSpent() public {
-        _run(_buy(tokenA, 1_000e18)); // 500 A, cap spent
-        // A -> USDT -> A again: the sale goes through inside the batch, the buy-back hits the cap.
-        _runExpectLimit(_sell(tokenA, 500e18), _buy(tokenA, 1_000e18), 2_000e18, 1_000e18);
+    function test_roundTrip_isBlockedOnceTheGrossCapIsSpent() public {
+        _run(_buy(tokenA, 1_000e18)); // 500 A, cap spent; peak cap 1000, gross cap 2000
+        // A -> USDT -> A again: the sale credits the window, the buy-back fits the gross cap exactly.
+        _run(_sell(tokenA, 500e18), _buy(tokenA, 1_000e18));
+        assertEq(_gross(), 2_000e18, "every buy counted gross");
+        // A second round trip: the sale still credits, but the gross cap is spent.
+        _runExpectLimit(_sell(tokenA, 500e18), _buy(tokenA, 1_000e18), 3_000e18, 2_000e18);
         assertEq(tokenA.balanceOf(address(this)), 500e18, "whole batch reverted");
     }
 
-    // ---- sales are never limited nor counted ----
+    // ---- sales are never limited, and credit an open window ----
 
-    function test_sales_goThroughWhenTheCapIsSpent_andAreNotCounted() public {
+    function test_sales_goThroughWhenTheCapIsSpent_andCreditTheWindow() public {
         _run(_buy(tokenA, 1_000e18));
         _run(_sell(tokenA, 500e18));
         assertEq(usdt.balanceOf(address(this)), 1_000e18, "exited to USDT");
-        assertEq(_bought(), 1_000e18, "sale did not move the counter");
+        assertEq(_bought(), 0, "sale credited its output back");
+        assertEq(_gross(), 1_000e18, "gross never credited");
+    }
+
+    function test_saleCredit_neverGoesBelowZero() public {
+        tokenA.mint(address(this), 1_000e18); // A held from before the window (2000 USDT worth)
+        _run(_buy(tokenB, 100e18));
+        _run(_sell(tokenA, 1_000e18));
+        assertEq(_bought(), 0, "credit stops at zero");
+        assertEq(_gross(), 100e18);
+    }
+
+    function test_saleInAStaleWindow_creditsNothing() public {
+        _run(_buy(tokenA, 1_000e18));
+        uint64 opened = _start();
+        vm.warp(block.timestamp + 1 days);
+        _sellAllA();
+        assertEq(_start(), opened, "a sales-only batch never opens a window");
+        assertEq(_bought(), 1_000e18, "stale window untouched (reads as empty)");
+        (, uint256 bought,) = executor.buyAllowance(address(this));
+        assertEq(bought, 0);
+    }
+
+    /// @dev The reported use: buy at cap, sell everything, buy the same amount again the same day.
+    function test_buyAtCap_sellAll_reBuySameDay_fullyFills() public {
+        _run(_buy(tokenA, 1_000e18)); // at the cap
+        _sellAllA();
+        (uint256 cap, uint256 bought,) = executor.buyAllowance(address(this));
+        assertEq(cap - bought, 1_000e18, "whole cap available again");
+        _run(_buy(tokenB, 1_000e18));
+        assertEq(tokenB.balanceOf(address(this)), 2_000e18, "re-buy fully filled");
+    }
+
+    /// @dev Sell everything, take the money out (value ~0), come back later the same day with fresh money.
+    function test_sellAll_withdraw_reBuyWithNewMoneySameDay_fullyFills() public {
+        _run(_buy(tokenA, 1_000e18));
+        _sellAllA();
+        usdt.transfer(OUTSIDER, 1_000e18); // proceeds to the owner wallet
+        usdt.mint(address(this), 600e18); // a new deposit
+        _run(_buy(tokenA, 600e18));
+        assertEq(tokenA.balanceOf(address(this)), 300e18);
+    }
+
+    /// @dev A DCA plan started after a same-day sell-all: the first period is a small buy against a small value.
+    function test_dcaFirstPeriod_afterSameDaySellAll_fullyFills() public {
+        _run(_buy(tokenA, 1_000e18));
+        _sellAllA();
+        usdt.transfer(OUTSIDER, 1_000e18);
+        usdt.mint(address(this), 50e18); // the first period, redeemed from the vault into the account
+        (uint256 cap, uint256 bought,) = executor.buyAllowance(address(this));
+        assertEq(cap - bought, 50e18);
+        _run(_buy(tokenB, 50e18));
+        assertEq(tokenB.balanceOf(address(this)), 100e18);
+    }
+
+    /// @dev A leaked key round-trips as fast as it can: what it can buy in one window is bounded by
+    /// GROSS_BUY_MULTIPLE x the peak cap, whatever the sale credits, in single batches or mixed ones.
+    function test_churnBySessionKey_isBoundedByTheGrossCap() public {
+        uint256 trips;
+        while (true) {
+            AtpExecutor.SwapStep memory buy = _buy(tokenA, 1_000e18);
+            if (_gross() + 1_000e18 > 2_000e18) {
+                _runExpectLimit(buy, _gross() + 1_000e18, 2_000e18);
+                break;
+            }
+            _run(buy);
+            _sellAllA();
+            ++trips;
+        }
+        assertEq(trips, 2, "two full round trips, then nothing");
+        assertEq(_gross(), 2_000e18);
+        // Not even dust gets through, and buyAllowance says so.
+        (uint256 cap, uint256 bought,) = executor.buyAllowance(address(this));
+        assertEq(cap, 1_000e18);
+        assertEq(bought, cap, "nothing left");
+        _runExpectLimit(_buy(tokenB, 1), 2_000e18 + 1, 2_000e18);
+        // Next window: back to normal.
+        vm.warp(block.timestamp + 1 days);
+        _run(_buy(tokenA, 1_000e18));
+        assertEq(_gross(), 1_000e18, "new window, fresh gross");
+    }
+
+    /// @dev The gross cap follows the window's peak, not the current value: a key cannot lower it by draining
+    /// the account (it cannot), and fresh money raises it.
+    function test_grossCap_followsThePeakCap() public {
+        _run(_buy(tokenA, 1_000e18)); // peak cap 1000
+        _sellAllA();
+        usdt.transfer(OUTSIDER, 900e18); // value 100, cap 100, peak still 1000
+        for (uint256 i; i < 10; ++i) {
+            _run(_buy(tokenA, 100e18));
+            _sellAllA();
+        }
+        assertEq(_gross(), 2_000e18, "1000 + 10 x 100 under a gross cap of 2 x 1000");
+        _runExpectLimit(_buy(tokenB, 1), 2_000e18 + 1, 2_000e18);
+        usdt.mint(address(this), 1_900e18); // value 2000: peak cap 2000, gross cap 4000
+        _run(_buy(tokenA, 2_000e18));
+        assertEq(_gross(), 4_000e18);
+    }
+
+    function testFuzz_churnNeverExceedsTheGrossCap(uint96[8] calldata amounts) public {
+        for (uint256 i; i < amounts.length; ++i) {
+            uint256 amount = bound(amounts[i], 1e12, usdt.balanceOf(address(this)));
+            (uint256 cap, uint256 bought,) = executor.buyAllowance(address(this));
+            if (bought + amount > cap) {
+                AtpExecutor.SwapStep[] memory steps = new AtpExecutor.SwapStep[](1);
+                steps[0] = _buy(tokenA, amount);
+                uint256 deadline = block.timestamp + 300;
+                vm.expectRevert();
+                executor.executeRebalance(address(this), steps, deadline);
+            } else {
+                _run(_buy(tokenA, amount));
+            }
+            if (tokenA.balanceOf(address(this)) != 0) _sellAllA();
+            assertLe(_gross(), 2_000e18, "gross <= 2 x peak cap (1000)");
+        }
     }
 
     function test_salesOnlyBatch_opensNoWindow() public {
