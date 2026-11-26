@@ -26,7 +26,7 @@ jobs:
       # 只看正式合約：lib/（vendored）、test/、script/、src/testnet/（模擬合約）不列入。
       # fail-on: none —— 結果寫在這個 job 的 log 裡給人看，不擋合併；
       # 要升級成擋合併，先把既有合約的發現清乾淨再改成 fail-on: high。
-      - uses: crytic/slither-action@v0.4.0
+      - uses: crytic/slither-action@v0.4.2
         with:
           target: .
           fail-on: none
